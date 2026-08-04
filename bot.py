@@ -3,213 +3,146 @@ import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-from strategy import pro_signal, update_result
+from strategy import pro_signal
 
-# ==============================
-# CONFIGURACIÓN
-# ==============================
+# =========================
+# CONFIG
+# =========================
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIRS = [
-    "EURUSD-OTC",
-    "EURJPY-OTC"
-]
-
-AMOUNT = 3338
+PAIR = "EURUSD-OTC"
+AMOUNT = 75
 EXPIRATION = 1
-MAX_OPERATIONS = 4  # 🔥 SOLO 4 OPERACIONES
 
-bot_active = True
-operations_count = 0
-last_candle_time = {}
+bot_activo = True
 last_update_id = None
 
-# ==============================
+
+# =========================
 # TELEGRAM
-# ==============================
-def send_telegram(msg):
+# =========================
+def enviar_telegram(msg):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg
-        })
-    except Exception as e:
-        print(f"❌ Error Telegram: {e}")
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
-# ==============================
-# COMANDOS TELEGRAM
-# ==============================
-def check_telegram_commands():
-    global bot_active, last_update_id, operations_count
+
+def leer_comandos():
+    global bot_activo, last_update_id
 
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        resp = requests.get(url).json()
+        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+        response = requests.get(url).json()
 
-        if not resp.get("ok"):
-            return
-
-        for update in resp.get("result", []):
+        for update in response["result"]:
             update_id = update["update_id"]
 
-            if last_update_id is None or update_id > last_update_id:
-                last_update_id = update_id
+            if last_update_id and update_id <= last_update_id:
+                continue
 
-                if "message" in update:
-                    text = update["message"].get("text", "")
+            last_update_id = update_id
 
-                    if text == "/stop":
-                        bot_active = False
-                        send_telegram("⛔ BOT DETENIDO")
+            if "message" in update:
+                text = update["message"].get("text", "")
 
-                    elif text == "/start":
-                        bot_active = True
-                        operations_count = 0  # 🔥 reinicia contador
-                        send_telegram("✅ BOT REINICIADO")
+                if text == "/start":
+                    bot_activo = True
+                    enviar_telegram("🟢 BOT ACTIVADO")
 
-    except Exception as e:
-        print("❌ Error Telegram:", e)
+                elif text == "/stop":
+                    bot_activo = False
+                    enviar_telegram("🔴 BOT DETENIDO")
 
-# ==============================
-# 🎯 SNIPER PRO (confirmación final)
-# ==============================
-def confirmacion_final(df, direccion):
-    last = df.iloc[-1]
+    except:
+        pass
 
-    if direccion == "call":
-        return last["close"] >= last["open"]
 
-    if direccion == "put":
-        return last["close"] <= last["open"]
+# =========================
+# CONEXIÓN
+# =========================
+def conectar():
+    iq = IQ_Option(EMAIL, PASSWORD)
+    status, reason = iq.connect()
 
-    return False
+    if not status:
+        print("❌ ERROR:", reason)
+        return None
 
-def esperar_y_confirmar(df, direccion):
-    while True:
-        segundos = time.time() % 60
+    print("✅ Conectado")
+    enviar_telegram("✅ Bot conectado a IQ Option")
+    iq.change_balance("PRACTICE")
+    return iq
 
-        if segundos >= 57:  # últimos segundos
-            if confirmacion_final(df, direccion):
-                print("✅ Confirmación final OK")
-                return True
-            else:
-                print("❌ Entrada cancelada")
-                return False
 
-        time.sleep(0.1)
-
-# ==============================
-# CONEXIÓN IQ OPTION
-# ==============================
-print("🔌 Conectando...")
-Iq = IQ_Option(EMAIL, PASSWORD)
-Iq.connect()
-
-if not Iq.check_connect():
-    print("❌ Error conexión")
+iq = conectar()
+if iq is None:
     exit()
 
-print("✅ Conectado")
-send_telegram("🤖 BOT SNIPER ACTIVADO")
 
-# ==============================
-# LOOP PRINCIPAL
-# ==============================
+# =========================
+# CONTROL
+# =========================
+last_candle_time = None
+operacion_ejecutada = False
+
+
+# =========================
+# LOOP
+# =========================
 while True:
     try:
-        check_telegram_commands()
+        leer_comandos()
 
-        if not bot_active:
-            time.sleep(2)
+        if not bot_activo:
+            time.sleep(1)
             continue
 
-        # 🔥 LIMITE DE OPERACIONES
-        if operations_count >= MAX_OPERATIONS:
-            bot_active = False
-            send_telegram("🏁 Límite de 3 operaciones alcanzado. Bot detenido.")
+        if not iq.check_connect():
+            enviar_telegram("🔁 Reconectando...")
+            iq = conectar()
+            time.sleep(3)
             continue
 
-        for pair in PAIRS:
-            try:
-                candles = Iq.get_candles(pair, 60, 100, time.time())
+        candles = iq.get_candles(PAIR, 60, 100, time.time())
 
-                if not candles:
-                    continue
+        if not candles:
+            time.sleep(1)
+            continue
 
-                df = pd.DataFrame([{
-                    "open": c["open"],
-                    "close": c["close"],
-                    "max": c["max"],
-                    "min": c["min"]
-                } for c in candles])
+        df = pd.DataFrame(candles)
+        current_candle_time = df.iloc[-1]["from"]
 
-                current_time = candles[-1]["from"]
+        # =========================
+        # NUEVA VELA
+        # =========================
+        if last_candle_time != current_candle_time:
+            last_candle_time = current_candle_time
+            operacion_ejecutada = False
 
-                # evitar repetir vela
-                if pair in last_candle_time and last_candle_time[pair] == current_time:
-                    continue
+            print("🟢 Nueva vela")
 
-                last_candle_time[pair] = current_time
+            signal = pro_signal(df)
 
-                print(f"📊 {pair} nueva vela")
+            if signal and not operacion_ejecutada:
+                enviar_telegram(f"🔥 Señal detectada: {signal.upper()}")
 
-                # ==============================
-                # SEÑAL
-                # ==============================
-                signal = pro_signal(df, aggressive=True)
-
-                if not signal:
-                    continue
-
-                direccion = signal["direction"]
-                score = signal["score"]
-
-                print(f"🔥 {pair} → {direccion} | score {score}")
-
-                send_telegram(
-                    f"📊 {pair}\n"
-                    f"Señal: {direccion.upper()}\n"
-                    f"Score: {score}"
-                )
-
-                # ==============================
-                # 🎯 SNIPER PRO
-                # ==============================
-                print("⏳ Esperando confirmación...")
-
-                if not esperar_y_confirmar(df, direccion):
-                    continue
-
-                print("🎯 DISPARO SNIPER")
-
-                status, trade_id = Iq.buy(AMOUNT, pair, direccion, EXPIRATION)
+                status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
                 if status:
-                    operations_count += 1
-
-                    send_telegram(f"🚀 {pair} → {direccion.upper()}")
-
-                    time.sleep(EXPIRATION * 60)
-
-                    result = Iq.check_win_v4(trade_id)
-
-                    update_result(result)
-
-                    send_telegram(f"📈 Resultado: {result}")
-
+                    enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
+                    operacion_ejecutada = True
                 else:
-                    print("❌ Error operación")
-
-            except Exception as e:
-                print(f"❌ Error en {pair}: {e}")
+                    enviar_telegram("❌ Error al ejecutar operación")
 
         time.sleep(1)
 
     except Exception as e:
-        print("❌ ERROR GENERAL:", e)
-        time.sleep(5)
+        print("❌ ERROR:", e)
+        enviar_telegram(f"❌ ERROR: {e}")
+        time.sleep(3)
