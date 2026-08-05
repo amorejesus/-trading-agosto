@@ -10,7 +10,7 @@ EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 30
+AMOUNT = 54.60
 EXPIRATION = 1  # 1 minuto
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
