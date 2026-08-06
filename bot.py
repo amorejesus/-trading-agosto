@@ -39,10 +39,11 @@ def leer_comandos():
         url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
         response = requests.get(url).json()
 
-        for update in response["result"]:
+        for update in response.get("result", []):
             update_id = update["update_id"]
 
-            if last_update_id and update_id <= last_update_id:
+            # evitar repetidos
+            if last_update_id is not None and update_id <= last_update_id:
                 continue
 
             last_update_id = update_id
@@ -50,16 +51,16 @@ def leer_comandos():
             if "message" in update:
                 text = update["message"].get("text", "")
 
-                if text == "/start":
+                if text == "/start" and not bot_activo:
                     bot_activo = True
                     enviar_telegram("🟢 BOT ACTIVADO")
 
-                elif text == "/stop":
+                elif text == "/stop" and bot_activo:
                     bot_activo = False
                     enviar_telegram("🔴 BOT DETENIDO")
 
-    except:
-        pass
+    except Exception as e:
+        print("Error Telegram:", e)
 
 
 # =========================
@@ -82,6 +83,10 @@ def conectar():
 iq = conectar()
 if iq is None:
     exit()
+
+# limpiar comandos viejos
+leer_comandos()
+time.sleep(2)
 
 # =========================
 # CONTROL
@@ -137,7 +142,7 @@ while True:
             continue
 
         # =========================
-        # ANTI-SPAM (EVITA BLOQUEOS)
+        # ANTI-SPAM (IQ BLOCK)
         # =========================
         if time.time() - last_trade_time < 10:
             continue
@@ -175,14 +180,14 @@ while True:
             trade_id = None
 
             # =========================
-            # PRIORIDAD DIGITAL
+            # DIGITAL
             # =========================
             if digital_open:
                 print("📊 DIGITAL")
                 status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, EXPIRATION)
 
             # =========================
-            # FALLBACK BINARIA
+            # BINARIA
             # =========================
             elif binary_open:
                 print("📊 BINARIA")
