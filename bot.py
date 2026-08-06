@@ -1,178 +1,174 @@
 import time
-import pandas as pd
-import logging
-from iqoptionapi.stable_api import IQ_Option
+import os
 import requests
+from iqoptionapi.stable_api import IQ_Option
+from strategy import pro_signal
 
-# ================= CONFIG =================
-EMAIL = "TU_EMAIL"
-PASSWORD = "TU_PASSWORD"
+# =========================
+# CONFIGURACIÓN
+# =========================
+EMAIL = os.getenv("IQ_EMAIL")
+PASSWORD = os.getenv("IQ_PASSWORD")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 55
+TIMEFRAME = 30
 EXPIRATION = 1
 
-TELEGRAM_TOKEN = "TU_TOKEN"
-CHAT_ID = "TU_CHAT_ID"
-
-# =========================================
-
-logging.getLogger().setLevel(logging.CRITICAL)
-
-bot_active = False
 last_candle_time = None
-last_signal_time = 0
 trade_open = False
 
-# ================= TELEGRAM =================
 
-def send_telegram(msg):
+# =========================
+# TELEGRAM
+# =========================
+def enviar_telegram(msg):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg}
-        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
     except:
         pass
 
-def check_commands():
-    global bot_active
 
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        data = requests.get(url).json()
-
-        if not data["result"]:
-            return
-
-        last_msg = data["result"][-1]["message"]["text"]
-
-        if last_msg == "/start":
-            bot_active = True
-            send_telegram("🤖 BOT ACTIVADO")
-
-        elif last_msg == "/stop":
-            bot_active = False
-            send_telegram("🛑 BOT DETENIDO")
-
-    except:
-        pass
-
-# ================= CONEXIÓN =================
-
-def connect():
+# =========================
+# CONEXIÓN IQ OPTION
+# =========================
+def conectar():
     iq = IQ_Option(EMAIL, PASSWORD)
     iq.connect()
 
     if not iq.check_connect():
         print("❌ Error de conexión")
-        send_telegram("❌ Error de conexión")
         return None
 
-    print("✅ Conectado")
-    send_telegram("✅ Bot conectado")
+    print("✅ Conectado a IQ Option")
     iq.change_balance("PRACTICE")
     return iq
 
-# ================= DATOS =================
 
-def get_candles(iq):
-    candles = iq.get_candles(PAIR, 60, 50, time.time())
-
-    df = pd.DataFrame(candles)
-
-    df.rename(columns={
-        "min": "low",
-        "max": "high"
-    }, inplace=True)
-
-    return df
-
-# ================= ESTRATEGIA =================
-
-def get_signal(df):
-    # Tendencia bajista simple
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    # Continuidad bajista
-    if prev["close"] > prev["open"] and last["close"] < last["open"]:
-        return "put"
-
-    # Continuidad alcista
-    if prev["close"] < prev["open"] and last["close"] > last["open"]:
-        return "call"
-
-    return None
-
-# ================= EJECUCIÓN =================
-
-def execute_trade(iq, signal):
-    global trade_open
-
+# =========================
+# VALIDAR ACTIVO
+# =========================
+def activo_abierto(iq, pair):
     try:
-        print(f"📊 Ejecutando {signal}")
+        activos = iq.get_all_open_time()
+        return activos["binary"][pair]["open"]
+    except:
+        return False
 
-        success, order_id = iq.buy(
-            AMOUNT,
-            PAIR,
-            signal,
-            EXPIRATION
-        )
 
-        if success:
-            send_telegram(f"🔥 Entrada ejecutada: {signal.upper()}")
-            trade_open = True
+# =========================
+# EJECUTAR OPERACIÓN
+# =========================
+def ejecutar_operacion(iq, pair, direccion, monto):
+    try:
+        direccion = direccion.lower()
+
+        print(f"📡 Ejecutando: {direccion} en {pair}")
+
+        check, order_id = iq.buy(monto, pair, direccion, EXPIRATION)
+
+        if check:
+            print("✅ OPERACIÓN EJECUTADA")
+            enviar_telegram(f"✅ Operación ejecutada: {direccion.upper()}")
+            return True
         else:
-            send_telegram("❌ Error al ejecutar operación")
+            print("❌ IQ no ejecutó la orden")
+            enviar_telegram("❌ Error al ejecutar operación")
+            return False
 
     except Exception as e:
-        send_telegram(f"❌ Error: {str(e)}")
+        print(f"❌ ERROR: {e}")
+        enviar_telegram(f"❌ Error: {e}")
+        return False
 
-# ================= MAIN =================
 
+# =========================
+# LOOP PRINCIPAL
+# =========================
 def run():
-    global last_candle_time, last_signal_time, trade_open
+    global last_candle_time, trade_open
 
-    iq = connect()
-    if not iq:
+    iq = conectar()
+    if iq is None:
         return
+
+    enviar_telegram("🤖 BOT ACTIVO")
 
     while True:
         try:
-            check_commands()
+            # =========================
+            # OBTENER VELAS
+            # =========================
+            velas = iq.get_candles(PAIR, TIMEFRAME, 50, time.time())
 
-            if not bot_active:
-                time.sleep(2)
+            if not velas or len(velas) < 10:
+                time.sleep(1)
                 continue
 
-            df = get_candles(iq)
+            current_candle_time = velas[-1]["from"]
 
-            current_time = df.iloc[-1]["from"]
-
-            # Detectar nueva vela
-            if last_candle_time != current_time:
-                last_candle_time = current_time
+            # =========================
+            # NUEVA VELA DETECTADA
+            # =========================
+            if last_candle_time != current_candle_time:
+                last_candle_time = current_candle_time
                 trade_open = False
-                print("🟢 Nueva vela")
 
-                signal = get_signal(df)
+                print("🕯 Nueva vela detectada")
 
-                if signal and not trade_open:
+                # =========================
+                # CONVERTIR A DATAFRAME
+                # =========================
+                import pandas as pd
+                df = pd.DataFrame(velas)
 
-                    # Esperar apertura siguiente vela
-                    time.sleep(2)
+                # =========================
+                # ANALIZAR VELA CERRADA
+                # =========================
+                signal = pro_signal(df)
 
-                    execute_trade(iq, signal)
+                if signal:
+                    print(f"🔥 Señal: {signal.upper()}")
+                    enviar_telegram(f"🔥 Señal detectada: {signal.upper()}")
+
+                    # =========================
+                    # VALIDAR ACTIVO
+                    # =========================
+                    if not activo_abierto(iq, PAIR):
+                        print("⛔ Activo cerrado")
+                        continue
+
+                    # =========================
+                    # CALCULAR MONTO DINÁMICO
+                    # =========================
+                    balance = iq.get_balance()
+                    monto = balance * 0.05  # 5%
+
+                    # =========================
+                    # ESPERAR APERTURA DE VELA
+                    # =========================
+                    print("⏳ Esperando apertura de vela...")
+                    time.sleep(1)
+
+                    # =========================
+                    # EJECUTAR
+                    # =========================
+                    if not trade_open:
+                        ejecutado = ejecutar_operacion(iq, PAIR, signal, monto)
+                        trade_open = ejecutado
 
             time.sleep(1)
 
         except Exception as e:
-            print(f"ERROR: {e}")
-            send_telegram(f"❌ ERROR GENERAL: {str(e)}")
-            time.sleep(5)
+            print(f"❌ ERROR GENERAL: {e}")
+            time.sleep(2)
 
-# ================= START =================
 
+# =========================
+# START
+# =========================
 if __name__ == "__main__":
     run()
