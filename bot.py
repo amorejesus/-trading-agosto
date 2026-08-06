@@ -5,21 +5,19 @@ import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
 from strategy import pro_signal
 
-# =========================
-# CONFIG
-# =========================
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIR = "EURUSD-OTC"
+PAIR = "EURUSD"
 AMOUNT = 54.60
 EXPIRATION = 1
 
-bot_activo = False
-last_update_id = 0
+bot_activo = True
+last_update_id = None
+
 
 # =========================
 # TELEGRAM
@@ -30,33 +28,6 @@ def enviar_telegram(msg):
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
     except:
         pass
-
-
-def leer_comandos():
-    global bot_activo, last_update_id
-
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}"
-        response = requests.get(url).json()
-
-        for update in response.get("result", []):
-            last_update_id = update["update_id"]
-
-            if "message" in update:
-                text = update["message"].get("text", "")
-
-                if text == "/start":
-                    if not bot_activo:
-                        bot_activo = True
-                        enviar_telegram("🟢 BOT ACTIVADO")
-
-                elif text == "/stop":
-                    if bot_activo:
-                        bot_activo = False
-                        enviar_telegram("🔴 BOT DETENIDO")
-
-    except Exception as e:
-        print("Error Telegram:", e)
 
 
 # =========================
@@ -71,7 +42,8 @@ def conectar():
         return None
 
     print("✅ Conectado")
-    enviar_telegram("✅ Bot conectado a IQ Option")
+    enviar_telegram("✅ SNIPER conectado")
+
     iq.change_balance("PRACTICE")
     return iq
 
@@ -80,20 +52,30 @@ iq = conectar()
 if iq is None:
     exit()
 
+
 # =========================
-# CONTROL
+# ESPERA ACTIVA SNIPER
+# =========================
+def esperar_inicio_vela():
+    while True:
+        t = time.time()
+        segundos = int(t) % 60
+        miliseg = int((t - int(t)) * 1000)
+
+        # 🎯 VENTANA SNIPER
+        if segundos == 0 and miliseg >= 800:
+            return
+
+        time.sleep(0.001)  # 🔥 ultra precisión
+
+
+# =========================
+# LOOP
 # =========================
 last_candle_time = None
-operacion_ejecutada = False
-last_trade_time = 0
 
-# =========================
-# LOOP PRINCIPAL
-# =========================
 while True:
     try:
-        leer_comandos()
-
         if not bot_activo:
             time.sleep(1)
             continue
@@ -101,75 +83,52 @@ while True:
         if not iq.check_connect():
             enviar_telegram("🔁 Reconectando...")
             iq = conectar()
-            time.sleep(3)
             continue
 
-        # =========================
-        # OBTENER VELAS
-        # =========================
+        # 🔥 ESPERA SNIPER
+        esperar_inicio_vela()
+
         candles = iq.get_candles(PAIR, 60, 100, time.time())
-
-        if not candles:
-            time.sleep(1)
-            continue
-
         df = pd.DataFrame(candles)
+
         current_candle_time = df.iloc[-1]["from"]
 
-        # =========================
-        # NUEVA VELA
-        # =========================
-        if last_candle_time != current_candle_time:
-            last_candle_time = current_candle_time
-            operacion_ejecutada = False
-            print("🟢 Nueva vela")
+        if last_candle_time == current_candle_time:
+            continue
 
-        # =========================
-        # SEÑAL
-        # =========================
+        last_candle_time = current_candle_time
+
         signal = pro_signal(df)
 
-        if signal not in ["call", "put"]:
-            time.sleep(0.5)
-            continue
+        if signal:
+            enviar_telegram(f"🔥 SNIPER: {signal.upper()}")
 
-        # =========================
-        # ANTI-SPAM IQ
-        # =========================
-        if time.time() - last_trade_time < 15:
-            continue
+            # 🔥 VALIDAR MERCADO
+            open_assets = iq.get_all_open_time()
 
-        # =========================
-        # TIMING DE ENTRADA
-        # =========================
-        segundo = int(time.time()) % 60
+            if not open_assets["binary"][PAIR]["open"]:
+                enviar_telegram("❌ Mercado cerrado")
+                continue
 
-        if 2 <= segundo <= 5 and not operacion_ejecutada:
+            # 🔥 EJECUCIÓN INMEDIATA
+            t1 = time.time()
 
-            enviar_telegram(f"🔥 ENTRADA: {signal.upper()}")
+            status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
-            status = False
-            trade_id = None
+            t2 = time.time()
 
-            try:
-                status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, signal, EXPIRATION)
-            except Exception as e:
-                trade_id = str(e)
+            delay = round((t2 - t1) * 1000, 2)
 
-            # =========================
-            # RESULTADO REAL
-            # =========================
+            print("⏱ Delay:", delay, "ms")
+
             if status:
-                enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
-                operacion_ejecutada = True
-                last_trade_time = time.time()
+                enviar_telegram(f"✅ SNIPER OK ({delay}ms)")
             else:
-                enviar_telegram(f"❌ ERROR REAL: {trade_id}")
-                print("ERROR REAL:", trade_id)
+                enviar_telegram(f"❌ ERROR IQ: {trade_id}")
 
         time.sleep(0.5)
 
     except Exception as e:
-        print("❌ ERROR CRÍTICO:", e)
-        enviar_telegram(f"❌ ERROR CRÍTICO: {e}")
-        time.sleep(3)
+        print("❌ ERROR:", e)
+        enviar_telegram(f"❌ ERROR: {e}")
+        time.sleep(2)
