@@ -15,7 +15,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 54.60
+AMOUNT = 200
 EXPIRATION = 1
 
 bot_activo = True
@@ -136,27 +136,34 @@ while True:
             continue
 
         # =========================
-        # TIMING
+        # TIMING (MEJORADO)
         # =========================
         segundo = int(time.time()) % 60
 
         if (
             signal
             and not operacion_ejecutada
-            and 1 <= segundo <= 4
+            and 2 <= segundo <= 6
         ):
             enviar_telegram(f"🔥 ENTRADA: {signal.upper()}")
 
             action = "call" if signal == "call" else "put"
 
-            # 🔥 SOLUCIÓN CLAVE AQUÍ
-            status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, EXPIRATION)
+            # =========================
+            # EJECUCIÓN INTELIGENTE
+            # =========================
+            status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, 1)
+
+            if not status:
+                print("⚠️ Digital falló, intentando binaria...")
+
+                status, trade_id = iq.buy(AMOUNT, PAIR, action, 1)
 
             if status:
                 enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
                 operacion_ejecutada = True
             else:
-                enviar_telegram(f"❌ ERROR IQ: {trade_id}")
+                enviar_telegram(f"❌ ERROR REAL: {trade_id}")
                 print("ERROR DETALLE:", trade_id)
 
         time.sleep(0.5)
