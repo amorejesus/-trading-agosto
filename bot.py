@@ -83,13 +83,11 @@ iq = conectar()
 if iq is None:
     exit()
 
-
 # =========================
 # CONTROL
 # =========================
 last_candle_time = None
 operacion_ejecutada = False
-
 
 # =========================
 # LOOP PRINCIPAL
@@ -133,35 +131,26 @@ while True:
         # =========================
         signal = pro_signal(df)
 
-        # =========================
-        # VALIDACIONES
-        # =========================
         if signal not in ["call", "put"]:
             time.sleep(0.5)
             continue
 
-        # verificar mercado abierto
-        try:
-            open_time = iq.get_all_open_time()
-            if not open_time["binary"][PAIR]["open"]:
-                print("❌ Mercado cerrado")
-                time.sleep(1)
-                continue
-        except:
-            pass
-
         # =========================
-        # TIMING (MEJORADO)
+        # TIMING
         # =========================
         segundo = int(time.time()) % 60
 
         if (
-            not operacion_ejecutada
+            signal
+            and not operacion_ejecutada
             and 1 <= segundo <= 4
         ):
             enviar_telegram(f"🔥 ENTRADA: {signal.upper()}")
 
-            status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
+            action = "call" if signal == "call" else "put"
+
+            # 🔥 SOLUCIÓN CLAVE AQUÍ
+            status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, EXPIRATION)
 
             if status:
                 enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
