@@ -1,144 +1,158 @@
-# ==============================
-# RESULTADOS
-# ==============================
-wins = 0
-losses = 0
+import pandas as pd
 
-def update_result(result):
-    global wins, losses
-
+# =========================
+# PULLBACK REAL
+# =========================
+def pullback_filter(df, direction):
     try:
-        result = float(result)
-    except:
-        result = 0
+        if len(df) < 20:
+            return False
 
-    if result > 0:
-        wins += 1
-    else:
-        losses += 1
+        candles = df.iloc[-6:-1]
 
-    print(f"📊 WIN: {wins} | LOSS: {losses}", flush=True)
+        closes = candles["close"].astype(float).values
+        opens = candles["open"].astype(float).values
+        highs = candles["max"].astype(float).values
+        lows = candles["min"].astype(float).values
+
+        retroceso = 0
+
+        # Detectar retroceso (2 a 4 velas en contra)
+        for i in range(len(closes) - 1, -1, -1):
+            if direction == "call":
+                if closes[i] < opens[i]:
+                    retroceso += 1
+                else:
+                    break
+            elif direction == "put":
+                if closes[i] > opens[i]:
+                    retroceso += 1
+                else:
+                    break
+
+        if retroceso < 2 or retroceso > 4:
+            return False
+
+        # Validar debilidad del retroceso
+        for i in range(-retroceso, 0):
+            cuerpo = abs(closes[i] - opens[i])
+            rango = highs[i] - lows[i]
+
+            if rango == 0:
+                return False
+
+            fuerza = cuerpo / rango
+
+            if fuerza > 0.5:
+                return False
+
+        # Confirmación (vela fuerte a favor)
+        last = df.iloc[-2]
+
+        open_ = float(last["open"])
+        close = float(last["close"])
+        high = float(last["max"])
+        low = float(last["min"])
+
+        rango = high - low
+        if rango == 0:
+            return False
+
+        cuerpo = abs(close - open_)
+        fuerza = cuerpo / rango
+
+        if fuerza < 0.6:
+            return False
+
+        if direction == "call" and close > open_:
+            return True
+
+        if direction == "put" and close < open_:
+            return True
+
+        return False
+
+    except Exception as e:
+        print("Error pullback:", e)
+        return False
 
 
-# ==============================
-# ANALIZAR VELA
-# ==============================
-def analizar_vela(vela):
-    open_ = vela["open"]
-    close = vela["close"]
-    high = vela["max"]
-    low = vela["min"]
-
-    cuerpo = abs(close - open_)
-    rango = high - low
-
-    if rango == 0:
-        return None
-
-    fuerza = cuerpo / rango
-
-    return {
-        "alcista": close > open_,
-        "bajista": close < open_,
-        "cuerpo": cuerpo,
-        "rango": rango,
-        "fuerza": fuerza,
-        "open": open_,
-        "close": close,
-        "high": high,
-        "low": low
-    }
-
-
-# ==============================
-# DETECTAR TENDENCIA
-# ==============================
-def detectar_tendencia(df):
-    ultimas = df.tail(5)
-
-    highs = ultimas["max"].values
-    lows = ultimas["min"].values
-
-    alcista = all(highs[i] > highs[i-1] for i in range(1, len(highs)))
-    bajista = all(lows[i] < lows[i-1] for i in range(1, len(lows)))
-
-    if alcista:
-        return "call"
-
-    if bajista:
-        return "put"
-
-    return None
-
-
-# ==============================
-# SEÑAL PRINCIPAL (CORREGIDA)
-# ==============================
+# =========================
+# SEÑAL PRINCIPAL
+# =========================
 def pro_signal(df):
-
-    if len(df) < 10:
-        return None
-
-    # 🔥 USAMOS SOLO VELAS CERRADAS
-    vela_fuerza = df.iloc[-3]
-    vela_confirm = df.iloc[-2]
-
-    info_fuerza = analizar_vela(vela_fuerza)
-    info_confirm = analizar_vela(vela_confirm)
-
-    if info_fuerza is None or info_confirm is None:
-        return None
-
-    # ==============================
-    # TENDENCIA
-    # ==============================
-    direccion = detectar_tendencia(df)
-
-    if direccion is None:
-        return None
-
-    # ==============================
-    # IMPULSO (vela fuerte)
-    # ==============================
-    if info_fuerza["fuerza"] < 0.6:
-        return None
-
-    if direccion == "call" and not info_fuerza["alcista"]:
-        return None
-
-    if direccion == "put" and not info_fuerza["bajista"]:
-        return None
-
-    # ==============================
-    # 🔥 VALIDACIÓN REAL (ANTI ERROR)
-    # ==============================
-    if direccion == "call":
-
-        # ❌ si vela roja → cancelar
-        if info_confirm["close"] <= info_confirm["open"]:
+    try:
+        if df is None or len(df) < 30:
             return None
 
-        # ❌ si rompe mínimo → giro
-        if info_confirm["low"] < info_fuerza["low"]:
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(df)
+
+        last = df.iloc[-2]
+        prev = df.iloc[-3]
+        prev2 = df.iloc[-4]
+
+        open_ = float(last["open"])
+        close = float(last["close"])
+        high = float(last["max"])
+        low = float(last["min"])
+
+        rango = high - low
+        if rango == 0:
             return None
 
-    if direccion == "put":
+        cuerpo = abs(close - open_)
+        fuerza = cuerpo / rango
 
-        # ❌ si vela verde → cancelar
-        if info_confirm["close"] >= info_confirm["open"]:
+        # Filtro de fuerza
+        if fuerza < 0.55:
             return None
 
-        # ❌ si rompe máximo → giro
-        if info_confirm["high"] > info_fuerza["high"]:
+        # Mechas
+        mecha_sup = high - max(open_, close)
+        mecha_inf = min(open_, close) - low
+
+        if mecha_sup > cuerpo and mecha_inf > cuerpo:
             return None
 
-    # ==============================
-    # FUERZA CONFIRMACIÓN
-    # ==============================
-    if info_confirm["fuerza"] < 0.55:
+        # Tendencia simple (últimos 10 cierres)
+        closes = df["close"].astype(float)
+        ultimos = closes.iloc[-10:]
+
+        alcista = all(x < y for x, y in zip(ultimos, ultimos[1:]))
+        bajista = all(x > y for x, y in zip(ultimos, ultimos[1:]))
+
+        # Filtro lateralidad
+        rango_total = max(ultimos) - min(ultimos)
+        if rango_total < (closes.mean() * 0.001):
+            return None
+
+        # Evitar vela exagerada
+        if cuerpo > (rango * 0.9):
+            return None
+
+        # CALL
+        if (
+            close > open_
+            and close > float(prev["close"])
+            and float(prev["close"]) > float(prev2["close"])
+            and mecha_sup < cuerpo * 0.4
+            and alcista
+        ):
+            return "call"
+
+        # PUT
+        if (
+            close < open_
+            and close < float(prev["close"])
+            and float(prev["close"]) < float(prev2["close"])
+            and mecha_inf < cuerpo * 0.4
+            and bajista
+        ):
+            return "put"
+
         return None
 
-    # ==============================
-    # SEÑAL FINAL
-    # ==============================
-    return direccion, "continuidad_sniper", 100
+    except Exception as e:
+        print("Error estrategia:", e)
+        return None
