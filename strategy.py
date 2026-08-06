@@ -1,10 +1,93 @@
 import pandas as pd
 
+=========================
+
+PULLBACK REAL
+
+=========================
+
+def pullback_filter(df, direction):
+try:
+if len(df) < 20:
+return False
+
+    candles = df.iloc[-6:-1]
+
+    closes = candles["close"].astype(float).values
+    opens = candles["open"].astype(float).values
+    highs = candles["max"].astype(float).values
+    lows = candles["min"].astype(float).values
+
+    retroceso = 0
+
+    for i in range(len(closes) - 1, 0, -1):
+        if direction == "call":
+            if closes[i] < opens[i]:
+                retroceso += 1
+            else:
+                break
+
+        elif direction == "put":
+            if closes[i] > opens[i]:
+                retroceso += 1
+            else:
+                break
+
+    # validar longitud del pullback
+    if retroceso < 2 or retroceso > 4:
+        return False
+
+    # validar debilidad del retroceso
+    for i in range(-retroceso, 0):
+        cuerpo = abs(closes[i] - opens[i])
+        rango = highs[i] - lows[i]
+
+        if rango == 0:
+            return False
+
+        fuerza = cuerpo / rango
+
+        if fuerza > 0.5:
+            return False
+
+    # vela de confirmación
+    last = df.iloc[-2]
+
+    open_ = float(last["open"])
+    close = float(last["close"])
+    high = float(last["max"])
+    low = float(last["min"])
+
+    rango = high - low
+    if rango == 0:
+        return False
+
+    cuerpo = abs(close - open_)
+    fuerza = cuerpo / rango
+
+    if fuerza < 0.6:
+        return False
+
+    # confirmación dirección
+    if direction == "call" and close > open_:
+        return True
+
+    if direction == "put" and close < open_:
+        return True
+
+    return False
+
+except:
+    return False
+
+=========================
+
+SEÑAL PRINCIPAL
+
+=========================
+
 def pro_signal(df):
 try:
-# =========================
-# VALIDACIÓN
-# =========================
 if df is None or len(df) < 30:
 return None
 
@@ -24,15 +107,14 @@ return None
     low = float(last["min"])
 
     rango = high - low
-    cuerpo = abs(close - open_)
-
     if rango == 0:
         return None
 
+    cuerpo = abs(close - open_)
     fuerza = cuerpo / rango
 
     # =========================
-    # FILTRO DE FUERZA
+    # FILTRO FUERZA
     # =========================
     if fuerza < 0.55:
         return None
@@ -43,56 +125,54 @@ return None
     mecha_sup = high - max(open_, close)
     mecha_inf = min(open_, close) - low
 
-    # evitar indecisión total
+    # evitar indecisión
     if mecha_sup > cuerpo and mecha_inf > cuerpo:
         return None
 
     # =========================
-    # TENDENCIA REAL (estructura)
+    # TENDENCIA REAL
     # =========================
     closes = df["close"].astype(float)
-
-    # últimos swings
     ultimos = closes.iloc[-10:]
 
-    maximos_crecientes = all(x < y for x, y in zip(ultimos, ultimos[1:]))
-    minimos_decrecientes = all(x > y for x, y in zip(ultimos, ultimos[1:]))
+    alcista = all(x < y for x, y in zip(ultimos, ultimos[1:]))
+    bajista = all(x > y for x, y in zip(ultimos, ultimos[1:]))
 
     # =========================
-    # FILTRO DE RANGO
+    # FILTRO LATERALIDAD
     # =========================
     rango_total = max(ultimos) - min(ultimos)
 
     if rango_total < (closes.mean() * 0.001):
-        return None  # mercado lateral
+        return None
 
     # =========================
-    # EVITAR SOBREEXTENSIÓN
+    # EVITAR VELAS TRAMPA
     # =========================
     if cuerpo > (rango * 0.9):
-        return None  # vela exagerada (posible trampa)
+        return None
 
     # =========================
-    # CONTINUIDAD ALCISTA (CALL)
+    # CONTINUIDAD ALCISTA
     # =========================
     if (
         close > open_
         and close > float(prev["close"])
         and float(prev["close"]) > float(prev2["close"])
         and mecha_sup < cuerpo * 0.4
-        and maximos_crecientes
+        and alcista
     ):
         return "call"
 
     # =========================
-    # CONTINUIDAD BAJISTA (PUT)
+    # CONTINUIDAD BAJISTA
     # =========================
     if (
         close < open_
         and close < float(prev["close"])
         and float(prev["close"]) < float(prev2["close"])
         and mecha_inf < cuerpo * 0.4
-        and minimos_decrecientes
+        and bajista
     ):
         return "put"
 
