@@ -1,43 +1,37 @@
-import numpy as np
-
-def pro_signal(df_m5, df_m1):
+def pro_signal(df):
     try:
-        if len(df_m5) < 20 or len(df_m1) < 20:
+        if df is None or len(df) < 3:
             return None
 
-        # ===== TENDENCIA M5 =====
-        highs = [c['max'] for c in df_m5[-10:]]
-        lows = [c['min'] for c in df_m5[-10:]]
+        # ===== VELA CERRADA =====
+        vela = df[-2]
 
-        tendencia = None
+        open_ = float(vela["open"])
+        close = float(vela["close"])
+        high = float(vela["max"])
+        low = float(vela["min"])
 
-        if all(highs[i] > highs[i-1] for i in range(1, len(highs))) and \
-           all(lows[i] > lows[i-1] for i in range(1, len(lows))):
-            tendencia = "call"
-
-        elif all(highs[i] < highs[i-1] for i in range(1, len(highs))) and \
-             all(lows[i] < lows[i-1] for i in range(1, len(lows))):
-            tendencia = "put"
-
-        if not tendencia:
-            return None
-
-        # ===== CONFIRMACIÓN M1 =====
-        vela = df_m1[-1]
-
-        cuerpo = abs(vela['close'] - vela['open'])
-        rango = vela['max'] - vela['min']
-
+        # ===== VALIDAR RANGO =====
+        rango = high - low
         if rango == 0:
             return None
 
-        fuerza = cuerpo / rango
+        # ===== CALCULAR MECHAS =====
+        mecha_sup = high - max(open_, close)
+        mecha_inf = min(open_, close) - low
 
-        if tendencia == "call" and vela['close'] > vela['open'] and fuerza > 0.6:
-            return "call"
+        # ===== CONDICIÓN SIN MECHAS =====
+        # tolerancia mínima por precisión del broker
+        tolerancia = 0.00001
 
-        if tendencia == "put" and vela['close'] < vela['open'] and fuerza > 0.6:
-            return "put"
+        if mecha_sup <= tolerancia and mecha_inf <= tolerancia:
+
+            # ===== DIRECCIÓN =====
+            if close > open_:
+                return "call"
+
+            elif close < open_:
+                return "put"
 
         return None
 
