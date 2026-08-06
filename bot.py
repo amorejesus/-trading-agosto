@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-from strategy import pro_signal, pullback_filter
+from strategy import pro_signal  # 👈 solo necesitas esto
 
 # =========================
 # CONFIG
@@ -15,7 +15,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 157
+AMOUNT = 54.60
 EXPIRATION = 1
 
 bot_activo = True
@@ -83,6 +83,7 @@ iq = conectar()
 if iq is None:
     exit()
 
+
 # =========================
 # CONTROL
 # =========================
@@ -107,7 +108,9 @@ while True:
             time.sleep(3)
             continue
 
-        # Obtener velas
+        # =========================
+        # OBTENER VELAS
+        # =========================
         candles = iq.get_candles(PAIR, 60, 100, time.time())
 
         if not candles:
@@ -117,39 +120,35 @@ while True:
         df = pd.DataFrame(candles)
         current_candle_time = df.iloc[-1]["from"]
 
-        # detectar nueva vela
+        # =========================
+        # NUEVA VELA
+        # =========================
         if last_candle_time != current_candle_time:
             last_candle_time = current_candle_time
             operacion_ejecutada = False
             print("🟢 Nueva vela")
 
         # =========================
-        # SEÑAL
+        # SEÑAL (YA INCLUYE TODO)
         # =========================
         signal = pro_signal(df)
 
-        if signal:
-            pullback_ok = pullback_filter(df, signal)
-        else:
-            pullback_ok = False
-
         # =========================
-        # TIMING SNIPER (segundos 0-2)
+        # TIMING SNIPER (segundo 0-2)
         # =========================
         segundo = int(time.time()) % 60
 
         if (
             signal
-            and pullback_ok
             and not operacion_ejecutada
             and segundo <= 2
         ):
-            enviar_telegram(f"🔥 ENTRADA SNIPER: {signal.upper()}")
+            enviar_telegram(f"🔥 SNIPER: {signal.upper()}")
 
             status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
             if status:
-                enviar_telegram(f"✅ OPERACIÓN EJECUTADA: {signal.upper()}")
+                enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
                 operacion_ejecutada = True
             else:
                 enviar_telegram("❌ Error al ejecutar operación")
