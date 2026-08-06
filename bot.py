@@ -15,10 +15,12 @@ PAR = "EURUSD-OTC"
 MONTO = 2
 EXPIRACION = 1
 
+# ================= VARIABLES =================
 iq = None
 bot_activo = True
-ultimo_trade = 0
 last_update_id = 0
+ultimo_trade = 0
+last_candle_time = None
 
 # ================= TELEGRAM =================
 def enviar_telegram(msg):
@@ -26,7 +28,7 @@ def enviar_telegram(msg):
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
     except Exception as e:
-        print("Error Telegram:", e)
+        print("❌ Error Telegram:", e)
 
 
 def leer_comandos():
@@ -51,7 +53,7 @@ def leer_comandos():
                     enviar_telegram("🔴 BOT DETENIDO")
 
     except Exception as e:
-        print("Error comandos:", e)
+        print("❌ Error comandos:", e)
 
 # ================= CONEXIÓN =================
 def conectar():
@@ -75,26 +77,13 @@ def conectar():
 
         time.sleep(5)
 
-# ================= SNIPER =================
-def esperar_pre_cierre():
-    while True:
-        t = time.time()
-        sec = int(t) % 60
-        ms = int((t - int(t)) * 1000)
-
-        if (sec == 58 and ms >= 500) or sec == 59:
-            return
-
-        time.sleep(0.001)
-
-# ================= OPERAR =================
+# ================= EJECUCIÓN =================
 def ejecutar(signal):
     global ultimo_trade
 
+    # evitar repetir en la misma vela
     if time.time() - ultimo_trade < 55:
         return
-
-    esperar_pre_cierre()
 
     try:
         print(f"🔥 Ejecutando {signal}")
@@ -102,24 +91,26 @@ def ejecutar(signal):
         status, trade_id = iq.buy(MONTO, PAR, signal, EXPIRACION)
 
         if status:
-            enviar_telegram(f"✅ OPERACIÓN {signal}")
             print("✅ Operación ejecutada")
+            enviar_telegram(f"✅ OPERACIÓN {signal.upper()}")
             ultimo_trade = time.time()
         else:
+            print("❌ Error IQ:", trade_id)
             enviar_telegram(f"❌ ERROR IQ: {trade_id}")
-            print("❌ Error:", trade_id)
 
     except Exception as e:
-        enviar_telegram(f"❌ ERROR: {e}")
         print("❌ Error ejecución:", e)
+        enviar_telegram(f"❌ ERROR: {e}")
 
-# ================= MAIN =================
+# ================= LOOP PRINCIPAL =================
 def main():
+    global last_candle_time
+
     conectar()
 
     while True:
         try:
-            print("🔄 Bot corriendo...")  # 🔥 mantiene vivo Railway
+            print("🔄 Bot corriendo...")
 
             leer_comandos()
 
@@ -131,21 +122,25 @@ def main():
                 print("🔄 Reconectando...")
                 conectar()
 
-            velas_m1 = iq.get_candles(PAR, 60, 50, time.time())
-            velas_m5 = iq.get_candles(PAR, 300, 50, time.time())
+            # ===== OBTENER VELAS =====
+            velas = iq.get_candles(PAR, 60, 10, time.time())
 
-            if not velas_m1 or not velas_m5:
+            if not velas:
                 continue
 
-            señal = pro_signal(velas_m5, velas_m1)
+            current_candle_time = velas[-1]["from"]
 
-            if señal == "call":
-                print("📈 CALL")
-                ejecutar("call")
+            # ===== NUEVA VELA =====
+            if current_candle_time != last_candle_time:
+                last_candle_time = current_candle_time
 
-            elif señal == "put":
-                print("📉 PUT")
-                ejecutar("put")
+                señal = pro_signal(velas)
+
+                if señal:
+                    print(f"📊 Señal detectada: {señal.upper()}")
+                    enviar_telegram(f"📊 Señal: {señal.upper()}")
+
+                    ejecutar(señal)
 
             time.sleep(1)
 
