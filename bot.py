@@ -77,26 +77,50 @@ def conectar():
 
         time.sleep(5)
 
-# ================= EJECUCIÓN =================
+# ================= ESPERA ENTRADA CORRECTA =================
+def esperar_inicio():
+    while True:
+        segundos = time.time() % 60
+
+        # SOLO entrar entre segundo 0 y 2
+        if segundos <= 2:
+            return
+
+        time.sleep(0.2)
+
+# ================= EJECUCIÓN CORREGIDA =================
 def ejecutar(signal):
     global ultimo_trade
 
-    # evitar repetir en la misma vela
     if time.time() - ultimo_trade < 55:
         return
 
     try:
+        # 🔥 VALIDAR SI EL PAR ESTÁ ABIERTO
+        open_assets = iq.get_all_open_time()
+
+        if not open_assets["binary"][PAR]["open"]:
+            print("❌ Par cerrado")
+            enviar_telegram("❌ Par cerrado")
+            return
+
+        # 🔥 ESPERAR MOMENTO CORRECTO
+        esperar_inicio()
+
         print(f"🔥 Ejecutando {signal}")
 
         status, trade_id = iq.buy(MONTO, PAR, signal, EXPIRACION)
+
+        print("STATUS:", status)
+        print("RESPUESTA IQ:", trade_id)
 
         if status:
             print("✅ Operación ejecutada")
             enviar_telegram(f"✅ OPERACIÓN {signal.upper()}")
             ultimo_trade = time.time()
         else:
-            print("❌ Error IQ:", trade_id)
-            enviar_telegram(f"❌ ERROR IQ: {trade_id}")
+            print("❌ Error real:", trade_id)
+            enviar_telegram(f"❌ ERROR REAL: {trade_id}")
 
     except Exception as e:
         print("❌ Error ejecución:", e)
