@@ -15,10 +15,6 @@ PAIR = "EURUSD"
 AMOUNT = 54.60
 EXPIRATION = 1
 
-bot_activo = True
-last_update_id = None
-
-
 # =========================
 # TELEGRAM
 # =========================
@@ -41,9 +37,7 @@ def conectar():
         print("❌ ERROR:", reason)
         return None
 
-    print("✅ Conectado")
-    enviar_telegram("✅ SNIPER conectado")
-
+    enviar_telegram("✅ BOT SNIPER CONECTADO")
     iq.change_balance("PRACTICE")
     return iq
 
@@ -54,75 +48,72 @@ if iq is None:
 
 
 # =========================
-# ESPERA ACTIVA SNIPER
+# ESPERA ANTES DEL CIERRE
 # =========================
-def esperar_inicio_vela():
+def esperar_pre_cierre():
     while True:
         t = time.time()
         segundos = int(t) % 60
         miliseg = int((t - int(t)) * 1000)
 
-        # 🎯 VENTANA SNIPER
-        if segundos == 0 and miliseg >= 800:
+        # 🎯 ventana ideal antes del cierre
+        if segundos == 58 and miliseg >= 500:
             return
 
-        time.sleep(0.001)  # 🔥 ultra precisión
+        if segundos == 59:
+            return
+
+        time.sleep(0.001)
 
 
 # =========================
 # LOOP
 # =========================
-last_candle_time = None
+last_trade_time = 0
 
 while True:
     try:
-        if not bot_activo:
-            time.sleep(1)
-            continue
-
         if not iq.check_connect():
             enviar_telegram("🔁 Reconectando...")
             iq = conectar()
             continue
 
-        # 🔥 ESPERA SNIPER
-        esperar_inicio_vela()
+        # 🔥 esperar momento sniper
+        esperar_pre_cierre()
+
+        now = time.time()
+
+        # evitar doble entrada
+        if now - last_trade_time < 55:
+            continue
 
         candles = iq.get_candles(PAIR, 60, 100, time.time())
         df = pd.DataFrame(candles)
 
-        current_candle_time = df.iloc[-1]["from"]
-
-        if last_candle_time == current_candle_time:
-            continue
-
-        last_candle_time = current_candle_time
-
         signal = pro_signal(df)
 
         if signal:
-            enviar_telegram(f"🔥 SNIPER: {signal.upper()}")
+            enviar_telegram(f"🔥 SNIPER PRE-CIERRE: {signal.upper()}")
 
-            # 🔥 VALIDAR MERCADO
+            # validar mercado
             open_assets = iq.get_all_open_time()
 
             if not open_assets["binary"][PAIR]["open"]:
                 enviar_telegram("❌ Mercado cerrado")
                 continue
 
-            # 🔥 EJECUCIÓN INMEDIATA
             t1 = time.time()
 
             status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
             t2 = time.time()
-
             delay = round((t2 - t1) * 1000, 2)
 
             print("⏱ Delay:", delay, "ms")
 
             if status:
-                enviar_telegram(f"✅ SNIPER OK ({delay}ms)")
+                enviar_telegram(f"✅ OPERADA ({delay}ms)")
+                last_trade_time = now
             else:
                 enviar_telegram(f"❌ ERROR IQ: {trade_id}")
 
