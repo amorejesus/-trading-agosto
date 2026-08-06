@@ -15,7 +15,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 2
+AMOUNT = 54.60
 EXPIRATION = 1
 
 bot_activo = True
@@ -76,7 +76,7 @@ def conectar():
 
     print("✅ Conectado")
     enviar_telegram("✅ Bot conectado a IQ Option")
-    iq.change_balance("REAL")
+    iq.change_balance("PRACTICE")
     return iq
 
 
