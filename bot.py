@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-from strategy import pro_signal  # 👈 solo necesitas esto
+from strategy import pro_signal
 
 # =========================
 # CONFIG
@@ -129,21 +129,37 @@ while True:
             print("🟢 Nueva vela")
 
         # =========================
-        # SEÑAL (YA INCLUYE TODO)
+        # SEÑAL
         # =========================
         signal = pro_signal(df)
 
         # =========================
-        # TIMING SNIPER (segundo 0-2)
+        # VALIDACIONES
+        # =========================
+        if signal not in ["call", "put"]:
+            time.sleep(0.5)
+            continue
+
+        # verificar mercado abierto
+        try:
+            open_time = iq.get_all_open_time()
+            if not open_time["binary"][PAIR]["open"]:
+                print("❌ Mercado cerrado")
+                time.sleep(1)
+                continue
+        except:
+            pass
+
+        # =========================
+        # TIMING (MEJORADO)
         # =========================
         segundo = int(time.time()) % 60
 
         if (
-            signal
-            and not operacion_ejecutada
-            and segundo <= 2
+            not operacion_ejecutada
+            and 1 <= segundo <= 4
         ):
-            enviar_telegram(f"🔥 SNIPER: {signal.upper()}")
+            enviar_telegram(f"🔥 ENTRADA: {signal.upper()}")
 
             status, trade_id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
@@ -151,7 +167,8 @@ while True:
                 enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
                 operacion_ejecutada = True
             else:
-                enviar_telegram("❌ Error al ejecutar operación")
+                enviar_telegram(f"❌ ERROR IQ: {trade_id}")
+                print("ERROR DETALLE:", trade_id)
 
         time.sleep(0.5)
 
