@@ -1,5 +1,3 @@
-import numpy as np
-
 # ==============================
 # RESULTADOS
 # ==============================
@@ -9,215 +7,138 @@ losses = 0
 def update_result(result):
     global wins, losses
 
+    try:
+        result = float(result)
+    except:
+        result = 0
+
     if result > 0:
         wins += 1
     else:
         losses += 1
 
-    print(f"📊 WIN: {wins} | LOSS: {losses}")
+    print(f"📊 WIN: {wins} | LOSS: {losses}", flush=True)
 
 
 # ==============================
 # ANALIZAR VELA
 # ==============================
-def analizar_vela(df):
-    vela = df.iloc[-1]
+def analizar_vela(vela):
+    open_ = vela["open"]
+    close = vela["close"]
+    high = vela["max"]
+    low = vela["min"]
 
-    cuerpo = abs(vela["close"] - vela["open"])
-    rango = vela["max"] - vela["min"]
+    cuerpo = abs(close - open_)
+    rango = high - low
 
     if rango == 0:
         return None
 
     fuerza = cuerpo / rango
 
-    if fuerza < 0.5:
-        return None
+    return {
+        "alcista": close > open_,
+        "bajista": close < open_,
+        "cuerpo": cuerpo,
+        "rango": rango,
+        "fuerza": fuerza,
+        "open": open_,
+        "close": close,
+        "high": high,
+        "low": low
+    }
 
-    if vela["close"] > vela["open"]:
+
+# ==============================
+# DETECTAR TENDENCIA
+# ==============================
+def detectar_tendencia(df):
+    ultimas = df.tail(5)
+
+    highs = ultimas["max"].values
+    lows = ultimas["min"].values
+
+    alcista = all(highs[i] > highs[i-1] for i in range(1, len(highs)))
+    bajista = all(lows[i] < lows[i-1] for i in range(1, len(lows)))
+
+    if alcista:
         return "call"
-    elif vela["close"] < vela["open"]:
+
+    if bajista:
         return "put"
 
     return None
 
 
 # ==============================
-# FILTRO IMPULSO
+# SEÑAL PRINCIPAL (CORREGIDA)
 # ==============================
-def filtro_impulso(df):
-    ultimas = df.tail(6)
+def pro_signal(df):
 
-    alcistas = sum(ultimas["close"] > ultimas["open"])
-    bajistas = sum(ultimas["close"] < ultimas["open"])
+    if len(df) < 10:
+        return None
 
-    return not (alcistas >= 4 or bajistas >= 4)
+    # 🔥 USAMOS SOLO VELAS CERRADAS
+    vela_fuerza = df.iloc[-3]
+    vela_confirm = df.iloc[-2]
 
+    info_fuerza = analizar_vela(vela_fuerza)
+    info_confirm = analizar_vela(vela_confirm)
 
-# ==============================
-# FILTRO ZONA
-# ==============================
-def filtro_zona(df):
-    precio = df["close"].iloc[-1]
+    if info_fuerza is None or info_confirm is None:
+        return None
 
-    max_60 = df["max"].tail(60).max()
-    min_60 = df["min"].tail(60).min()
+    # ==============================
+    # TENDENCIA
+    # ==============================
+    direccion = detectar_tendencia(df)
 
-    if abs(precio - max_60) < (max_60 * 0.0002):
-        return False
+    if direccion is None:
+        return None
 
-    if abs(precio - min_60) < (min_60 * 0.0002):
-        return False
+    # ==============================
+    # IMPULSO (vela fuerte)
+    # ==============================
+    if info_fuerza["fuerza"] < 0.6:
+        return None
 
-    return True
+    if direccion == "call" and not info_fuerza["alcista"]:
+        return None
 
+    if direccion == "put" and not info_fuerza["bajista"]:
+        return None
 
-# ==============================
-# CONTINUIDAD
-# ==============================
-def filtro_continuidad(df, direccion):
-    ultimas = df.tail(4)
-
+    # ==============================
+    # 🔥 VALIDACIÓN REAL (ANTI ERROR)
+    # ==============================
     if direccion == "call":
-        return sum(ultimas["close"] > ultimas["open"]) >= 2
+
+        # ❌ si vela roja → cancelar
+        if info_confirm["close"] <= info_confirm["open"]:
+            return None
+
+        # ❌ si rompe mínimo → giro
+        if info_confirm["low"] < info_fuerza["low"]:
+            return None
 
     if direccion == "put":
-        return sum(ultimas["close"] < ultimas["open"]) >= 2
 
-    return False
-
-
-# ==============================
-# AGOTAMIENTO
-# ==============================
-def filtro_agotamiento(df):
-    vela = df.iloc[-1]
-
-    cuerpo = abs(vela["close"] - vela["open"])
-    rango = vela["max"] - vela["min"]
-
-    if rango == 0:
-        return False
-
-    return cuerpo >= (rango * 0.4)
-
-
-# ==============================
-# CONTRA TENDENCIA
-# ==============================
-def filtro_contra_tendencia(df, direccion):
-    ultimas = df.tail(10)
-
-    alcistas = sum(ultimas["close"] > ultimas["open"])
-    bajistas = sum(ultimas["close"] < ultimas["open"])
-
-    if bajistas >= 6 and direccion == "call":
-        return False
-
-    if alcistas >= 6 and direccion == "put":
-        return False
-
-    return True
-
-
-# ==============================
-# 🔥 DETECCIÓN DE MANIPULACIÓN
-# ==============================
-def detectar_manipulacion(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    if last["max"] > prev["max"] and last["close"] < prev["max"]:
-        return "put"
-
-    if last["min"] < prev["min"] and last["close"] > prev["min"]:
-        return "call"
-
-    return None
-
-
-# ==============================
-# ⚡ FILTRO VELOCIDAD
-# ==============================
-def filtro_velocidad(df):
-    rango = (df["max"] - df["min"]).tail(10).mean()
-    return rango > 0.0003
-
-
-# ==============================
-# 🚫 MICRO RANGO
-# ==============================
-def micro_rango(df):
-    ultimas = df.tail(5)
-    rango = ultimas["max"].max() - ultimas["min"].min()
-    return rango < 0.0005
-
-
-# ==============================
-# 💪 CONFIRMACIÓN FUERZA
-# ==============================
-def confirmacion_fuerza(df, direccion):
-    last = df.iloc[-1]
-
-    cuerpo = abs(last["close"] - last["open"])
-    rango = last["max"] - last["min"]
-
-    if rango == 0:
-        return False
-
-    fuerza = cuerpo / rango
-    return fuerza > 0.6
-
-
-# ==============================
-# 🚀 SEÑAL FINAL
-# ==============================
-def pro_signal(df, aggressive=True):
-    try:
-        if len(df) < 60:
+        # ❌ si vela verde → cancelar
+        if info_confirm["close"] >= info_confirm["open"]:
             return None
 
-        direccion = analizar_vela(df)
-
-        if direccion is None:
+        # ❌ si rompe máximo → giro
+        if info_confirm["high"] > info_fuerza["high"]:
             return None
 
-        # 🔥 Manipulación primero
-        trap = detectar_manipulacion(df)
-        if trap:
-            direccion = trap
-
-        if not filtro_velocidad(df):
-            return None
-
-        if micro_rango(df):
-            return None
-
-        if not filtro_impulso(df):
-            return None
-
-        if not filtro_zona(df):
-            return None
-
-        if not filtro_continuidad(df, direccion):
-            return None
-
-        if not filtro_agotamiento(df):
-            return None
-
-        if not filtro_contra_tendencia(df, direccion):
-            return None
-
-        if not confirmacion_fuerza(df, direccion):
-            return None
-
-        score = 40
-
-        return {
-            "direction": direccion,
-            "score": score
-        }
-
-    except Exception as e:
-        print("❌ ERROR estrategia:", e)
+    # ==============================
+    # FUERZA CONFIRMACIÓN
+    # ==============================
+    if info_confirm["fuerza"] < 0.55:
         return None
+
+    # ==============================
+    # SEÑAL FINAL
+    # ==============================
+    return direccion, "continuidad_sniper", 100
