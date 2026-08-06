@@ -15,7 +15,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 200
+AMOUNT = 54.60
 EXPIRATION = 1
 
 bot_activo = True
@@ -88,6 +88,7 @@ if iq is None:
 # =========================
 last_candle_time = None
 operacion_ejecutada = False
+last_trade_time = 0
 
 # =========================
 # LOOP PRINCIPAL
@@ -136,7 +137,13 @@ while True:
             continue
 
         # =========================
-        # TIMING (MEJORADO)
+        # ANTI-SPAM (EVITA BLOQUEOS)
+        # =========================
+        if time.time() - last_trade_time < 10:
+            continue
+
+        # =========================
+        # TIMING PERFECTO
         # =========================
         segundo = int(time.time()) % 60
 
@@ -149,19 +156,49 @@ while True:
 
             action = "call" if signal == "call" else "put"
 
+            open_time = iq.get_all_open_time()
+
+            digital_open = False
+            binary_open = False
+
+            try:
+                digital_open = open_time["digital"][PAIR]["open"]
+            except:
+                pass
+
+            try:
+                binary_open = open_time["binary"][PAIR]["open"]
+            except:
+                pass
+
+            status = False
+            trade_id = None
+
             # =========================
-            # EJECUCIÓN INTELIGENTE
+            # PRIORIDAD DIGITAL
             # =========================
-            status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, 1)
+            if digital_open:
+                print("📊 DIGITAL")
+                status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, EXPIRATION)
 
-            if not status:
-                print("⚠️ Digital falló, intentando binaria...")
+            # =========================
+            # FALLBACK BINARIA
+            # =========================
+            elif binary_open:
+                print("📊 BINARIA")
+                status, trade_id = iq.buy(AMOUNT, PAIR, action, EXPIRATION)
 
-                status, trade_id = iq.buy(AMOUNT, PAIR, action, 1)
+            else:
+                enviar_telegram("❌ ACTIVO CERRADO")
+                print("❌ Activo no disponible")
 
+            # =========================
+            # RESULTADO
+            # =========================
             if status:
                 enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
                 operacion_ejecutada = True
+                last_trade_time = time.time()
             else:
                 enviar_telegram(f"❌ ERROR REAL: {trade_id}")
                 print("ERROR DETALLE:", trade_id)
