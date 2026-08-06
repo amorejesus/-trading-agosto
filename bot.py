@@ -32,31 +32,15 @@ def enviar_telegram(msg):
         pass
 
 
-def limpiar_updates():
-    global last_update_id
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        response = requests.get(url).json()
-        for update in response.get("result", []):
-            last_update_id = update["update_id"]
-    except:
-        pass
-
-
 def leer_comandos():
     global bot_activo, last_update_id
 
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}"
         response = requests.get(url).json()
 
         for update in response.get("result", []):
-            update_id = update["update_id"]
-
-            if update_id <= last_update_id:
-                continue
-
-            last_update_id = update_id
+            last_update_id = update["update_id"]
 
             if "message" in update:
                 text = update["message"].get("text", "")
@@ -96,9 +80,6 @@ iq = conectar()
 if iq is None:
     exit()
 
-# 🔥 limpiar historial de Telegram (CLAVE)
-limpiar_updates()
-
 # =========================
 # CONTROL
 # =========================
@@ -107,7 +88,7 @@ operacion_ejecutada = False
 last_trade_time = 0
 
 # =========================
-# LOOP
+# LOOP PRINCIPAL
 # =========================
 while True:
     try:
@@ -123,6 +104,9 @@ while True:
             time.sleep(3)
             continue
 
+        # =========================
+        # OBTENER VELAS
+        # =========================
         candles = iq.get_candles(PAIR, 60, 100, time.time())
 
         if not candles:
@@ -132,36 +116,49 @@ while True:
         df = pd.DataFrame(candles)
         current_candle_time = df.iloc[-1]["from"]
 
+        # =========================
+        # NUEVA VELA
+        # =========================
         if last_candle_time != current_candle_time:
             last_candle_time = current_candle_time
             operacion_ejecutada = False
             print("🟢 Nueva vela")
 
+        # =========================
+        # SEÑAL
+        # =========================
         signal = pro_signal(df)
 
         if signal not in ["call", "put"]:
+            time.sleep(0.5)
             continue
 
-        # evitar spam de órdenes
+        # =========================
+        # ANTI-SPAM IQ
+        # =========================
         if time.time() - last_trade_time < 15:
             continue
 
+        # =========================
+        # TIMING DE ENTRADA
+        # =========================
         segundo = int(time.time()) % 60
 
-        if 2 <= segundo <= 6 and not operacion_ejecutada:
+        if 2 <= segundo <= 5 and not operacion_ejecutada:
 
             enviar_telegram(f"🔥 ENTRADA: {signal.upper()}")
-
-            action = signal
 
             status = False
             trade_id = None
 
             try:
-                status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, action, EXPIRATION)
+                status, trade_id = iq.buy_digital_spot(PAIR, AMOUNT, signal, EXPIRATION)
             except Exception as e:
                 trade_id = str(e)
 
+            # =========================
+            # RESULTADO REAL
+            # =========================
             if status:
                 enviar_telegram(f"✅ OPERACIÓN: {signal.upper()}")
                 operacion_ejecutada = True
@@ -173,6 +170,6 @@ while True:
         time.sleep(0.5)
 
     except Exception as e:
-        print("❌ ERROR:", e)
+        print("❌ ERROR CRÍTICO:", e)
         enviar_telegram(f"❌ ERROR CRÍTICO: {e}")
         time.sleep(3)
