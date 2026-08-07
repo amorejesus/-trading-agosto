@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 333
+AMOUNT = 100
 EXPIRATION = 1  # minutos
 
 # ==============================
@@ -108,22 +108,21 @@ def main():
         try:
             wait_new_candle()
 
-            # 🔥 MULTI-TIMEFRAME
+            # 🔥 SNIPER M1 + M5
             df_m1 = get_candles(iq, 60)
             df_m5 = get_candles(iq, 300)
-            df_m15 = get_candles(iq, 900)
 
-            if df_m1 is None or df_m5 is None or df_m15 is None:
+            if df_m1 is None or df_m5 is None:
                 continue
 
-            # 🔥 NUEVA FUNCIÓN (con control de tendencia)
-            signal, trend = analyze_candle(df_m1, df_m5, df_m15)
+            # 🔥 estrategia sniper (con control de tendencia)
+            signal, trend = analyze_candle(df_m1, df_m5)
 
             if signal:
-                print(f"📈 Tendencia actual: {trend}")
+                print(f"📈 Cambio de tendencia detectado: {trend}")
                 trade(iq, signal)
             else:
-                print("⛔ No hay señal")
+                print("⛔ Sin señal sniper")
 
         except Exception as e:
             print("Error general:", e)
