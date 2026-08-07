@@ -1,228 +1,118 @@
 import pandas as pd
 
-# ==============================
-# 📊 ZONAS CLAVE (SOPORTE / RESISTENCIA)
-# ==============================
-
-def detect_resistance(df):
-    if df is None or len(df) < 20:
-        return None
-    return df["max"].rolling(window=20).max().iloc[-1]
-
-
-def detect_support(df):
-    if df is None or len(df) < 20:
-        return None
-    return df["min"].rolling(window=20).min().iloc[-1]
-
-
-def near_resistance(df, threshold=0.0005):
-    resistance = detect_resistance(df)
-    if resistance is None:
-        return False
-
-    price = df["close"].iloc[-1]
-    return abs(price - resistance) < threshold
-
-
-def near_support(df, threshold=0.0005):
-    support = detect_support(df)
-    if support is None:
-        return False
-
-    price = df["close"].iloc[-1]
-    return abs(price - support) < threshold
+last_trend = None
 
 
 # ==============================
-# 🧠 MICROESTRUCTURA (M1)
+# TENDENCIA M5
 # ==============================
-
-def rejection_candle(df):
-    if df is None or len(df) < 1:
-        return None
-
-    last = df.iloc[-1]
-
-    body = abs(last["close"] - last["open"])
-    upper_wick = last["max"] - max(last["close"], last["open"])
-    lower_wick = min(last["close"], last["open"]) - last["min"]
-
-    if body == 0:
-        return None
-
-    # rechazo arriba → posible caída
-    if upper_wick > body * 2:
-        return "bearish_rejection"
-
-    # rechazo abajo → posible subida
-    if lower_wick > body * 2:
-        return "bullish_rejection"
-
-    return None
-
-
-def strong_candle(df):
-    if df is None or len(df) < 1:
-        return None
-
-    last = df.iloc[-1]
-
-    total = last["max"] - last["min"]
-    body = abs(last["close"] - last["open"])
-
-    if total == 0:
-        return None
-
-    strength = body / total
-
-    if strength > 0.6:
-        if last["close"] > last["open"]:
-            return "bullish"
-        else:
-            return "bearish"
-
-    return None
-
-
-# ==============================
-# 📈 TENDENCIA
-# ==============================
-
 def trend_m5(df):
-    if df is None or len(df) < 5:
-        return None
+    highs = df["max"].iloc[-6:]
+    lows = df["min"].iloc[-6:]
 
-    highs = df["max"].tail(5)
-    lows = df["min"].tail(5)
+    up = all(x < y for x, y in zip(highs, highs[1:])) and \
+         all(x < y for x, y in zip(lows, lows[1:]))
 
-    if highs.is_monotonic_increasing and lows.is_monotonic_increasing:
-        return "bullish"
+    down = all(x > y for x, y in zip(highs, highs[1:])) and \
+           all(x > y for x, y in zip(lows, lows[1:]))
 
-    if highs.is_monotonic_decreasing and lows.is_monotonic_decreasing:
-        return "bearish"
-
-    return None
-
-
-def trend_m1(df):
-    if df is None or len(df) < 5:
-        return None
-
-    highs = df["max"].tail(5)
-    lows = df["min"].tail(5)
-
-    if highs.is_monotonic_increasing and lows.is_monotonic_increasing:
-        return "bullish"
-
-    if highs.is_monotonic_decreasing and lows.is_monotonic_decreasing:
-        return "bearish"
+    if up:
+        return "up"
+    elif down:
+        return "down"
 
     return None
 
 
 # ==============================
-# 🎯 SCORE INTELIGENTE
+# PULLBACK EN M5
 # ==============================
+def pullback_m5(df, trend):
+    candles = df.iloc[-4:-1]
 
-def calculate_score(t5, t1, strength, rejection):
-    score = 0
+    if trend == "up":
+        return all(c["close"] < c["open"] for _, c in candles.iterrows())
 
-    if t5:
-        score += 30
+    elif trend == "down":
+        return all(c["close"] > c["open"] for _, c in candles.iterrows())
 
-    if t1:
-        score += 25
-
-    if strength:
-        score += 25
-
-    # penalizar rechazo
-    if rejection is None:
-        score += 20
-    else:
-        score -= 10
-
-    return score
+    return False
 
 
 # ==============================
-# 🚀 SEÑAL PRINCIPAL
+# VELA SNIPER M1
 # ==============================
+def sniper_entry(df):
+    last = df.iloc[-2]
 
+    body = abs(last["close"] - last["open"])
+    range_candle = last["max"] - last["min"]
+
+    if range_candle == 0:
+        return False
+
+    body_ratio = body / range_candle
+
+    upper_wick = last["max"] - max(last["open"], last["close"])
+    lower_wick = min(last["open"], last["close"]) - last["min"]
+
+    # 🔥 vela limpia (sin manipulación)
+    return body_ratio > 0.65 and upper_wick < body * 0.4 and lower_wick < body * 0.4
+
+
+# ==============================
+# EVITAR LATERAL M1
+# ==============================
+def is_lateral(df):
+    recent = df.iloc[-10:]
+    return (recent["max"].max() - recent["min"].min()) < (recent["max"] - recent["min"]).mean() * 2
+
+
+# ==============================
+# FUNCIÓN PRINCIPAL
+# ==============================
 def analyze_candle(df_m1, df_m5):
-    try:
-        # =========================
-        # Validaciones básicas
-        # =========================
-        if df_m1 is None or df_m5 is None:
-            print("⛔ DataFrame vacío")
-            return None
+    global last_trend
 
-        if len(df_m1) < 10 or len(df_m5) < 10:
-            print("⛔ No hay suficientes datos")
-            return None
+    if df_m1 is None or df_m5 is None:
+        return None, last_trend
 
-        # =========================
-        # 📈 TENDENCIA
-        # =========================
-        t5 = trend_m5(df_m5)
-        t1 = trend_m1(df_m1)
+    if len(df_m1) < 20 or len(df_m5) < 10:
+        return None, last_trend
 
-        if not t5 or not t1:
-            print("⛔ Sin tendencia clara")
-            return None
+    trend = trend_m5(df_m5)
 
-        if t5 != t1:
-            print("⚠️ Tendencias no alineadas")
-            return None
+    if trend is None:
+        return None, last_trend
 
-        # =========================
-        # 🧠 MICRO
-        # =========================
-        rejection = rejection_candle(df_m1)
-        strength = strong_candle(df_m1)
+    # 🔥 SOLO 1 TRADE POR CAMBIO
+    if last_trend == trend:
+        return None, last_trend
 
-        # =========================
-        # 🎯 SCORE
-        # =========================
-        score = calculate_score(t5, t1, strength, rejection)
+    # 🔥 esperar pullback real
+    if not pullback_m5(df_m5, trend):
+        return None, last_trend
 
-        if score < 70:
-            print(f"⛔ Score bajo: {score}")
-            return None
+    # ❌ evitar lateral
+    if is_lateral(df_m1):
+        return None, last_trend
 
-        # =========================
-        # 🚫 FILTRO ZONAS
-        # =========================
-        if t5 == "bullish":
+    # 🔥 confirmación sniper
+    if not sniper_entry(df_m1):
+        return None, last_trend
 
-            if near_resistance(df_m5):
-                print("🚫 Evitando CALL en resistencia")
-                return None
+    last = df_m1.iloc[-2]
+    prev = df_m1.iloc[-3]
 
-            if rejection == "bearish_rejection":
-                print("🚫 Rechazo bajista detectado")
-                return None
+    # ==============================
+    # ENTRADA FINAL
+    # ==============================
+    if trend == "up" and last["close"] > prev["close"]:
+        last_trend = trend
+        return "call", trend
 
-            print(f"✅ CALL | Score: {score}")
-            return "call"
+    elif trend == "down" and last["close"] < prev["close"]:
+        last_trend = trend
+        return "put", trend
 
-        elif t5 == "bearish":
-
-            if near_support(df_m5):
-                print("🚫 Evitando PUT en soporte")
-                return None
-
-            if rejection == "bullish_rejection":
-                print("🚫 Rechazo alcista detectado")
-                return None
-
-            print(f"✅ PUT | Score: {score}")
-            return "put"
-
-        return None
-
-    except Exception as e:
-        print("❌ Error en estrategia:", e)
-        return None
+    return None, last_trend
