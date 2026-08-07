@@ -73,11 +73,19 @@ def wait_second_58():
 
 
 def trade(iq, pair, signal):
-    print(f"🚀 {pair} → {signal.upper()}")
-    send_telegram(f"📊 {pair} → {signal.upper()}")
+    # 🔥 FIX: soporta ("call", score)
+    if isinstance(signal, tuple):
+        direction = signal[0]
+        score = signal[1]
+    else:
+        direction = signal
+        score = None
+
+    print(f"🚀 {pair} → {direction.upper()} | Score: {score}")
+    send_telegram(f"📊 {pair} → {direction.upper()} | Score: {score}")
 
     try:
-        status, _ = iq.buy(AMOUNT, pair, signal, EXPIRATION)
+        status, _ = iq.buy(AMOUNT, pair, direction, EXPIRATION)
 
         if status:
             print("✅ Operación abierta")
