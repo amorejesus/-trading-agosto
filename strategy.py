@@ -1,15 +1,30 @@
 import pandas as pd
+import json
+import os
 
-last_trend = None  # 🔥 memoria global
+MEMORY_FILE = "ai_memory.json"
+last_trend = None
 
 
 # ==============================
-# DETECTAR TENDENCIA
+# IA MEMORY
 # ==============================
-def detect_trend(df):
-    if len(df) < 10:
-        return None
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {"wins": 0, "losses": 0, "confidence": 0.5}
+    with open(MEMORY_FILE, "r") as f:
+        return json.load(f)
 
+
+def save_memory(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+# ==============================
+# TENDENCIA M5
+# ==============================
+def trend_m5(df):
     highs = df["max"].iloc[-6:]
     lows = df["min"].iloc[-6:]
 
@@ -28,84 +43,100 @@ def detect_trend(df):
 
 
 # ==============================
-# LATERAL
+# PULLBACK
 # ==============================
-def is_lateral(df):
-    recent = df.iloc[-15:]
+def pullback_m5(df, trend):
+    candles = df.iloc[-4:-1]
 
-    max_range = recent["max"].max()
-    min_range = recent["min"].min()
+    if trend == "up":
+        return all(c["close"] < c["open"] for _, c in candles.iterrows())
+    elif trend == "down":
+        return all(c["close"] > c["open"] for _, c in candles.iterrows())
 
-    return (max_range - min_range) < (recent["max"] - recent["min"]).mean() * 3
+    return False
 
 
 # ==============================
-# VELA FUERTE
+# MICROESTRUCTURA M1
 # ==============================
-def strong_candle(df):
+def microstructure(df):
     last = df.iloc[-2]
 
     body = abs(last["close"] - last["open"])
-    range_candle = last["max"] - last["min"]
+    total = last["max"] - last["min"]
 
-    if range_candle == 0:
-        return False
+    if total == 0:
+        return 0
 
-    body_ratio = body / range_candle
+    body_ratio = body / total
 
-    upper_wick = last["max"] - max(last["open"], last["close"])
-    lower_wick = min(last["open"], last["close"]) - last["min"]
+    upper = last["max"] - max(last["open"], last["close"])
+    lower = min(last["open"], last["close"]) - last["min"]
 
-    return body_ratio > 0.6 and upper_wick < body * 0.5 and lower_wick < body * 0.5
+    score = 0
+
+    # fuerza
+    if body_ratio > 0.65:
+        score += 2
+
+    # rechazo bajo
+    if upper < body * 0.4 and lower < body * 0.4:
+        score += 2
+
+    return score
+
+
+# ==============================
+# LATERAL
+# ==============================
+def is_lateral(df):
+    recent = df.iloc[-10:]
+    return (recent["max"].max() - recent["min"].min()) < (recent["max"] - recent["min"]).mean() * 2
 
 
 # ==============================
 # FUNCIÓN PRINCIPAL
 # ==============================
-def analyze_candle(df_m1, df_m5, df_m15):
+def analyze_candle(df_m1, df_m5):
     global last_trend
 
-    if df_m1 is None or df_m5 is None or df_m15 is None:
-        return None, last_trend
+    memory = load_memory()
 
-    if len(df_m1) < 20 or len(df_m5) < 10 or len(df_m15) < 10:
-        return None, last_trend
+    if len(df_m1) < 20 or len(df_m5) < 10:
+        return None, last_trend, 0
 
-    # 🔥 tendencias
-    trend_m15 = detect_trend(df_m15)
-    trend_m5 = detect_trend(df_m5)
+    trend = trend_m5(df_m5)
 
-    if trend_m15 is None or trend_m5 is None:
-        return None, last_trend
+    if trend is None:
+        return None, last_trend, 0
 
-    # ❌ si no coinciden → no operar
-    if trend_m15 != trend_m5:
-        return None, last_trend
+    # solo cambio de tendencia
+    if last_trend == trend:
+        return None, last_trend, 0
 
-    # 🔥 SOLO OPERAR SI CAMBIA LA TENDENCIA
-    if last_trend == trend_m15:
-        return None, last_trend
+    if not pullback_m5(df_m5, trend):
+        return None, last_trend, 0
 
-    # ❌ evitar lateral
     if is_lateral(df_m1):
-        return None, last_trend
+        return None, last_trend, 0
 
-    # ✔ vela fuerte
-    if not strong_candle(df_m1):
-        return None, last_trend
+    micro_score = microstructure(df_m1)
+
+    # IA ajusta exigencia
+    threshold = 3 + (0.5 - memory["confidence"]) * 2
+
+    if micro_score < threshold:
+        return None, last_trend, micro_score
 
     last = df_m1.iloc[-2]
     prev = df_m1.iloc[-3]
 
-    # ==============================
-    # DECISIÓN FINAL
-    # ==============================
-    if trend_m15 == "up" and last["close"] > prev["close"]:
-        last_trend = trend_m15
-        return "call", last_trend
+    if trend == "up" and last["close"] > prev["close"]:
+        last_trend = trend
+        return "call", trend, micro_score
 
-    elif trend_m15 == "down" and last["close"] < prev["close"]:
-        last_trend = trend_m15
-        return "put", last_trend
+    elif trend == "down" and last["close"] < prev["close"]:
+        last_trend = trend
+        return "put", trend, micro_score
 
-    return None, last_trend
+    return None, last_trend, micro_score
