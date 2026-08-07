@@ -1,118 +1,136 @@
 import pandas as pd
 
-last_trend = None
-
-
 # ==============================
-# TENDENCIA M5
+# 🔹 UTILIDADES
 # ==============================
-def trend_m5(df):
-    highs = df["max"].iloc[-6:]
-    lows = df["min"].iloc[-6:]
 
-    up = all(x < y for x, y in zip(highs, highs[1:])) and \
-         all(x < y for x, y in zip(lows, lows[1:]))
+def get_trend(df):
+    highs = df["max"].tail(5).values
+    lows = df["min"].tail(5).values
 
-    down = all(x > y for x, y in zip(highs, highs[1:])) and \
-           all(x > y for x, y in zip(lows, lows[1:]))
+    if all(highs[i] > highs[i-1] for i in range(1, len(highs))) and \
+       all(lows[i] > lows[i-1] for i in range(1, len(lows))):
+        return "bullish"
 
-    if up:
-        return "up"
-    elif down:
-        return "down"
+    if all(highs[i] < highs[i-1] for i in range(1, len(highs))) and \
+       all(lows[i] < lows[i-1] for i in range(1, len(lows))):
+        return "bearish"
 
-    return None
+    return "lateral"
 
 
-# ==============================
-# PULLBACK EN M5
-# ==============================
-def pullback_m5(df, trend):
-    candles = df.iloc[-4:-1]
+def is_strong_candle(candle):
+    body = abs(candle["close"] - candle["open"])
+    wick = (candle["max"] - candle["min"]) - body
+    return body > wick * 1.2  # 🔥 más flexible
 
-    if trend == "up":
-        return all(c["close"] < c["open"] for _, c in candles.iterrows())
 
-    elif trend == "down":
-        return all(c["close"] > c["open"] for _, c in candles.iterrows())
+def has_pullback(df, trend):
+    last = df.tail(4)
+
+    if trend == "bullish":
+        return all(last["close"].iloc[i] < last["close"].iloc[i-1] for i in range(1, len(last)))
+
+    if trend == "bearish":
+        return all(last["close"].iloc[i] > last["close"].iloc[i-1] for i in range(1, len(last)))
 
     return False
 
 
-# ==============================
-# VELA SNIPER M1
-# ==============================
-def sniper_entry(df):
-    last = df.iloc[-2]
+def no_lateral_zone(df):
+    high = df["max"].tail(20).max()
+    low = df["min"].tail(20).min()
 
-    body = abs(last["close"] - last["open"])
-    range_candle = last["max"] - last["min"]
+    range_size = high - low
 
-    if range_candle == 0:
-        return False
-
-    body_ratio = body / range_candle
-
-    upper_wick = last["max"] - max(last["open"], last["close"])
-    lower_wick = min(last["open"], last["close"]) - last["min"]
-
-    # 🔥 vela limpia (sin manipulación)
-    return body_ratio > 0.65 and upper_wick < body * 0.4 and lower_wick < body * 0.4
+    # 🔥 MÁS FLEXIBLE PARA OTC
+    return range_size > 0.0002
 
 
 # ==============================
-# EVITAR LATERAL M1
+# 🔥 MICROSTRUCTURA
 # ==============================
-def is_lateral(df):
-    recent = df.iloc[-10:]
-    return (recent["max"].max() - recent["min"].min()) < (recent["max"] - recent["min"]).mean() * 2
+
+def microstructure_score(df):
+    last = df.iloc[-1]
+
+    body = last["close"] - last["open"]
+    range_total = last["max"] - last["min"]
+
+    if range_total == 0:
+        return 0
+
+    return abs(body) / range_total
 
 
 # ==============================
-# FUNCIÓN PRINCIPAL
+# 🧠 IA PRINCIPAL
 # ==============================
+
 def analyze_candle(df_m1, df_m5):
-    global last_trend
+    try:
+        trend_m5 = get_trend(df_m5)
+        trend_m1 = get_trend(df_m1)
 
-    if df_m1 is None or df_m5 is None:
-        return None, last_trend
+        if trend_m5 == "lateral":
+            return None
 
-    if len(df_m1) < 20 or len(df_m5) < 10:
-        return None, last_trend
+        if not no_lateral_zone(df_m5):
+            return None
 
-    trend = trend_m5(df_m5)
+        pullback = has_pullback(df_m1, trend_m5)
 
-    if trend is None:
-        return None, last_trend
+        last_candle = df_m1.iloc[-1]
+        strong = is_strong_candle(last_candle)
 
-    # 🔥 SOLO 1 TRADE POR CAMBIO
-    if last_trend == trend:
-        return None, last_trend
+        micro_score = microstructure_score(df_m1)
 
-    # 🔥 esperar pullback real
-    if not pullback_m5(df_m5, trend):
-        return None, last_trend
+        # ==========================
+        # 🎯 SCORE
+        # ==========================
 
-    # ❌ evitar lateral
-    if is_lateral(df_m1):
-        return None, last_trend
+        score = 0
 
-    # 🔥 confirmación sniper
-    if not sniper_entry(df_m1):
-        return None, last_trend
+        if trend_m5 == trend_m1:
+            score += 30
 
-    last = df_m1.iloc[-2]
-    prev = df_m1.iloc[-3]
+        if pullback:
+            score += 15  # 🔽 bajado
 
-    # ==============================
-    # ENTRADA FINAL
-    # ==============================
-    if trend == "up" and last["close"] > prev["close"]:
-        last_trend = trend
-        return "call", trend
+        if strong:
+            score += 20  # 🔽 bajado
 
-    elif trend == "down" and last["close"] < prev["close"]:
-        last_trend = trend
-        return "put", trend
+        if micro_score > 0.5:
+            score += 20  # 🔽 más fácil
 
-    return None, last_trend
+        # ==========================
+        # 📊 DEBUG (CLAVE)
+        # ==========================
+
+        print(f"""
+PAIR DEBUG
+Trend M5: {trend_m5}
+Trend M1: {trend_m1}
+Pullback: {pullback}
+Strong: {strong}
+Micro: {micro_score:.2f}
+Score: {score}
+""")
+
+        # ==========================
+        # 🚀 DECISIÓN
+        # ==========================
+
+        if score >= 55:  # 🔥 MÁS FLEXIBLE
+
+            if trend_m5 == "bullish":
+                return ("call", score)
+
+            elif trend_m5 == "bearish":
+                return ("put", score)
+
+        return None
+
+    except Exception as e:
+        print("Error strategy:", e)
+        return None
