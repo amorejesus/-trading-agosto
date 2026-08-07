@@ -2,6 +2,7 @@ import os
 import time
 import requests
 import pandas as pd
+
 from iqoptionapi.stable_api import IQ_Option
 
 from strategy import analyze_candle
@@ -14,82 +15,38 @@ from strategy import analyze_candle
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN"
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID"
+)
 
 
 # ============================================================
-# ÚNICO PAR AUTORIZADO
+# ÚNICO PAR
 # ============================================================
 
-PAIRS = [
-    "EURUSD-OTC"
-]
+PAIR = "EURUSD-OTC"
 
 
 # ============================================================
-# CONFIGURACIÓN DE OPERACIÓN
+# OPERACIÓN
 # ============================================================
 
-AMOUNT = 3333
+AMOUNT = 333
 
-# Expiración en minutos
 EXPIRATION = 1
 
 # Tiempo mínimo entre operaciones
 TRADE_COOLDOWN = 120
 
-
-last_trade_time = {
-    "EURUSD-OTC": 0
-}
+# Tiempo máximo de un ciclo de búsqueda
+MAX_SEARCH_TIME = 30 * 60
 
 
-# ============================================================
-# VALIDAR CONFIGURACIÓN DE PARES
-# ============================================================
-
-def validate_pairs():
-
-    print("")
-    print("====================================")
-    print("🔎 VALIDANDO PARES")
-    print("====================================")
-
-    if not isinstance(PAIRS, list):
-
-        raise RuntimeError(
-            "PAIRS debe ser una lista."
-        )
-
-    if PAIRS != ["EURUSD-OTC"]:
-
-        raise RuntimeError(
-            "Configuración inválida. "
-            "Este bot solo puede operar EURUSD-OTC."
-        )
-
-    for pair in PAIRS:
-
-        if not isinstance(pair, str):
-
-            raise RuntimeError(
-                f"Par inválido: {pair}"
-            )
-
-        pair = pair.strip()
-
-        if pair != "EURUSD-OTC":
-
-            raise RuntimeError(
-                f"Par no autorizado: {pair}"
-            )
-
-        print(
-            f"✅ {pair}"
-        )
-
-    print("====================================")
+last_trade_time = 0
 
 
 # ============================================================
@@ -98,58 +55,52 @@ def validate_pairs():
 
 def send_telegram(message):
 
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN:
+        return
 
-        print(
-            "⚠️ Telegram no configurado"
-        )
-
-        return False
+    if not TELEGRAM_CHAT_ID:
+        return
 
     try:
 
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        requests.post(
+            f"https://api.telegram.org/"
+            f"bot{TELEGRAM_TOKEN}/sendMessage",
+
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": message
             },
+
             timeout=10
         )
-
-        if response.ok:
-
-            return True
-
-        print(
-            f"⚠️ Error Telegram: "
-            f"{response.status_code}"
-        )
-
-        return False
 
     except Exception as e:
 
         print(
-            f"⚠️ Error Telegram: {e}"
+            f"⚠️ Telegram: {e}"
         )
-
-        return False
 
 
 # ============================================================
 # VARIABLES DE ENTORNO
 # ============================================================
 
-def check_environment():
+def validate_environment():
 
     global EMAIL
     global PASSWORD
+
     global TELEGRAM_TOKEN
     global TELEGRAM_CHAT_ID
 
-    EMAIL = os.getenv("IQ_EMAIL")
-    PASSWORD = os.getenv("IQ_PASSWORD")
+    EMAIL = os.getenv(
+        "IQ_EMAIL"
+    )
+
+    PASSWORD = os.getenv(
+        "IQ_PASSWORD"
+    )
 
     TELEGRAM_TOKEN = os.getenv(
         "TELEGRAM_TOKEN"
@@ -160,102 +111,82 @@ def check_environment():
     )
 
     print("")
-    print("====================================")
-    print("🔐 VARIABLES DE ENTORNO")
-    print("====================================")
+    print(
+        "========================================"
+    )
 
     print(
         "IQ_EMAIL: "
-        + (
-            "✅ configurado"
+        +
+        (
+            "✅ OK"
             if EMAIL
-            else "❌ AUSENTE"
+            else "❌ FALTA"
         )
     )
 
     print(
         "IQ_PASSWORD: "
-        + (
-            "✅ configurado"
+        +
+        (
+            "✅ OK"
             if PASSWORD
-            else "❌ AUSENTE"
+            else "❌ FALTA"
         )
     )
 
     print(
         "TELEGRAM_TOKEN: "
-        + (
-            "✅ configurado"
+        +
+        (
+            "✅ OK"
             if TELEGRAM_TOKEN
-            else "⚠️ AUSENTE"
+            else "⚠️ FALTA"
         )
     )
 
     print(
         "TELEGRAM_CHAT_ID: "
-        + (
-            "✅ configurado"
+        +
+        (
+            "✅ OK"
             if TELEGRAM_CHAT_ID
-            else "⚠️ AUSENTE"
+            else "⚠️ FALTA"
         )
     )
 
-    print("====================================")
+    print(
+        "========================================"
+    )
 
-    if not EMAIL or not PASSWORD:
+    if not EMAIL:
+        raise RuntimeError(
+            "Falta IQ_EMAIL"
+        )
 
-        return False
-
-    return True
+    if not PASSWORD:
+        raise RuntimeError(
+            "Falta IQ_PASSWORD"
+        )
 
 
 # ============================================================
-# CONEXIÓN IQ OPTION
+# CONEXIÓN
 # ============================================================
 
 def connect_iq():
 
-    global EMAIL
-    global PASSWORD
-
-    EMAIL = os.getenv("IQ_EMAIL")
-    PASSWORD = os.getenv("IQ_PASSWORD")
-
-    if not EMAIL or not PASSWORD:
-
-        send_telegram(
-            "❌ BOT DETENIDO\n\n"
-            "Faltan IQ_EMAIL o IQ_PASSWORD "
-            "en Railway."
-        )
-
-        raise RuntimeError(
-            "Faltan IQ_EMAIL o IQ_PASSWORD"
-        )
-
     print("")
-    print("====================================")
-    print("🔌 CONECTANDO A IQ OPTION")
-    print("====================================")
+    print(
+        "🔌 Conectando a IQ Option..."
+    )
 
-    try:
+    iq = IQ_Option(
+        EMAIL,
+        PASSWORD
+    )
 
-        iq = IQ_Option(
-            EMAIL,
-            PASSWORD
-        )
-
-        iq.connect()
-
-    except Exception as e:
-
-        print(
-            f"❌ Error creando conexión: {e}"
-        )
-
-        raise
-
-    connected = False
+    iq.connect()
 
     for attempt in range(10):
 
@@ -263,72 +194,49 @@ def connect_iq():
 
             if iq.check_connect():
 
-                connected = True
-                break
+                print(
+                    "✅ IQ Option conectado"
+                )
+
+                try:
+
+                    iq.change_balance(
+                        "PRACTICE"
+                    )
+
+                    print(
+                        "💰 Cuenta PRACTICE"
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"⚠️ Balance: {e}"
+                    )
+
+                send_telegram(
+                    "🤖 BOT INICIADO\n\n"
+                    "📊 EURUSD-OTC\n"
+                    "📈 M5 + M1\n"
+                    "🎯 Continuidad + fuerza\n"
+                    "💼 PRACTICE"
+                )
+
+                return iq
 
         except Exception:
-
             pass
 
         print(
-            f"⏳ Esperando conexión "
+            f"⏳ Conectando "
             f"{attempt + 1}/10..."
         )
 
-        time.sleep(1)
+        time.sleep(2)
 
-    if not connected:
-
-        print(
-            "❌ No se pudo conectar "
-            "a IQ Option"
-        )
-
-        send_telegram(
-            "❌ No se pudo conectar "
-            "a IQ Option."
-        )
-
-        raise RuntimeError(
-            "No se pudo conectar a IQ Option"
-        )
-
-    # ========================================================
-    # CUENTA PRACTICE
-    # ========================================================
-
-    try:
-
-        iq.change_balance(
-            "PRACTICE"
-        )
-
-        print(
-            "💰 Cuenta: PRACTICE"
-        )
-
-    except Exception as e:
-
-        print(
-            f"⚠️ Error cambiando cuenta: {e}"
-        )
-
-    print("")
-    print("====================================")
-    print("✅ CONECTADO A IQ OPTION")
-    print("====================================")
-
-    send_telegram(
-        "✅ BOT CONECTADO A IQ OPTION\n\n"
-        "📊 Par: EURUSD-OTC\n"
-        "📈 Marcos: M5 + M1\n"
-        "🎯 Modo: SNIPER\n"
-        f"💰 Monto: {AMOUNT}\n"
-        f"⏱ Expiración: {EXPIRATION} minuto\n"
-        "💼 Cuenta: PRACTICE"
+    raise RuntimeError(
+        "No se pudo conectar a IQ Option"
     )
-
-    return iq
 
 
 # ============================================================
@@ -337,23 +245,13 @@ def connect_iq():
 
 def get_candles(
     iq,
-    pair,
     timeframe
 ):
-
-    # Seguridad adicional
-    if pair != "EURUSD-OTC":
-
-        print(
-            f"⛔ Activo bloqueado: {pair}"
-        )
-
-        return None
 
     try:
 
         candles = iq.get_candles(
-            pair,
+            PAIR,
             timeframe,
             50,
             time.time()
@@ -363,7 +261,7 @@ def get_candles(
 
             print(
                 f"⚠️ Sin velas "
-                f"{pair} TF={timeframe}"
+                f"{PAIR} TF={timeframe}"
             )
 
             return None
@@ -372,34 +270,33 @@ def get_candles(
             candles
         )
 
-        required_columns = [
+        required = [
             "open",
             "close",
             "max",
             "min"
         ]
 
-        for column in required_columns:
+        for column in required:
 
             if column not in df.columns:
 
                 print(
-                    f"❌ Falta columna "
-                    f"{column} en {pair}"
+                    f"❌ Falta {column}"
                 )
 
                 return None
 
         df = df.dropna(
-            subset=required_columns
+            subset=required
         )
 
         if len(df) < 20:
 
             print(
-                f"⚠️ Datos insuficientes "
-                f"{pair} TF={timeframe}: "
-                f"{len(df)} velas"
+                f"⚠️ Pocas velas "
+                f"TF={timeframe}: "
+                f"{len(df)}"
             )
 
             return None
@@ -409,28 +306,25 @@ def get_candles(
     except Exception as e:
 
         print(
-            f"❌ Error obteniendo velas "
-            f"{pair} TF={timeframe}: {e}"
+            f"❌ Error velas "
+            f"TF={timeframe}: {e}"
         )
 
         return None
 
 
 # ============================================================
-# ESPERAR SEGUNDO 58
+# ESPERAR SIGUIENTE VENTANA
 # ============================================================
 
-def wait_entry():
-
-    print(
-        "⏳ Esperando ventana sniper..."
-    )
+def wait_sniper_window():
 
     while True:
 
-        second = int(
-            time.time()
-        ) % 60
+        second = (
+            int(time.time())
+            % 60
+        )
 
         if second >= 58:
 
@@ -442,6 +336,32 @@ def wait_entry():
             return
 
         time.sleep(0.10)
+
+
+# ============================================================
+# ESPERAR SIGUIENTE MINUTO
+# ============================================================
+
+def wait_next_minute():
+
+    current_second = (
+        int(time.time())
+        % 60
+    )
+
+    remaining = (
+        60 -
+        current_second
+    )
+
+    if remaining > 0:
+
+        time.sleep(
+            min(
+                remaining,
+                5
+            )
+        )
 
 
 # ============================================================
@@ -459,54 +379,46 @@ def process_signal(signal):
         tuple
     ):
 
-        if len(signal) >= 2:
+        direction = (
+            signal[0]
+            if len(signal) >= 1
+            else None
+        )
 
-            return (
-                signal[0],
-                signal[1]
-            )
+        trend = (
+            signal[1]
+            if len(signal) >= 2
+            else None
+        )
 
-        if len(signal) == 1:
+        return direction, trend
 
-            return (
-                signal[0],
-                None
-            )
-
-        return None, None
-
-    if isinstance(
-        signal,
-        str
+    if signal in (
+        "call",
+        "put"
     ):
 
-        if signal in (
-            "call",
-            "put"
-        ):
-
-            return signal, None
+        return signal, None
 
     return None, None
 
 
 # ============================================================
-# EJECUTAR OPERACIÓN
+# EJECUTAR TRADE
 # ============================================================
 
-def trade(
+def execute_trade(
     iq,
-    pair,
     direction,
     trend
 ):
 
-    # Seguridad absoluta
-    if pair != "EURUSD-OTC":
+    global last_trade_time
+
+    if PAIR != "EURUSD-OTC":
 
         print(
-            f"⛔ OPERACIÓN BLOQUEADA: "
-            f"{pair}"
+            "⛔ OPERACIÓN BLOQUEADA"
         )
 
         return False
@@ -516,67 +428,103 @@ def trade(
         "put"
     ):
 
+        return False
+
+    # --------------------------------------------------------
+    # COOL DOWN
+    # --------------------------------------------------------
+
+    elapsed = (
+        time.time()
+        -
+        last_trade_time
+    )
+
+    if elapsed < TRADE_COOLDOWN:
+
+        remaining = int(
+            TRADE_COOLDOWN -
+            elapsed
+        )
+
         print(
-            f"⛔ Dirección inválida: "
-            f"{direction}"
+            f"⏳ Cooldown "
+            f"{remaining}s"
         )
 
         return False
 
     print("")
-    print("====================================")
-    print("🚀 SEÑAL CONFIRMADA")
-    print("====================================")
     print(
-        f"📊 Par: {pair}"
+        "========================================"
     )
+
     print(
-        f"➡️ Dirección: "
-        f"{direction.upper()}"
+        "🚀 EJECUTANDO OPERACIÓN"
     )
+
     print(
-        f"📈 Tendencia M5: "
-        f"{trend}"
+        f"📊 {PAIR}"
     )
+
+    print(
+        f"➡️ {direction.upper()}"
+    )
+
+    print(
+        f"📈 M5: {trend}"
+    )
+
+    print(
+        f"💰 Monto: {AMOUNT}"
+    )
+
     print(
         f"⏱ Expiración: "
         f"{EXPIRATION} minuto"
     )
-    print("====================================")
+
+    print(
+        "========================================"
+    )
 
     send_telegram(
-        "🎯 SEÑAL CONFIRMADA\n\n"
-        f"📊 {pair}\n"
+        "🎯 SEÑAL SNIPER\n\n"
+        f"📊 {PAIR}\n"
         f"➡️ {direction.upper()}\n"
         f"📈 M5: {trend}\n"
-        f"⏱ Expiración: {EXPIRATION} minuto"
+        f"💰 {AMOUNT}\n"
+        f"⏱ {EXPIRATION} minuto"
     )
 
     try:
 
         status, order_id = iq.buy(
             AMOUNT,
-            pair,
+            PAIR,
             direction,
             EXPIRATION
         )
 
         if status:
 
+            last_trade_time = (
+                time.time()
+            )
+
             print(
                 "✅ OPERACIÓN ABIERTA"
             )
 
             print(
-                f"🆔 ID: {order_id}"
+                f"🆔 {order_id}"
             )
 
             send_telegram(
                 "✅ OPERACIÓN ABIERTA\n\n"
-                f"📊 {pair}\n"
+                f"📊 {PAIR}\n"
                 f"➡️ {direction.upper()}\n"
-                f"📈 M5: {trend}\n"
-                f"⏱ {EXPIRATION} minuto"
+                f"🆔 {order_id}"
             )
 
             return True
@@ -586,76 +534,41 @@ def trade(
             "la operación"
         )
 
-        send_telegram(
-            "❌ OPERACIÓN RECHAZADA\n\n"
-            f"📊 {pair}"
-        )
-
         return False
 
     except Exception as e:
 
         print(
-            f"❌ Error ejecutando "
-            f"trade: {e}"
+            f"❌ Error trade: {e}"
         )
 
         send_telegram(
-            "❌ ERROR EJECUTANDO TRADE\n\n"
-            f"📊 {pair}\n"
-            f"Error: {e}"
+            "❌ ERROR TRADE\n\n"
+            f"{PAIR}\n"
+            f"{e}"
         )
 
         return False
 
 
 # ============================================================
-# ANALIZAR EURUSD-OTC
+# ANALIZAR EURUSD
 # ============================================================
 
-def analyze_pair(
-    iq,
-    pair
-):
+def analyze_market(iq):
 
     print("")
-    print("------------------------------------")
     print(
-        f"🔎 ANALIZANDO {pair}"
-    )
-    print("------------------------------------")
-
-    # Seguridad principal
-    if pair != "EURUSD-OTC":
-
-        print(
-            f"⛔ Par rechazado: {pair}"
-        )
-
-        return
-
-    # ========================================================
-    # COOLDOWN
-    # ========================================================
-
-    elapsed = (
-        time.time()
-        -
-        last_trade_time[pair]
+        "----------------------------------------"
     )
 
-    if elapsed < TRADE_COOLDOWN:
+    print(
+        "🔎 ANALIZANDO EURUSD-OTC"
+    )
 
-        remaining = int(
-            TRADE_COOLDOWN - elapsed
-        )
-
-        print(
-            f"⏳ EURUSD-OTC: "
-            f"cooldown {remaining}s"
-        )
-
-        return
+    print(
+        "----------------------------------------"
+    )
 
     # ========================================================
     # M1
@@ -663,7 +576,6 @@ def analyze_pair(
 
     df_m1 = get_candles(
         iq,
-        "EURUSD-OTC",
         60
     )
 
@@ -674,7 +586,7 @@ def analyze_pair(
             "sin datos M1"
         )
 
-        return
+        return False
 
     # ========================================================
     # M5
@@ -682,7 +594,6 @@ def analyze_pair(
 
     df_m5 = get_candles(
         iq,
-        "EURUSD-OTC",
         300
     )
 
@@ -693,7 +604,7 @@ def analyze_pair(
             "sin datos M5"
         )
 
-        return
+        return False
 
     print(
         f"📊 EURUSD-OTC: "
@@ -702,12 +613,12 @@ def analyze_pair(
     )
 
     # ========================================================
-    # ANALIZAR ESTRATEGIA
+    # ESTRATEGIA
     # ========================================================
 
     try:
 
-        signal_raw = analyze_candle(
+        signal = analyze_candle(
             df_m1,
             df_m5
         )
@@ -715,28 +626,19 @@ def analyze_pair(
     except Exception as e:
 
         print(
-            f"❌ Error strategy: {e}"
-        )
-
-        send_telegram(
-            "❌ ERROR STRATEGY\n\n"
-            f"EURUSD-OTC\n"
+            f"❌ Error strategy: "
             f"{e}"
         )
 
-        return
+        send_telegram(
+            f"❌ ERROR STRATEGY\n{e}"
+        )
 
-    # ========================================================
-    # PROCESAR SEÑAL
-    # ========================================================
+        return False
 
-    direction, trend = process_signal(
-        signal_raw
+    direction, trend = (
+        process_signal(signal)
     )
-
-    # ========================================================
-    # SIN SEÑAL
-    # ========================================================
 
     if direction not in (
         "call",
@@ -748,50 +650,122 @@ def analyze_pair(
             "sin señal"
         )
 
-        return
-
-    # ========================================================
-    # CONFIRMACIÓN M5
-    # ========================================================
-
-    if direction == "call":
-
-        if trend != "up":
-
-            print(
-                f"🚫 CALL bloqueado. "
-                f"Tendencia M5={trend}"
-            )
-
-            return
-
-    if direction == "put":
-
-        if trend != "down":
-
-            print(
-                f"🚫 PUT bloqueado. "
-                f"Tendencia M5={trend}"
-            )
-
-            return
+        return False
 
     # ========================================================
     # EJECUTAR
     # ========================================================
 
-    success = trade(
+    return execute_trade(
         iq,
-        "EURUSD-OTC",
         direction,
         trend
     )
 
-    if success:
 
-        last_trade_time[
-            "EURUSD-OTC"
-        ] = time.time()
+# ============================================================
+# CICLO DE BÚSQUEDA DE 30 MINUTOS
+# ============================================================
+
+def search_for_entry(iq):
+
+    start_time = time.time()
+
+    print("")
+    print(
+        "========================================"
+    )
+
+    print(
+        "🔍 INICIANDO BÚSQUEDA DE ENTRADA"
+    )
+
+    print(
+        "📊 EURUSD-OTC"
+    )
+
+    print(
+        "⏱ Tiempo máximo: 30 minutos"
+    )
+
+    print(
+        "========================================"
+    )
+
+    while True:
+
+        elapsed = (
+            time.time()
+            -
+            start_time
+        )
+
+        # ====================================================
+        # LÍMITE DE 30 MINUTOS
+        # ====================================================
+
+        if elapsed >= MAX_SEARCH_TIME:
+
+            print("")
+            print(
+                "⏰ Se cumplieron "
+                "30 minutos."
+            )
+
+            print(
+                "🔄 Reiniciando búsqueda."
+            )
+
+            return False
+
+        # ====================================================
+        # VENTANA SNIPER
+        # ====================================================
+
+        wait_sniper_window()
+
+        # ====================================================
+        # ANALIZAR
+        # ====================================================
+
+        success = analyze_market(
+            iq
+        )
+
+        # ====================================================
+        # SI OPERÓ
+        # ====================================================
+
+        if success:
+
+            print("")
+            print(
+                "✅ ENTRADA EJECUTADA"
+            )
+
+            return True
+
+        # ====================================================
+        # SIGUIENTE MINUTO
+        # ====================================================
+
+        print("")
+        print(
+            "⏳ Sin entrada."
+        )
+
+        remaining = int(
+            MAX_SEARCH_TIME -
+            elapsed
+        )
+
+        print(
+            f"⏱ Tiempo restante "
+            f"del ciclo: "
+            f"{max(remaining, 0)}s"
+        )
+
+        wait_next_minute()
 
 
 # ============================================================
@@ -801,65 +775,65 @@ def analyze_pair(
 def main():
 
     print("")
-    print("====================================")
-    print("🤖 BOT SNIPER M1 + M5")
-    print("====================================")
-
-    # ========================================================
-    # VALIDAR PAR
-    # ========================================================
-
-    validate_pairs()
-
-    print("")
     print(
-        "📊 ÚNICO PAR AUTORIZADO:"
-    )
-    print(
-        "   ✅ EURUSD-OTC"
-    )
-
-    print("")
-    print(
-        f"💰 Monto: {AMOUNT}"
+        "========================================"
     )
 
     print(
-        f"⏱ Expiración: "
-        f"{EXPIRATION} minuto"
+        "🤖 BOT SNIPER M1 + M5"
     )
 
     print(
-        "📈 Marcos: M5 + M1"
+        "========================================"
     )
 
     print(
-        "🎯 Entrada sniper: "
-        "segundo 58"
+        "📊 PAR: EURUSD-OTC"
     )
 
-    print("====================================")
+    print(
+        "📈 ESTRUCTURA: M5 + M1"
+    )
+
+    print(
+        "🎯 ESTRATEGIA: "
+        "CONTINUIDAD + FUERZA"
+    )
+
+    print(
+        "⏱ EXPIRACIÓN: 1 MINUTO"
+    )
+
+    print(
+        "🎯 ENTRADA: VELA M1 CERRADA"
+    )
+
+    print(
+        "⏰ BÚSQUEDA: MÁXIMO 30 MINUTOS"
+    )
+
+    print(
+        "========================================"
+    )
 
     # ========================================================
     # VARIABLES
     # ========================================================
 
-    if not check_environment():
+    try:
 
-        print("")
-        print(
-            "🛑 BOT DETENIDO"
-        )
+        validate_environment()
+
+    except Exception as e:
 
         print(
-            "Configura IQ_EMAIL "
-            "e IQ_PASSWORD en Railway."
+            f"🛑 {e}"
         )
 
         return
 
     # ========================================================
-    # CONEXIÓN
+    # CONECTAR
     # ========================================================
 
     try:
@@ -868,28 +842,23 @@ def main():
 
     except Exception as e:
 
-        print("")
         print(
-            "🛑 No se pudo iniciar el bot."
-        )
-
-        print(
-            f"Error: {e}"
+            f"🛑 Error conexión: {e}"
         )
 
         return
 
     # ========================================================
-    # LOOP PRINCIPAL
+    # LOOP
     # ========================================================
 
     while True:
 
         try:
 
-            # ==================================================
+            # ------------------------------------------------
             # COMPROBAR CONEXIÓN
-            # ==================================================
+            # ------------------------------------------------
 
             try:
 
@@ -907,11 +876,6 @@ def main():
                     "⚠️ Conexión perdida."
                 )
 
-                send_telegram(
-                    "⚠️ CONEXIÓN PERDIDA\n\n"
-                    "Intentando reconectar..."
-                )
-
                 try:
 
                     iq = connect_iq()
@@ -919,71 +883,55 @@ def main():
                 except Exception as e:
 
                     print(
-                        f"❌ Reconexión fallida: "
-                        f"{e}"
+                        f"❌ Reconexión: {e}"
                     )
 
                     time.sleep(10)
 
                     continue
 
-            # ==================================================
-            # ESPERAR SEGUNDO 58
-            # ==================================================
+            # ------------------------------------------------
+            # BÚSQUEDA
+            # ------------------------------------------------
 
-            wait_entry()
-
-            print("")
-            print("====================================")
-            print("🎯 INICIANDO ANÁLISIS")
-            print("====================================")
-            print(
-                "📊 PAR: EURUSD-OTC"
-            )
-            print(
-                "📈 ESTRUCTURA: M5 + M1"
-            )
-            print("====================================")
-
-            # ==================================================
-            # SOLO EURUSD-OTC
-            # ==================================================
-
-            analyze_pair(
-                iq,
-                "EURUSD-OTC"
+            search_for_entry(
+                iq
             )
 
             print("")
             print(
-                "✅ Ciclo de análisis terminado."
+                "========================================"
             )
+
+            print(
+                "✅ CICLO DE BÚSQUEDA TERMINADO"
+            )
+
+            print(
+                "========================================"
+            )
+
+            # Pequeña pausa antes
+            # del siguiente ciclo
 
             time.sleep(2)
-
-        # ======================================================
-        # CTRL+C
-        # ======================================================
 
         except KeyboardInterrupt:
 
             print("")
             print(
-                "🛑 Bot detenido manualmente."
+                "🛑 BOT DETENIDO"
             )
 
             send_telegram(
-                "🛑 Bot detenido manualmente."
+                "🛑 BOT DETENIDO MANUALMENTE"
             )
 
             break
 
-        # ======================================================
-        # ERROR GENERAL
-        # ======================================================
-
         except Exception as e:
 
+            print("")
             print(
                 f"❌ ERROR GENERAL: {e}"
             )
@@ -996,7 +944,7 @@ def main():
 
 
 # ============================================================
-# INICIO
+# START
 # ============================================================
 
 if __name__ == "__main__":
