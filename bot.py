@@ -18,12 +18,14 @@ PAIRS = ["EURUSD-OTC", "GBPUSD-OTC", "EURJPY-OTC"]
 AMOUNT = 100
 EXPIRATION = 1  # minutos
 
+# Control de tendencia fuerte
+last_trend = {pair: None for pair in PAIRS}
+
 # ==============================
 
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram no configurado")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -33,8 +35,8 @@ def send_telegram(message):
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message
         })
-    except Exception as e:
-        print("Error Telegram:", e)
+    except:
+        pass
 
 
 def connect_iq():
@@ -42,61 +44,69 @@ def connect_iq():
     iq.connect()
 
     if not iq.check_connect():
-        print("❌ Error conectando a IQ Option")
-        send_telegram("❌ Error conectando a IQ Option")
+        print("❌ Error conexión")
+        send_telegram("❌ Error conexión IQ Option")
         exit()
 
     iq.change_balance("PRACTICE")
 
-    print("✅ Conectado a IQ Option")
-    send_telegram("✅ Bot conectado a IQ Option")
+    print("✅ Conectado")
+    send_telegram("✅ Bot conectado")
 
     return iq
 
 
-def get_candles(iq, pair, timeframe):
+def get_candles(iq, pair, timeframe=60, count=50):
     try:
-        candles = iq.get_candles(pair, timeframe, 50, time.time())
+        candles = iq.get_candles(pair, timeframe, count, time.time())
         df = pd.DataFrame(candles)
         return df
     except Exception as e:
-        print(f"Error velas {pair} TF {timeframe}:", e)
+        print(f"Error velas {pair}:", e)
         return None
 
 
-def wait_second_58():
-    print("⏳ Esperando segundo 58...")
+def wait_sniper_entry():
+    """Entrada exacta en segundo 58"""
     while True:
-        if int(time.time()) % 60 == 58:
+        sec = int(time.time()) % 60
+        if sec == 58:
             return
         time.sleep(0.2)
 
 
-def trade(iq, pair, signal):
-    # 🔥 FIX: soporta ("call", score)
+def process_signal(signal):
+    """
+    Soporta:
+    - "call"
+    - "put"
+    - ("call", score)
+    - None
+    """
+    if signal is None:
+        return None, None
+
     if isinstance(signal, tuple):
-        direction = signal[0]
-        score = signal[1]
-    else:
-        direction = signal
-        score = None
+        return signal[0], signal[1]
 
-    print(f"🚀 {pair} → {direction.upper()} | Score: {score}")
-    send_telegram(f"📊 {pair} → {direction.upper()} | Score: {score}")
+    return signal, None
 
+
+def trade(iq, pair, direction, score=None):
     try:
+        print(f"🚀 {pair} → {direction.upper()} | score: {score}")
+
+        send_telegram(f"📊 {pair} → {direction.upper()} | score: {score}")
+
         status, _ = iq.buy(AMOUNT, pair, direction, EXPIRATION)
 
         if status:
-            print("✅ Operación abierta")
-            send_telegram(f"✅ Trade abierto en {pair}")
+            print("✅ Entrada ejecutada")
         else:
-            print("❌ Error al abrir operación")
-            send_telegram(f"❌ Error trade en {pair}")
+            print("❌ Error entrada")
 
     except Exception as e:
-        print("Error trade:", e)
-        send_telegram(f"❌ Error ejecutando trade {pair}")
+        print(f"Error trade {pair}:", e)
 
 
 def main():
@@ -104,29 +114,38 @@ def main():
 
     while True:
         try:
-            wait_second_58()
+            wait_sniper_entry()
 
             for pair in PAIRS:
-                try:
-                    df_m1 = get_candles(iq, pair, 60)
-                    df_m5 = get_candles(iq, pair, 300)
 
-                    if df_m1 is None or df_m5 is None:
-                        continue
+                df_m1 = get_candles(iq, pair, 60, 50)
+                df_m5 = get_candles(iq, pair, 300, 50)
 
-                    signal = analyze_candle(df_m1, df_m5)
+                if df_m1 is None or df_m5 is None:
+                    continue
 
-                    if signal:
-                        trade(iq, pair, signal)
-                    else:
-                        print(f"⛔ {pair} sin señal")
+                # 🔥 ANALISIS IA
+                signal_raw = analyze_candle(df_m1, df_m5)
 
-                except Exception as e:
-                    print(f"Error en {pair}:", e)
+                direction, score = process_signal(signal_raw)
+
+                # ❌ evitar errores
+                if direction not in ["call", "put"]:
+                    continue
+
+                # 🎯 CONTROL: solo operar cuando cambia tendencia fuerte
+                if last_trend[pair] == direction:
+                    continue
+
+                # actualizar tendencia
+                last_trend[pair] = direction
+
+                # 🚀 ejecutar
+                trade(iq, pair, direction, score)
 
         except Exception as e:
             print("Error general:", e)
-            send_telegram(f"❌ Error general: {e}")
+            send_telegram(f"❌ Error: {e}")
 
         time.sleep(1)
 
