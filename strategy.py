@@ -1,136 +1,146 @@
+import time
+import requests
 import pandas as pd
+from iqoptionapi.stable_api import IQ_Option
+from strategy import analyze_candle
+import os
+
+# =========== CONFIG ===========
+
+EMAIL = os.getenv("IQ_EMAIL")
+PASSWORD = os.getenv("IQ_PASSWORD")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+PAIRS = ["EURUSD-OTC", "GBPUSD-OTC", "EURJPY-OTC"]
+
+AMOUNT = 100
+EXPIRATION = 1  # minutos
+
+# Control de tiempo por par (evita sobreoperar)
+last_trade_time = {pair: 0 for pair in PAIRS}
 
 # ==============================
-# 🔹 UTILIDADES
-# ==============================
-
-def get_trend(df):
-    highs = df["max"].tail(5).values
-    lows = df["min"].tail(5).values
-
-    if all(highs[i] > highs[i-1] for i in range(1, len(highs))) and \
-       all(lows[i] > lows[i-1] for i in range(1, len(lows))):
-        return "bullish"
-
-    if all(highs[i] < highs[i-1] for i in range(1, len(highs))) and \
-       all(lows[i] < lows[i-1] for i in range(1, len(lows))):
-        return "bearish"
-
-    return "lateral"
 
 
-def is_strong_candle(candle):
-    body = abs(candle["close"] - candle["open"])
-    wick = (candle["max"] - candle["min"]) - body
-    return body > wick * 1.2  # 🔥 más flexible
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
 
-
-def has_pullback(df, trend):
-    last = df.tail(4)
-
-    if trend == "bullish":
-        return all(last["close"].iloc[i] < last["close"].iloc[i-1] for i in range(1, len(last)))
-
-    if trend == "bearish":
-        return all(last["close"].iloc[i] > last["close"].iloc[i-1] for i in range(1, len(last)))
-
-    return False
-
-
-def no_lateral_zone(df):
-    high = df["max"].tail(20).max()
-    low = df["min"].tail(20).min()
-
-    range_size = high - low
-
-    # 🔥 MÁS FLEXIBLE PARA OTC
-    return range_size > 0.0002
-
-
-# ==============================
-# 🔥 MICROSTRUCTURA
-# ==============================
-
-def microstructure_score(df):
-    last = df.iloc[-1]
-
-    body = last["close"] - last["open"]
-    range_total = last["max"] - last["min"]
-
-    if range_total == 0:
-        return 0
-
-    return abs(body) / range_total
-
-
-# ==============================
-# 🧠 IA PRINCIPAL
-# ==============================
-
-def analyze_candle(df_m1, df_m5):
     try:
-        trend_m5 = get_trend(df_m5)
-        trend_m1 = get_trend(df_m1)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        )
+    except:
+        pass
 
-        if trend_m5 == "lateral":
-            return None
 
-        if not no_lateral_zone(df_m5):
-            return None
+def connect_iq():
+    iq = IQ_Option(EMAIL, PASSWORD)
+    iq.connect()
 
-        pullback = has_pullback(df_m1, trend_m5)
+    if not iq.check_connect():
+        print("❌ Error conexión IQ Option")
+        send_telegram("❌ Error conexión IQ Option")
+        exit()
 
-        last_candle = df_m1.iloc[-1]
-        strong = is_strong_candle(last_candle)
+    iq.change_balance("PRACTICE")
 
-        micro_score = microstructure_score(df_m1)
+    print("✅ Conectado a IQ Option")
+    send_telegram("✅ Bot conectado")
 
-        # ==========================
-        # 🎯 SCORE
-        # ==========================
+    return iq
 
-        score = 0
 
-        if trend_m5 == trend_m1:
-            score += 30
-
-        if pullback:
-            score += 15  # 🔽 bajado
-
-        if strong:
-            score += 20  # 🔽 bajado
-
-        if micro_score > 0.5:
-            score += 20  # 🔽 más fácil
-
-        # ==========================
-        # 📊 DEBUG (CLAVE)
-        # ==========================
-
-        print(f"""
-PAIR DEBUG
-Trend M5: {trend_m5}
-Trend M1: {trend_m1}
-Pullback: {pullback}
-Strong: {strong}
-Micro: {micro_score:.2f}
-Score: {score}
-""")
-
-        # ==========================
-        # 🚀 DECISIÓN
-        # ==========================
-
-        if score >= 55:  # 🔥 MÁS FLEXIBLE
-
-            if trend_m5 == "bullish":
-                return ("call", score)
-
-            elif trend_m5 == "bearish":
-                return ("put", score)
-
+def get_candles(iq, pair, timeframe):
+    try:
+        candles = iq.get_candles(pair, timeframe, 50, time.time())
+        return pd.DataFrame(candles)
+    except Exception as e:
+        print(f"Error velas {pair} TF {timeframe}: {e}")
         return None
+
+
+# 🎯 Entrada sniper (segundo 58)
+def wait_entry():
+    while True:
+        if int(time.time()) % 60 >= 58:
+            return
+        time.sleep(0.2)
+
+
+# 🧠 Procesar señal (soporta tuple)
+def process_signal(signal):
+    if signal is None:
+        return None, None
+
+    if isinstance(signal, tuple):
+        return signal[0], signal[1]
+
+    return signal, None
+
+
+# 🚀 Ejecutar trade
+def trade(iq, pair, direction, score):
+    print(f"🚀 {pair} → {direction.upper()} | Score: {score}")
+    send_telegram(f"📊 {pair} → {direction.upper()} | Score: {score}")
+
+    try:
+        status, _ = iq.buy(AMOUNT, pair, direction, EXPIRATION)
+
+        if status:
+            print("✅ Operación abierta")
+            send_telegram(f"✅ Trade en {pair}")
+        else:
+            print("❌ Error al abrir operación")
+            send_telegram(f"❌ Error trade {pair}")
 
     except Exception as e:
-        print("Error strategy:", e)
-        return None
+        print(f"Error trade {pair}:", e)
+
+
+# 🔁 LOOP PRINCIPAL
+def main():
+    iq = connect_iq()
+
+    while True:
+        try:
+            wait_entry()
+
+            for pair in PAIRS:
+
+                # ⏱️ evitar operar demasiado seguido
+                if time.time() - last_trade_time[pair] < 120:
+                    continue
+
+                df_m1 = get_candles(iq, pair, 60)
+                df_m5 = get_candles(iq, pair, 300)
+
+                if df_m1 is None or df_m5 is None:
+                    continue
+
+                signal_raw = analyze_candle(df_m1, df_m5)
+
+                direction, score = process_signal(signal_raw)
+
+                # ❌ validar señal
+                if direction not in ["call", "put"]:
+                    continue
+
+                # 🚀 ejecutar trade
+                trade(iq, pair, direction, score)
+
+                # guardar tiempo de última operación
+                last_trade_time[pair] = time.time()
+
+        except Exception as e:
+            print("Error general:", e)
+            send_telegram(f"❌ Error: {e}")
+
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()
