@@ -18,6 +18,7 @@ PAIRS = [
     "GBPUSD-OTC",
     "EURJPY-OTC"
 ]
+
 AMOUNT = 100
 EXPIRATION = 1  # minutos
 
@@ -26,18 +27,15 @@ EXPIRATION = 1  # minutos
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram no configurado")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
     try:
-        requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        })
-    except Exception as e:
-        print("Error Telegram:", e)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        )
+    except:
+        pass
 
 
 def connect_iq():
@@ -45,80 +43,34 @@ def connect_iq():
     iq.connect()
 
     if not iq.check_connect():
-        print("❌ Error conectando a IQ Option")
-        send_telegram("❌ Error conectando a IQ Option")
+        print("❌ Error conexión IQ Option")
+        send_telegram("❌ Error conexión IQ Option")
         exit()
 
     iq.change_balance("PRACTICE")
-
     print("✅ Conectado a IQ Option")
-    send_telegram("✅ Bot conectado a IQ Option")
 
     return iq
 
 
-def get_candles(iq, timeframe):
+def get_candles(iq, pair, timeframe):
     try:
-        candles = iq.get_candles(PAIR, timeframe, 50, time.time())
+        candles = iq.get_candles(pair, timeframe, 50, time.time())
         return pd.DataFrame(candles)
     except Exception as e:
-        print(f"Error velas TF {timeframe}:", e)
+        print(f"Error velas {pair} TF {timeframe}: {e}")
         return None
 
 
-# ==============================
-# 🎯 ESPERA SNIPER (SEGUNDO 58)
-# ==============================
+# 🎯 Entrada sniper (segundo 58)
 def wait_entry():
-    print("⏳ Esperando segundo 58...")
-
     while True:
-        sec = int(time.time()) % 60
-        if sec >= 58:
+        if int(time.time()) % 60 >= 58:
             return
         time.sleep(0.2)
 
 
-# ==============================
-# 📊 OPERACIÓN + RESULTADO
-# ==============================
-def trade(iq, signal, score):
-    direction = signal
-
-    print(f"🚀 {direction.upper()} | Score: {score}")
-    send_telegram(f"📊 {direction.upper()} | Score: {score}")
-
-    try:
-        status, trade_id = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
-
-        if not status:
-            print("❌ Error al abrir operación")
-            return
-
-        print("⏳ Esperando resultado...")
-
-        time.sleep(EXPIRATION * 60)
-
-        result = iq.check_win_v4(trade_id)
-
-        win = result > 0
-
-        if win:
-            print("✅ GANADA")
-            send_telegram("✅ WIN")
-        else:
-            print("❌ PERDIDA")
-            send_telegram("❌ LOSS")
-
-        update_ai(win)
-
-    except Exception as e:
-        print("Error en trade:", e)
-
-
-# ==============================
-# 🧠 IA APRENDIZAJE
-# ==============================
+# 🧠 IA aprendizaje
 def update_ai(win):
     memory = load_memory()
 
@@ -133,12 +85,71 @@ def update_ai(win):
 
     save_memory(memory)
 
-    print(f"🧠 IA updated: {memory}")
+    print(f"🧠 IA: {memory}")
 
 
-# ==============================
-# 🔁 LOOP PRINCIPAL
-# ==============================
+# 🚀 Ejecutar trade
+def trade(iq, pair, signal, score):
+    print(f"🚀 {pair} | {signal.upper()} | Score: {score}")
+    send_telegram(f"📊 {pair} | {signal.upper()} | Score: {score}")
+
+    try:
+        status, trade_id = iq.buy(AMOUNT, pair, signal, EXPIRATION)
+
+        if not status:
+            print("❌ No se pudo abrir operación")
+            return
+
+        print("⏳ Esperando resultado...")
+        time.sleep(EXPIRATION * 60)
+
+        result = iq.check_win_v4(trade_id)
+        win = result > 0
+
+        if win:
+            print("✅ WIN")
+            send_telegram(f"✅ WIN {pair}")
+        else:
+            print("❌ LOSS")
+            send_telegram(f"❌ LOSS {pair}")
+
+        update_ai(win)
+
+    except Exception as e:
+        print("Error trade:", e)
+
+
+# 🔍 Buscar mejor oportunidad
+def find_best_trade(iq):
+    best_pair = None
+    best_signal = None
+    best_score = 0
+
+    for pair in PAIRS:
+        df_m1 = get_candles(iq, pair, 60)
+        df_m5 = get_candles(iq, pair, 300)
+
+        if df_m1 is None or df_m5 is None:
+            continue
+
+        signal, trend, score = analyze_candle(df_m1, df_m5)
+
+        # SOLO imprime si hay señal (evita saturar Railway)
+        if signal:
+            print(f"{pair} → {signal} | score: {score}")
+
+        if signal and score > best_score:
+            best_pair = pair
+            best_signal = signal
+            best_score = score
+
+    if best_pair:
+        return best_pair, best_signal, best_score
+
+    return None
+
+
+# 🔁 Loop principal
 def main():
     iq = connect_iq()
 
@@ -146,19 +157,13 @@ def main():
         try:
             wait_entry()
 
-            df_m1 = get_candles(iq, 60)
-            df_m5 = get_candles(iq, 300)
+            best = find_best_trade(iq)
 
-            if df_m1 is None or df_m5 is None:
-                continue
-
-            signal, trend, score = analyze_candle(df_m1, df_m5)
-
-            if signal:
-                print(f"📈 Cambio detectado: {trend}")
-                trade(iq, signal, score)
+            if best:
+                pair, signal, score = best
+                trade(iq, pair, signal, score)
             else:
-                print("⛔ Sin señal")
+                print("⛔ Sin oportunidades")
 
         except Exception as e:
             print("Error general:", e)
