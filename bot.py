@@ -2,7 +2,7 @@ import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-from strategy import analyze_candle
+from strategy import analyze_candle, load_memory, save_memory
 import os
 
 # =========== CONFIG ===========
@@ -14,33 +14,29 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 333
+AMOUNT = 150
 EXPIRATION = 1  # minutos
 
 # ==============================
 
 
 def send_telegram(message):
-    """Enviar mensaje a Telegram"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram no configurado")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
     try:
-        requests.post(url, data=data)
+        requests.post(url, data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message
+        })
     except Exception as e:
         print("Error Telegram:", e)
 
 
 def connect_iq():
-    """Conectar a IQ Option"""
     iq = IQ_Option(EMAIL, PASSWORD)
     iq.connect()
 
@@ -58,72 +54,107 @@ def connect_iq():
 
 
 def get_candles(iq, timeframe):
-    """Obtener velas por timeframe"""
     try:
         candles = iq.get_candles(PAIR, timeframe, 50, time.time())
-        df = pd.DataFrame(candles)
-        return df
+        return pd.DataFrame(candles)
     except Exception as e:
-        print(f"Error obteniendo velas TF {timeframe}:", e)
+        print(f"Error velas TF {timeframe}:", e)
         return None
 
 
-def wait_new_candle():
-    """Esperar nueva vela M1"""
-    print("⏳ Esperando nueva vela...")
+# ==============================
+# 🎯 ESPERA SNIPER (SEGUNDO 58)
+# ==============================
+def wait_entry():
+    print("⏳ Esperando segundo 58...")
 
     while True:
-        if int(time.time()) % 60 == 0:
+        sec = int(time.time()) % 60
+        if sec >= 58:
             return
-        time.sleep(0.5)
+        time.sleep(0.2)
 
 
-def trade(iq, signal):
-    """Ejecutar operación"""
+# ==============================
+# 📊 OPERACIÓN + RESULTADO
+# ==============================
+def trade(iq, signal, score):
     direction = signal
 
-    print(f"🚀 Ejecutando {direction.upper()}")
-    send_telegram(f"📊 Señal: {direction.upper()} en {PAIR}")
+    print(f"🚀 {direction.upper()} | Score: {score}")
+    send_telegram(f"📊 {direction.upper()} | Score: {score}")
 
     try:
-        status, _ = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
+        status, trade_id = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
 
-        if status:
-            print("✅ Operación abierta")
-            send_telegram("⏳ Operación abierta")
-        else:
+        if not status:
             print("❌ Error al abrir operación")
-            send_telegram("❌ Error al abrir operación")
+            return
+
+        print("⏳ Esperando resultado...")
+
+        time.sleep(EXPIRATION * 60)
+
+        result = iq.check_win_v4(trade_id)
+
+        win = result > 0
+
+        if win:
+            print("✅ GANADA")
+            send_telegram("✅ WIN")
+        else:
+            print("❌ PERDIDA")
+            send_telegram("❌ LOSS")
+
+        update_ai(win)
 
     except Exception as e:
         print("Error en trade:", e)
-        send_telegram("❌ Error ejecutando trade")
 
 
+# ==============================
+# 🧠 IA APRENDIZAJE
+# ==============================
+def update_ai(win):
+    memory = load_memory()
+
+    if win:
+        memory["wins"] += 1
+        memory["confidence"] += 0.02
+    else:
+        memory["losses"] += 1
+        memory["confidence"] -= 0.02
+
+    memory["confidence"] = max(0.1, min(0.9, memory["confidence"]))
+
+    save_memory(memory)
+
+    print(f"🧠 IA updated: {memory}")
+
+
+# ==============================
+# 🔁 LOOP PRINCIPAL
+# ==============================
 def main():
-    """Loop principal"""
     iq = connect_iq()
 
     while True:
         try:
-            wait_new_candle()
+            wait_entry()
 
-            # 🔥 MULTI-TIMEFRAME
             df_m1 = get_candles(iq, 60)
             df_m5 = get_candles(iq, 300)
-            df_m15 = get_candles(iq, 900)
 
-            if df_m1 is None or df_m5 is None or df_m15 is None:
+            if df_m1 is None or df_m5 is None:
                 continue
 
-            # 🔥 NUEVA FUNCIÓN (con control de tendencia)
-            signal, trend = analyze_candle(df_m1, df_m5, df_m15)
+            signal, trend, score = analyze_candle(df_m1, df_m5)
 
             if signal:
-                print(f"📈 Tendencia actual: {trend}")
-                trade(iq, signal)
+                print(f"📈 Cambio detectado: {trend}")
+                trade(iq, signal, score)
             else:
-                print("⛔ No hay señal")
+                print("⛔ Sin señal")
 
         except Exception as e:
             print("Error general:", e)
