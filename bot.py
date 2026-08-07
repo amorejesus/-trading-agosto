@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 100
+AMOUNT = 333
 EXPIRATION = 1  # minutos
 
 # ==============================
@@ -57,19 +57,19 @@ def connect_iq():
     return iq
 
 
-def get_candles(iq):
-    """Obtener velas"""
+def get_candles(iq, timeframe):
+    """Obtener velas por timeframe"""
     try:
-        candles = iq.get_candles(PAIR, 60, 50, time.time())
+        candles = iq.get_candles(PAIR, timeframe, 50, time.time())
         df = pd.DataFrame(candles)
         return df
     except Exception as e:
-        print("Error obteniendo velas:", e)
+        print(f"Error obteniendo velas TF {timeframe}:", e)
         return None
 
 
 def wait_new_candle():
-    """Esperar nueva vela"""
+    """Esperar nueva vela M1"""
     print("⏳ Esperando nueva vela...")
 
     while True:
@@ -108,14 +108,19 @@ def main():
         try:
             wait_new_candle()
 
-            df = get_candles(iq)
+            # 🔥 MULTI-TIMEFRAME
+            df_m1 = get_candles(iq, 60)
+            df_m5 = get_candles(iq, 300)
+            df_m15 = get_candles(iq, 900)
 
-            if df is None:
+            if df_m1 is None or df_m5 is None or df_m15 is None:
                 continue
 
-            signal = analyze_candle(df)
+            # 🔥 NUEVA FUNCIÓN (con control de tendencia)
+            signal, trend = analyze_candle(df_m1, df_m5, df_m15)
 
             if signal:
+                print(f"📈 Tendencia actual: {trend}")
                 trade(iq, signal)
             else:
                 print("⛔ No hay señal")
