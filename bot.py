@@ -21,18 +21,26 @@ EXPIRATION = 1  # minutos
 
 
 def send_telegram(message):
+    """Enviar mensaje a Telegram"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram no configurado")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message
     }
+
     try:
         requests.post(url, data=data)
-    except:
-        pass
+    except Exception as e:
+        print("Error Telegram:", e)
 
 
 def connect_iq():
+    """Conectar a IQ Option"""
     iq = IQ_Option(EMAIL, PASSWORD)
     iq.connect()
 
@@ -42,6 +50,7 @@ def connect_iq():
         exit()
 
     iq.change_balance("PRACTICE")
+
     print("✅ Conectado a IQ Option")
     send_telegram("✅ Bot conectado a IQ Option")
 
@@ -49,12 +58,20 @@ def connect_iq():
 
 
 def get_candles(iq):
-    candles = iq.get_candles(PAIR, 60, 50, time.time())
-    df = pd.DataFrame(candles)
-    return df
+    """Obtener velas"""
+    try:
+        candles = iq.get_candles(PAIR, 60, 50, time.time())
+        df = pd.DataFrame(candles)
+        return df
+    except Exception as e:
+        print("Error obteniendo velas:", e)
+        return None
 
 
 def wait_new_candle():
+    """Esperar nueva vela"""
+    print("⏳ Esperando nueva vela...")
+
     while True:
         if int(time.time()) % 60 == 0:
             return
@@ -62,30 +79,50 @@ def wait_new_candle():
 
 
 def trade(iq, signal):
+    """Ejecutar operación"""
     direction = signal
 
     print(f"🚀 Ejecutando {direction.upper()}")
     send_telegram(f"📊 Señal: {direction.upper()} en {PAIR}")
 
-    status, _ = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
+    try:
+        status, _ = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
 
-    if status:
-        send_telegram("⏳ Operación abierta")
-    else:
-        send_telegram("❌ Error al abrir operación")
+        if status:
+            print("✅ Operación abierta")
+            send_telegram("⏳ Operación abierta")
+        else:
+            print("❌ Error al abrir operación")
+            send_telegram("❌ Error al abrir operación")
+
+    except Exception as e:
+        print("Error en trade:", e)
+        send_telegram("❌ Error ejecutando trade")
 
 
 def main():
+    """Loop principal"""
     iq = connect_iq()
 
     while True:
-        wait_new_candle()
+        try:
+            wait_new_candle()
 
-        df = get_candles(iq)
-        signal = analyze_candle(df)
+            df = get_candles(iq)
 
-        if signal:
-            trade(iq, signal)
+            if df is None:
+                continue
+
+            signal = analyze_candle(df)
+
+            if signal:
+                trade(iq, signal)
+            else:
+                print("⛔ No hay señal")
+
+        except Exception as e:
+            print("Error general:", e)
+            send_telegram(f"❌ Error: {e}")
 
         time.sleep(1)
 
