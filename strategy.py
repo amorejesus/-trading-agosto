@@ -1,6 +1,24 @@
 import pandas as pd
+import json
+import os
 
+MEMORY_FILE = "ai_memory.json"
 last_trend = None
+
+
+# ==============================
+# IA MEMORY
+# ==============================
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {"wins": 0, "losses": 0, "confidence": 0.5}
+    with open(MEMORY_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_memory(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 
 # ==============================
@@ -25,14 +43,13 @@ def trend_m5(df):
 
 
 # ==============================
-# PULLBACK EN M5
+# PULLBACK
 # ==============================
 def pullback_m5(df, trend):
     candles = df.iloc[-4:-1]
 
     if trend == "up":
         return all(c["close"] < c["open"] for _, c in candles.iterrows())
-
     elif trend == "down":
         return all(c["close"] > c["open"] for _, c in candles.iterrows())
 
@@ -40,28 +57,37 @@ def pullback_m5(df, trend):
 
 
 # ==============================
-# VELA SNIPER M1
+# MICROESTRUCTURA M1
 # ==============================
-def sniper_entry(df):
+def microstructure(df):
     last = df.iloc[-2]
 
     body = abs(last["close"] - last["open"])
-    range_candle = last["max"] - last["min"]
+    total = last["max"] - last["min"]
 
-    if range_candle == 0:
-        return False
+    if total == 0:
+        return 0
 
-    body_ratio = body / range_candle
+    body_ratio = body / total
 
-    upper_wick = last["max"] - max(last["open"], last["close"])
-    lower_wick = min(last["open"], last["close"]) - last["min"]
+    upper = last["max"] - max(last["open"], last["close"])
+    lower = min(last["open"], last["close"]) - last["min"]
 
-    # 🔥 vela limpia (sin manipulación)
-    return body_ratio > 0.65 and upper_wick < body * 0.4 and lower_wick < body * 0.4
+    score = 0
+
+    # fuerza
+    if body_ratio > 0.65:
+        score += 2
+
+    # rechazo bajo
+    if upper < body * 0.4 and lower < body * 0.4:
+        score += 2
+
+    return score
 
 
 # ==============================
-# EVITAR LATERAL M1
+# LATERAL
 # ==============================
 def is_lateral(df):
     recent = df.iloc[-10:]
@@ -74,45 +100,43 @@ def is_lateral(df):
 def analyze_candle(df_m1, df_m5):
     global last_trend
 
-    if df_m1 is None or df_m5 is None:
-        return None, last_trend
+    memory = load_memory()
 
     if len(df_m1) < 20 or len(df_m5) < 10:
-        return None, last_trend
+        return None, last_trend, 0
 
     trend = trend_m5(df_m5)
 
     if trend is None:
-        return None, last_trend
+        return None, last_trend, 0
 
-    # 🔥 SOLO 1 TRADE POR CAMBIO
+    # solo cambio de tendencia
     if last_trend == trend:
-        return None, last_trend
+        return None, last_trend, 0
 
-    # 🔥 esperar pullback real
     if not pullback_m5(df_m5, trend):
-        return None, last_trend
+        return None, last_trend, 0
 
-    # ❌ evitar lateral
     if is_lateral(df_m1):
-        return None, last_trend
+        return None, last_trend, 0
 
-    # 🔥 confirmación sniper
-    if not sniper_entry(df_m1):
-        return None, last_trend
+    micro_score = microstructure(df_m1)
+
+    # IA ajusta exigencia
+    threshold = 3 + (0.5 - memory["confidence"]) * 2
+
+    if micro_score < threshold:
+        return None, last_trend, micro_score
 
     last = df_m1.iloc[-2]
     prev = df_m1.iloc[-3]
 
-    # ==============================
-    # ENTRADA FINAL
-    # ==============================
     if trend == "up" and last["close"] > prev["close"]:
         last_trend = trend
-        return "call", trend
+        return "call", trend, micro_score
 
     elif trend == "down" and last["close"] < prev["close"]:
         last_trend = trend
-        return "put", trend
+        return "put", trend, micro_score
 
-    return None, last_trend
+    return None, last_trend, micro_score
