@@ -2,7 +2,7 @@ import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
-from strategy import analyze_candle, load_memory, save_memory
+from strategy import analyze_candle
 import os
 
 # =========== CONFIG ===========
@@ -13,14 +13,13 @@ PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-PAIRS = [
-    "EURUSD-OTC",
-    "GBPUSD-OTC",
-    "EURJPY-OTC"
-]
+PAIRS = ["EURUSD-OTC", "GBPUSD-OTC", "EURJPY-OTC"]
 
-AMOUNT = 175
+AMOUNT = 3333
 EXPIRATION = 1  # minutos
+
+# Control de tiempo por par (evita sobreoperar)
+last_trade_time = {pair: 0 for pair in PAIRS}
 
 # ==============================
 
@@ -48,7 +47,9 @@ def connect_iq():
         exit()
 
     iq.change_balance("PRACTICE")
+
     print("✅ Conectado a IQ Option")
+    send_telegram("✅ Bot conectado")
 
     return iq
 
@@ -70,86 +71,37 @@ def wait_entry():
         time.sleep(0.2)
 
 
-# 🧠 IA aprendizaje
-def update_ai(win):
-    memory = load_memory()
+# 🧠 Procesar señal (soporta tuple)
+def process_signal(signal):
+    if signal is None:
+        return None, None
 
-    if win:
-        memory["wins"] += 1
-        memory["confidence"] += 0.02
-    else:
-        memory["losses"] += 1
-        memory["confidence"] -= 0.02
+    if isinstance(signal, tuple):
+        return signal[0], signal[1]
 
-    memory["confidence"] = max(0.1, min(0.9, memory["confidence"]))
-
-    save_memory(memory)
-
-    print(f"🧠 IA: {memory}")
+    return signal, None
 
 
 # 🚀 Ejecutar trade
-def trade(iq, pair, signal, score):
-    print(f"🚀 {pair} | {signal.upper()} | Score: {score}")
-    send_telegram(f"📊 {pair} | {signal.upper()} | Score: {score}")
+def trade(iq, pair, direction, score):
+    print(f"🚀 {pair} → {direction.upper()} | Score: {score}")
+    send_telegram(f"📊 {pair} → {direction.upper()} | Score: {score}")
 
     try:
-        status, trade_id = iq.buy(AMOUNT, pair, signal, EXPIRATION)
+        status, _ = iq.buy(AMOUNT, pair, direction, EXPIRATION)
 
-        if not status:
-            print("❌ No se pudo abrir operación")
-            return
-
-        print("⏳ Esperando resultado...")
-        time.sleep(EXPIRATION * 60)
-
-        result = iq.check_win_v4(trade_id)
-        win = result > 0
-
-        if win:
-            print("✅ WIN")
-            send_telegram(f"✅ WIN {pair}")
+        if status:
+            print("✅ Operación abierta")
+            send_telegram(f"✅ Trade en {pair}")
         else:
-            print("❌ LOSS")
-            send_telegram(f"❌ LOSS {pair}")
-
-        update_ai(win)
+            print("❌ Error al abrir operación")
+            send_telegram(f"❌ Error trade {pair}")
 
     except Exception as e:
-        print("Error trade:", e)
+        print(f"Error trade {pair}:", e)
 
 
-# 🔍 Buscar mejor oportunidad
-def find_best_trade(iq):
-    best_pair = None
-    best_signal = None
-    best_score = 0
-
-    for pair in PAIRS:
-        df_m1 = get_candles(iq, pair, 60)
-        df_m5 = get_candles(iq, pair, 300)
-
-        if df_m1 is None or df_m5 is None:
-            continue
-
-        signal, trend, score = analyze_candle(df_m1, df_m5)
-
-        # SOLO imprime si hay señal (evita saturar Railway)
-        if signal:
-            print(f"{pair} → {signal} | score: {score}")
-
-        if signal and score > best_score:
-            best_pair = pair
-            best_signal = signal
-            best_score = score
-
-    if best_pair:
-        return best_pair, best_signal, best_score
-
-    return None
-
-
-# 🔁 Loop principal
+# 🔁 LOOP PRINCIPAL
 def main():
     iq = connect_iq()
 
@@ -157,13 +109,31 @@ def main():
         try:
             wait_entry()
 
-            best = find_best_trade(iq)
+            for pair in PAIRS:
 
-            if best:
-                pair, signal, score = best
-                trade(iq, pair, signal, score)
-            else:
-                print("⛔ Sin oportunidades")
+                # ⏱️ evitar operar demasiado seguido
+                if time.time() - last_trade_time[pair] < 120:
+                    continue
+
+                df_m1 = get_candles(iq, pair, 60)
+                df_m5 = get_candles(iq, pair, 300)
+
+                if df_m1 is None or df_m5 is None:
+                    continue
+
+                signal_raw = analyze_candle(df_m1, df_m5)
+
+                direction, score = process_signal(signal_raw)
+
+                # ❌ validar señal
+                if direction not in ["call", "put"]:
+                    continue
+
+                # 🚀 ejecutar trade
+                trade(iq, pair, direction, score)
+
+                # guardar tiempo de última operación
+                last_trade_time[pair] = time.time()
 
         except Exception as e:
             print("Error general:", e)
