@@ -1,9 +1,10 @@
+import os
 import time
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
+
 from strategy import analyze_candle
-import os
 
 
 # ============================================================
@@ -16,17 +17,16 @@ PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# 3 pares OTC
 PAIRS = "EURUSD-OTC"
 AMOUNT = 3333
 
-# Expiración de la operación
+# Expiración en minutos
 EXPIRATION = 1
-
 
 # Tiempo mínimo entre operaciones del mismo par
 TRADE_COOLDOWN = 120
 
+# Control de operaciones
 last_trade_time = {
     pair: 0
     for pair in PAIRS
@@ -38,11 +38,11 @@ last_trade_time = {
 # ============================================================
 
 def send_telegram(message):
-    """Enviar mensajes a Telegram."""
+    """Enviar mensaje a Telegram."""
 
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram no configurado")
-        return
+        return False
 
     try:
         response = requests.post(
@@ -54,16 +54,80 @@ def send_telegram(message):
             timeout=10
         )
 
-        if not response.ok:
-            print(
-                "⚠️ Error Telegram:",
-                response.text
-            )
+        if response.ok:
+            return True
+
+        print(
+            f"⚠️ Error Telegram: "
+            f"{response.status_code}"
+        )
+
+        return False
 
     except Exception as e:
+
         print(
             f"⚠️ Error enviando Telegram: {e}"
         )
+
+        return False
+
+
+# ============================================================
+# COMPROBAR VARIABLES
+# ============================================================
+
+def check_environment():
+    """
+    Comprueba las variables necesarias sin mostrar
+    ninguna contraseña o token.
+    """
+
+    print("")
+    print("🔐 COMPROBANDO VARIABLES DE ENTORNO")
+    print("------------------------------------")
+
+    email_ok = bool(EMAIL)
+    password_ok = bool(PASSWORD)
+    telegram_token_ok = bool(TELEGRAM_TOKEN)
+    telegram_chat_ok = bool(TELEGRAM_CHAT_ID)
+
+    print(
+        f"IQ_EMAIL: "
+        f"{'✅ configurado' if email_ok else '❌ AUSENTE'}"
+    )
+
+    print(
+        f"IQ_PASSWORD: "
+        f"{'✅ configurado' if password_ok else '❌ AUSENTE'}"
+    )
+
+    print(
+        f"TELEGRAM_TOKEN: "
+        f"{'✅ configurado' if telegram_token_ok else '⚠️ AUSENTE'}"
+    )
+
+    print(
+        f"TELEGRAM_CHAT_ID: "
+        f"{'✅ configurado' if telegram_chat_ok else '⚠️ AUSENTE'}"
+    )
+
+    print("------------------------------------")
+
+    if not email_ok or not password_ok:
+
+        print(
+            "❌ Faltan las credenciales de IQ Option."
+        )
+
+        print(
+            "Configura IQ_EMAIL e IQ_PASSWORD "
+            "en las Variables del servicio worker de Railway."
+        )
+
+        return False
+
+    return True
 
 
 # ============================================================
@@ -71,55 +135,120 @@ def send_telegram(message):
 # ============================================================
 
 def connect_iq():
-    """Conectar con IQ Option."""
+    """Conectar a IQ Option."""
 
-    if not EMAIL or not PASSWORD:
+    global EMAIL
+    global PASSWORD
+
+    # Volver a leer variables por seguridad
+    EMAIL = os.getenv("IQ_EMAIL")
+    PASSWORD = os.getenv("IQ_PASSWORD")
+
+    if not check_environment():
+
+        send_telegram(
+            "❌ BOT DETENIDO\n\n"
+            "Faltan IQ_EMAIL o IQ_PASSWORD "
+            "en las variables de Railway."
+        )
+
         raise RuntimeError(
             "Faltan IQ_EMAIL o IQ_PASSWORD"
         )
 
+    print("")
     print("🔌 Conectando a IQ Option...")
 
-    iq = IQ_Option(
-        EMAIL,
-        PASSWORD
-    )
+    try:
 
-    iq.connect()
+        iq = IQ_Option(
+            EMAIL,
+            PASSWORD
+        )
 
-    # Esperar un poco para establecer conexión
-    for _ in range(10):
+        iq.connect()
 
-        if iq.check_connect():
-            break
+    except Exception as e:
 
-        print("⏳ Esperando conexión...")
-        time.sleep(1)
-
-    if not iq.check_connect():
-
-        print("❌ Error conexión IQ Option")
+        print(
+            f"❌ Error creando conexión: {e}"
+        )
 
         send_telegram(
+            f"❌ Error conectando a IQ Option:\n{e}"
+        )
+
+        raise
+
+    # --------------------------------------------------------
+    # ESPERAR CONEXIÓN
+    # --------------------------------------------------------
+
+    connected = False
+
+    for attempt in range(10):
+
+        try:
+
+            if iq.check_connect():
+
+                connected = True
+                break
+
+        except Exception:
+            pass
+
+        print(
+            f"⏳ Esperando conexión "
+            f"({attempt + 1}/10)..."
+        )
+
+        time.sleep(1)
+
+    if not connected:
+
+        print(
             "❌ No se pudo conectar a IQ Option"
+        )
+
+        send_telegram(
+            "❌ No se pudo conectar a IQ Option."
         )
 
         raise RuntimeError(
             "No se pudo conectar a IQ Option"
         )
 
-    # Cuenta PRACTICE
-    iq.change_balance("PRACTICE")
+    # --------------------------------------------------------
+    # CUENTA PRACTICE
+    # --------------------------------------------------------
 
-    print(
-        "✅ Conectado a IQ Option"
-    )
+    try:
+
+        iq.change_balance("PRACTICE")
+
+        print(
+            "💰 Cuenta seleccionada: PRACTICE"
+        )
+
+    except Exception as e:
+
+        print(
+            f"⚠️ No se pudo cambiar a PRACTICE: {e}"
+        )
+
+    print("")
+    print("====================================")
+    print("✅ CONECTADO A IQ OPTION")
+    print("====================================")
 
     send_telegram(
-        "✅ Bot conectado a IQ Option\n"
-        "📊 Modo: PRACTICE\n"
+        "✅ BOT CONECTADO A IQ OPTION\n\n"
+        "📊 Cuenta: PRACTICE\n"
         f"💰 Monto: {AMOUNT}\n"
-        f"⏱ Expiración: {EXPIRATION} minuto"
+        f"⏱ Expiración: {EXPIRATION} minuto\n"
+        "📈 Marcos: M5 + M1\n"
+        "🎯 Modo: SNIPER"
     )
 
     return iq
@@ -148,22 +277,24 @@ def get_candles(iq, pair, timeframe):
         )
 
         if not candles:
+
             print(
-                f"⚠️ Sin velas: {pair} "
-                f"TF={timeframe}"
+                f"⚠️ Sin velas "
+                f"{pair} TF={timeframe}"
             )
+
             return None
 
         df = pd.DataFrame(candles)
 
-        required_columns = [
+        required = [
             "open",
             "close",
             "max",
             "min"
         ]
 
-        for column in required_columns:
+        for column in required:
 
             if column not in df.columns:
 
@@ -174,16 +305,18 @@ def get_candles(iq, pair, timeframe):
 
                 return None
 
-        # Eliminar filas inválidas
         df = df.dropna(
-            subset=required_columns
+            subset=required
         )
 
-        if len(df) < 10:
+        if len(df) < 20:
+
             print(
-                f"⚠️ Pocas velas "
-                f"{pair} TF={timeframe}"
+                f"⚠️ Datos insuficientes "
+                f"{pair} TF={timeframe}: "
+                f"{len(df)} velas"
             )
+
             return None
 
         return df
@@ -191,7 +324,7 @@ def get_candles(iq, pair, timeframe):
     except Exception as e:
 
         print(
-            f"❌ Error velas "
+            f"❌ Error obteniendo velas "
             f"{pair} TF={timeframe}: {e}"
         )
 
@@ -204,16 +337,27 @@ def get_candles(iq, pair, timeframe):
 
 def wait_entry():
     """
-    Espera hasta el segundo 58 de cada minuto.
+    Espera la ventana de entrada alrededor
+    del segundo 58.
     """
+
+    print(
+        "⏳ Esperando ventana sniper..."
+    )
 
     while True:
 
-        current_second = int(
+        second = int(
             time.time()
         ) % 60
 
-        if current_second >= 58:
+        if second >= 58:
+
+            print(
+                f"🎯 Ventana sniper "
+                f"segundo {second}"
+            )
+
             return
 
         time.sleep(0.10)
@@ -225,7 +369,7 @@ def wait_entry():
 
 def process_signal(signal):
     """
-    Compatible con la estrategia actual.
+    Compatible con strategy.py.
 
     strategy.py devuelve:
 
@@ -264,6 +408,7 @@ def process_signal(signal):
             "call",
             "put"
         ):
+
             return signal, None
 
     return None, None
@@ -279,33 +424,36 @@ def trade(
     direction,
     trend
 ):
-    """
-    Ejecuta la operación después
-    de validar la señal.
-    """
+    """Ejecutar operación."""
 
     if direction not in (
         "call",
         "put"
     ):
+
         print(
             f"⛔ Dirección inválida: "
             f"{direction}"
         )
+
         return False
 
-    print(
-        f"🚀 {pair} → "
-        f"{direction.upper()} | "
-        f"M5={trend}"
-    )
+    print("")
+    print("====================================")
+    print("🚀 SEÑAL DE ENTRADA")
+    print("====================================")
+    print(f"📊 Par: {pair}")
+    print(f"➡️ Dirección: {direction.upper()}")
+    print(f"📈 Tendencia M5: {trend}")
+    print(f"⏱ Expiración: {EXPIRATION} minuto")
+    print("====================================")
 
     send_telegram(
-        f"🎯 SEÑAL CONFIRMADA\n"
+        "🎯 SEÑAL CONFIRMADA\n\n"
         f"📊 Par: {pair}\n"
         f"➡️ Dirección: {direction.upper()}\n"
-        f"📈 Estructura M5: {trend}\n"
-        f"⏱ Expiración: {EXPIRATION} min"
+        f"📈 Tendencia M5: {trend}\n"
+        f"⏱ Expiración: {EXPIRATION} minuto"
     )
 
     try:
@@ -321,13 +469,18 @@ def trade(
 
             print(
                 f"✅ Operación abierta "
-                f"{pair} | ID={order_id}"
+                f"{pair}"
+            )
+
+            print(
+                f"🆔 ID: {order_id}"
             )
 
             send_telegram(
-                f"✅ OPERACIÓN ABIERTA\n"
+                "✅ OPERACIÓN ABIERTA\n\n"
                 f"📊 {pair}\n"
                 f"➡️ {direction.upper()}\n"
+                f"📈 M5: {trend}\n"
                 f"⏱ {EXPIRATION} minuto"
             )
 
@@ -339,8 +492,7 @@ def trade(
         )
 
         send_telegram(
-            f"❌ IQ Option rechazó "
-            f"la operación\n"
+            "❌ OPERACIÓN RECHAZADA\n\n"
             f"📊 {pair}"
         )
 
@@ -349,12 +501,12 @@ def trade(
     except Exception as e:
 
         print(
-            f"❌ Error trade "
-            f"{pair}: {e}"
+            f"❌ Error ejecutando "
+            f"trade {pair}: {e}"
         )
 
         send_telegram(
-            f"❌ Error ejecutando trade\n"
+            "❌ ERROR EJECUTANDO TRADE\n\n"
             f"📊 {pair}\n"
             f"Error: {e}"
         )
@@ -363,20 +515,31 @@ def trade(
 
 
 # ============================================================
-# ANALIZAR PAR
+# ANALIZAR UN PAR
 # ============================================================
 
 def analyze_pair(iq, pair):
     """
-    Analiza un par utilizando:
+    Analiza:
 
-    M5 = estructura principal
-    M1 = confirmación
+        M5 = estructura principal
+        M1 = confirmación
+
+    La estrategia se encarga de:
+        - tendencia
+        - pullback
+        - continuidad
+        - fuerza
+        - lateralidad
+        - resistencia
+        - soporte
+        - score
     """
 
-    print(
-        f"\n🔎 Analizando {pair}"
-    )
+    print("")
+    print("------------------------------------")
+    print(f"🔎 ANALIZANDO {pair}")
+    print("------------------------------------")
 
     # --------------------------------------------------------
     # COOLDOWN
@@ -395,7 +558,7 @@ def analyze_pair(iq, pair):
         )
 
         print(
-            f"⏳ {pair} en cooldown: "
+            f"⏳ {pair}: cooldown "
             f"{remaining}s"
         )
 
@@ -414,8 +577,7 @@ def analyze_pair(iq, pair):
     if df_m1 is None:
 
         print(
-            f"⛔ No hay datos M1 "
-            f"para {pair}"
+            f"⛔ {pair}: sin datos M1"
         )
 
         return
@@ -433,26 +595,46 @@ def analyze_pair(iq, pair):
     if df_m5 is None:
 
         print(
-            f"⛔ No hay datos M5 "
-            f"para {pair}"
+            f"⛔ {pair}: sin datos M5"
         )
 
         return
 
     print(
-        f"📊 Datos {pair}: "
+        f"📊 {pair}: "
         f"M1={len(df_m1)} "
         f"M5={len(df_m5)}"
     )
 
     # --------------------------------------------------------
-    # ESTRATEGIA
+    # ANALIZAR ESTRATEGIA
     # --------------------------------------------------------
 
-    signal_raw = analyze_candle(
-        df_m1,
-        df_m5
-    )
+    try:
+
+        signal_raw = analyze_candle(
+            df_m1,
+            df_m5
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Error strategy "
+            f"{pair}: {e}"
+        )
+
+        send_telegram(
+            f"❌ Error strategy\n"
+            f"📊 {pair}\n"
+            f"{e}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # PROCESAR RESULTADO
+    # --------------------------------------------------------
 
     direction, trend = process_signal(
         signal_raw
@@ -469,32 +651,36 @@ def analyze_pair(iq, pair):
 
         print(
             f"⛔ {pair}: "
-            f"sin señal"
+            f"sin señal válida"
         )
 
         return
 
     # --------------------------------------------------------
-    # SEGURIDAD DE TENDENCIA
+    # CONFIRMACIÓN DE TENDENCIA
     # --------------------------------------------------------
 
-    if direction == "call" and trend != "up":
+    if direction == "call":
 
-        print(
-            f"🚫 CALL bloqueado: "
-            f"tendencia M5={trend}"
-        )
+        if trend != "up":
 
-        return
+            print(
+                f"🚫 CALL bloqueado "
+                f"por tendencia M5={trend}"
+            )
 
-    if direction == "put" and trend != "down":
+            return
 
-        print(
-            f"🚫 PUT bloqueado: "
-            f"tendencia M5={trend}"
-        )
+    if direction == "put":
 
-        return
+        if trend != "down":
+
+            print(
+                f"🚫 PUT bloqueado "
+                f"por tendencia M5={trend}"
+            )
+
+            return
 
     # --------------------------------------------------------
     # EJECUTAR
@@ -515,67 +701,129 @@ def analyze_pair(iq, pair):
 
 
 # ============================================================
-# LOOP PRINCIPAL
+# MAIN
 # ============================================================
 
 def main():
 
+    print("")
+    print("====================================")
+    print("🤖 BOT SNIPER M1 + M5")
+    print("====================================")
+
+    print(
+        f"📊 Pares: {', '.join(PAIRS)}"
+    )
+
+    print(
+        f"💰 Monto: {AMOUNT}"
+    )
+
+    print(
+        f"⏱ Expiración: {EXPIRATION} minuto"
+    )
+
+    print(
+        "📈 Estructura: M5 + M1"
+    )
+
+    print(
+        "🎯 Entrada: segundo 58"
+    )
+
     print(
         "===================================="
     )
 
-    print(
-        "🤖 BOT SNIPER M1 + M5"
-    )
+    # --------------------------------------------------------
+    # COMPROBAR VARIABLES
+    # --------------------------------------------------------
 
-    print(
-        "===================================="
-    )
+    if not check_environment():
 
-    iq = connect_iq()
+        print("")
+        print(
+            "🛑 BOT DETENIDO"
+        )
+
+        print(
+            "Configura las variables "
+            "en Railway."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CONECTAR
+    # --------------------------------------------------------
+
+    try:
+
+        iq = connect_iq()
+
+    except Exception as e:
+
+        print("")
+        print(
+            "🛑 No se pudo iniciar el bot."
+        )
+
+        print(
+            f"Error: {e}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # LOOP
+    # --------------------------------------------------------
 
     while True:
 
         try:
 
             # ------------------------------------------------
-            # Comprobar conexión
+            # VERIFICAR CONEXIÓN
             # ------------------------------------------------
 
             if not iq.check_connect():
 
                 print(
-                    "⚠️ Conexión perdida"
+                    "⚠️ Conexión perdida."
                 )
 
                 send_telegram(
-                    "⚠️ Conexión IQ Option perdida. "
+                    "⚠️ Conexión IQ Option perdida.\n"
                     "Intentando reconectar..."
                 )
 
-                iq = connect_iq()
+                try:
+
+                    iq = connect_iq()
+
+                except Exception as e:
+
+                    print(
+                        f"❌ Reconexión fallida: {e}"
+                    )
+
+                    time.sleep(10)
+
+                    continue
 
             # ------------------------------------------------
-            # Esperar segundo 58
+            # ESPERAR VENTANA SNIPER
             # ------------------------------------------------
 
             wait_entry()
 
-            print(
-                "\n"
-                "===================================="
-            )
-
-            print(
-                "🎯 VENTANA SNIPER"
-            )
-
-            print(
-                "===================================="
-            )
+            print("")
+            print("====================================")
+            print("🎯 INICIANDO ANÁLISIS SNIPER")
+            print("====================================")
 
             # ------------------------------------------------
-            # Analizar los 3 pares
+            # ANALIZAR PARES
             # ------------------------------------------------
 
             for pair in PAIRS:
@@ -590,33 +838,34 @@ def main():
                 except Exception as e:
 
                     print(
-                        f"❌ Error analizando "
-                        f"{pair}: {e}"
+                        f"❌ Error en {pair}: {e}"
                     )
 
                     send_telegram(
-                        f"❌ Error analizando "
-                        f"{pair}\n"
+                        f"❌ Error en {pair}\n"
                         f"{e}"
                     )
 
-                # Pequeña pausa entre pares
                 time.sleep(0.3)
 
-            # ------------------------------------------------
-            # Evitar repetir el mismo segundo
-            # ------------------------------------------------
+            print("")
+            print(
+                "✅ Ciclo de análisis terminado."
+            )
 
+            # Evita volver a entrar
+            # inmediatamente en el mismo minuto.
             time.sleep(2)
 
         except KeyboardInterrupt:
 
+            print("")
             print(
-                "\n🛑 Bot detenido manualmente"
+                "🛑 Bot detenido manualmente."
             )
 
             send_telegram(
-                "🛑 Bot detenido manualmente"
+                "🛑 Bot detenido manualmente."
             )
 
             break
@@ -624,18 +873,18 @@ def main():
         except Exception as e:
 
             print(
-                f"❌ Error general: {e}"
+                f"❌ ERROR GENERAL: {e}"
             )
 
             send_telegram(
-                f"❌ Error general:\n{e}"
+                f"❌ ERROR GENERAL\n{e}"
             )
 
             time.sleep(5)
 
 
 # ============================================================
-# START
+# INICIO
 # ============================================================
 
 if __name__ == "__main__":
