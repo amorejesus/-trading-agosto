@@ -1,31 +1,51 @@
 import pandas as pd
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 MIN_CANDLES = 30
 
 
 # ============================================================
-# TENDENCIA EN VIVO (M1)
+# 🔥 TENDENCIA CLARA EN M1 (VERSIÓN PRO)
 # ============================================================
 
 def live_trend(df):
 
-    highs = df["max"].iloc[-10:]
-    lows = df["min"].iloc[-10:]
+    recent = df.iloc[-15:]
 
-    up = all(x < y for x, y in zip(highs, highs[1:])) and \
-         all(x < y for x, y in zip(lows, lows[1:]))
+    highs = recent["max"].values
+    lows = recent["min"].values
+    closes = recent["close"].values
+    opens = recent["open"].values
 
-    down = all(x > y for x, y in zip(highs, highs[1:])) and \
-           all(x > y for x, y in zip(lows, lows[1:]))
+    # Estructura
+    higher_highs = sum(highs[i] > highs[i-1] for i in range(1, len(highs)))
+    higher_lows = sum(lows[i] > lows[i-1] for i in range(1, len(lows)))
 
-    if up:
+    lower_highs = sum(highs[i] < highs[i-1] for i in range(1, len(highs)))
+    lower_lows = sum(lows[i] < lows[i-1] for i in range(1, len(lows)))
+
+    # Dominancia de velas
+    bullish = sum(closes > opens)
+    bearish = sum(closes < opens)
+
+    avg_price = closes.mean()
+    last_price = closes[-1]
+
+    # Tendencia alcista REAL
+    if (
+        higher_highs >= 8 and
+        higher_lows >= 8 and
+        bullish >= 9 and
+        last_price > avg_price
+    ):
         return "up"
 
-    if down:
+    # Tendencia bajista REAL
+    if (
+        lower_highs >= 8 and
+        lower_lows >= 8 and
+        bearish >= 9 and
+        last_price < avg_price
+    ):
         return "down"
 
     return None
@@ -51,7 +71,7 @@ def detect_impulse(df, trend):
 
 
 # ============================================================
-# PULLBACK (MITAD DE TENDENCIA)
+# PULLBACK (RETROCESO)
 # ============================================================
 
 def detect_pullback(df, trend):
@@ -68,7 +88,7 @@ def detect_pullback(df, trend):
 
 
 # ============================================================
-# ZONA MEDIA (CLAVE)
+# 🎯 ZONA MEDIA (CLAVE REAL)
 # ============================================================
 
 def mid_trend_zone(df):
@@ -87,27 +107,21 @@ def mid_trend_zone(df):
 
 
 # ============================================================
-# EVITAR RESISTENCIA
+# 🚫 FILTROS DE ZONAS
 # ============================================================
 
 def near_resistance(df):
 
     recent = df.iloc[-15:]
-
     resistance = recent["max"].max()
     price = df.iloc[-2]["close"]
 
     return abs(resistance - price) < (resistance * 0.0015)
 
 
-# ============================================================
-# EVITAR SOPORTE
-# ============================================================
-
 def near_support(df):
 
     recent = df.iloc[-15:]
-
     support = recent["min"].min()
     price = df.iloc[-2]["close"]
 
@@ -115,7 +129,7 @@ def near_support(df):
 
 
 # ============================================================
-# VELA DE FUERZA
+# 🔥 VELA DE FUERZA (CONTINUIDAD)
 # ============================================================
 
 def strong_candle(df, trend):
@@ -140,7 +154,7 @@ def strong_candle(df, trend):
 
 
 # ============================================================
-# FUNCIÓN PRINCIPAL
+# 🧠 FUNCIÓN PRINCIPAL
 # ============================================================
 
 def analyze_candle(df_m1, df_m5=None):
@@ -148,48 +162,33 @@ def analyze_candle(df_m1, df_m5=None):
     if df_m1 is None or len(df_m1) < MIN_CANDLES:
         return None, None
 
-    # ========================================================
-    # 1. TENDENCIA
-    # ========================================================
-
+    # 1. Tendencia
     trend = live_trend(df_m1)
 
     if trend is None:
-        print("⛔ Sin tendencia clara")
+        print("⛔ Sin tendencia clara M1")
         return None, None
 
-    print(f"📈 Tendencia: {trend}")
+    print(f"📈 Tendencia M1: {trend}")
 
-    # ========================================================
-    # 2. IMPULSO
-    # ========================================================
-
+    # 2. Impulso
     if not detect_impulse(df_m1, trend):
         print("⛔ Sin impulso")
         return None, trend
 
-    # ========================================================
-    # 3. PULLBACK
-    # ========================================================
-
+    # 3. Pullback
     if not detect_pullback(df_m1, trend):
         print("⛔ Sin pullback")
         return None, trend
 
-    print("🔄 Pullback válido")
+    print("🔄 Pullback detectado")
 
-    # ========================================================
-    # 4. ZONA MEDIA (IMPORTANTE)
-    # ========================================================
-
+    # 4. Zona media (CRÍTICO)
     if not mid_trend_zone(df_m1):
-        print("⛔ No está en zona media")
+        print("⛔ Fuera de zona media")
         return None, trend
 
-    # ========================================================
-    # 5. FILTRO ANTI ZONAS
-    # ========================================================
-
+    # 5. Filtro zonas peligrosas
     if trend == "up" and near_resistance(df_m1):
         print("⛔ Cerca de resistencia")
         return None, trend
@@ -198,20 +197,14 @@ def analyze_candle(df_m1, df_m5=None):
         print("⛔ Cerca de soporte")
         return None, trend
 
-    # ========================================================
-    # 6. VELA DE FUERZA
-    # ========================================================
-
+    # 6. Confirmación de fuerza
     if not strong_candle(df_m1, trend):
         print("⛔ Sin vela de fuerza")
         return None, trend
 
     print("🔥 Continuidad confirmada")
 
-    # ========================================================
-    # 7. ENTRADA FINAL
-    # ========================================================
-
+    # 7. Entrada
     if trend == "up":
         print("🎯 CALL")
         return "call", trend
