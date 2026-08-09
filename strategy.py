@@ -1,176 +1,164 @@
-import pandas as pd
+import time
 
-MIN_CANDLES = 30
+last_signal_time = 0
 
 
-# ============================================================
-# 🔥 TENDENCIA CLARA EN M1
-# ============================================================
+# ==============================
+# 🧠 TENDENCIA REAL EN M1
+# ==============================
+def trend_m1(df):
+    highs = df["max"].iloc[-5:]
+    lows = df["min"].iloc[-5:]
 
-def live_trend(df):
+    up = all(x < y for x, y in zip(highs, highs[1:])) and \
+         all(x < y for x, y in zip(lows, lows[1:]))
 
-    recent = df.iloc[-15:]
+    down = all(x > y for x, y in zip(highs, highs[1:])) and \
+           all(x > y for x, y in zip(lows, lows[1:]))
 
-    highs = recent["max"].values
-    lows = recent["min"].values
-    closes = recent["close"].values
-    opens = recent["open"].values
-
-    # Estructura
-    higher_highs = sum(highs[i] > highs[i-1] for i in range(1, len(highs)))
-    higher_lows = sum(lows[i] > lows[i-1] for i in range(1, len(lows)))
-
-    lower_highs = sum(highs[i] < highs[i-1] for i in range(1, len(highs)))
-    lower_lows = sum(lows[i] < lows[i-1] for i in range(1, len(lows)))
-
-    # Dominancia
-    bullish = sum(closes > opens)
-    bearish = sum(closes < opens)
-
-    # Tendencia fuerte
-    if higher_highs >= 9 and higher_lows >= 9 and bullish >= 10:
-        return "up"
-
-    if lower_highs >= 9 and lower_lows >= 9 and bearish >= 10:
-        return "down"
+    if up:
+        return "call"
+    elif down:
+        return "put"
 
     return None
 
 
-# ============================================================
-# 💥 DOMINIO DEL MERCADO
-# ============================================================
-
-def strong_dominance(df, trend):
-
-    candles = df.iloc[-10:]
-
-    if trend == "up":
-        bullish = sum(c["close"] > c["open"] for _, c in candles.iterrows())
-        return bullish >= 7
-
-    if trend == "down":
-        bearish = sum(c["close"] < c["open"] for _, c in candles.iterrows())
-        return bearish >= 7
-
-    return False
-
-
-# ============================================================
-# 🔥 VELAS DE FUERZA (CUERPO GRANDE)
-# ============================================================
-
-def strong_candles(df, trend):
-
-    candles = df.iloc[-3:]
-
-    for _, c in candles.iterrows():
-
-        body = abs(c["close"] - c["open"])
-        total = c["max"] - c["min"]
-
-        if total == 0:
-            return False
-
-        body_ratio = body / total
-
-        # Debe ser vela fuerte
-        if body_ratio < 0.6:
-            return False
-
-        # Dirección correcta
-        if trend == "up" and c["close"] <= c["open"]:
-            return False
-
-        if trend == "down" and c["close"] >= c["open"]:
-            return False
-
-    return True
-
-
-# ============================================================
-# 🚀 CONTINUIDAD
-# ============================================================
-
-def continuation(df, trend):
-
-    last = df.iloc[-2]
-    prev = df.iloc[-3]
-
-    if trend == "up":
-        return last["close"] > prev["close"]
-
-    if trend == "down":
-        return last["close"] < prev["close"]
-
-    return False
-
-
-# ============================================================
-# 🚫 FILTRO ANTI VELA EXTREMA (EVITA ENTRAR TARDE)
-# ============================================================
-
-def avoid_extreme_entry(df):
-
-    last = df.iloc[-2]
-
-    body = abs(last["close"] - last["open"])
-    total = last["max"] - last["min"]
+# ==============================
+# 🔥 FUERZA DE VELA (DOMINIO)
+# ==============================
+def candle_strength(candle):
+    body = abs(candle["close"] - candle["open"])
+    total = candle["max"] - candle["min"]
 
     if total == 0:
-        return False
+        return 0
 
-    # Si la vela es exageradamente grande → probablemente ya explotó
-    return body < (total * 0.9)
+    return body / total
 
 
-# ============================================================
-# 🧠 FUNCIÓN PRINCIPAL
-# ============================================================
+# ==============================
+# 🔁 CONTINUIDAD (MOVIMIENTO LIMPIO)
+# ==============================
+def continuity(df):
+    candles = df.iloc[-4:]
 
-def analyze_candle(df_m1, df_m5=None):
+    bullish = sum(1 for _, c in candles.iterrows() if c["close"] > c["open"])
+    bearish = sum(1 for _, c in candles.iterrows() if c["close"] < c["open"])
 
-    if df_m1 is None or len(df_m1) < MIN_CANDLES:
-        return None, None
+    if bullish >= 3:
+        return "call"
+    elif bearish >= 3:
+        return "put"
 
-    # 1. Tendencia clara
-    trend = live_trend(df_m1)
+    return None
 
+
+# ==============================
+# ⚠️ EVITAR LATERAL
+# ==============================
+def is_lateral(df):
+    recent = df.iloc[-10:]
+    rango = recent["max"].max() - recent["min"].min()
+    promedio = (recent["max"] - recent["min"]).mean()
+
+    return rango < promedio * 2
+
+
+# ==============================
+# 🚫 EVITAR SOPORTE / RESISTENCIA
+# ==============================
+def near_zone(df):
+    max_recent = df["max"].iloc[-20:].max()
+    min_recent = df["min"].iloc[-20:].min()
+    price = df.iloc[-2]["close"]
+
+    if price >= max_recent * 0.999:
+        return True
+
+    if price <= min_recent * 1.001:
+        return True
+
+    return False
+
+
+# ==============================
+# ⚡ MICROESTRUCTURA (5s)
+# ==============================
+def microstructure(df_5s):
+    if df_5s is None or len(df_5s) < 12:
+        return None
+
+    last = df_5s.iloc[-12:]  # últimos 60s
+
+    up_moves = 0
+    down_moves = 0
+
+    for i in range(1, len(last)):
+        if last.iloc[i]["close"] > last.iloc[i - 1]["close"]:
+            up_moves += 1
+        else:
+            down_moves += 1
+
+    # dominio claro
+    if up_moves > down_moves * 1.5:
+        return "call"
+
+    elif down_moves > up_moves * 1.5:
+        return "put"
+
+    return None
+
+
+# ==============================
+# 🎯 FUNCIÓN PRINCIPAL
+# ==============================
+def analyze_candle(df_m1, df_5s):
+    global last_signal_time
+
+    # validar data
+    if df_m1 is None or df_5s is None:
+        return None, 0
+
+    if len(df_m1) < 30:
+        return None, 0
+
+    # ❌ evitar lateral
+    if is_lateral(df_m1):
+        return None, 0
+
+    # ❌ evitar zonas peligrosas
+    if near_zone(df_m1):
+        return None, 0
+
+    # 📈 tendencia M1
+    trend = trend_m1(df_m1)
     if trend is None:
-        print("⛔ Sin tendencia clara M1")
-        return None, None
+        return None, 0
 
-    print(f"📈 Tendencia: {trend}")
+    # 🔁 continuidad
+    cont = continuity(df_m1)
+    if cont != trend:
+        return None, 0
 
-    # 2. Dominio del mercado
-    if not strong_dominance(df_m1, trend):
-        print("⛔ Sin dominio claro")
-        return None, trend
+    # ⚡ microestructura
+    micro = microstructure(df_5s)
+    if micro != trend:
+        return None, 0
 
-    # 3. Velas fuertes
-    if not strong_candles(df_m1, trend):
-        print("⛔ Sin velas de fuerza")
-        return None, trend
+    # 🔥 fuerza vela actual
+    last = df_m1.iloc[-2]
+    strength = candle_strength(last)
 
-    # 4. Continuidad real
-    if not continuation(df_m1, trend):
-        print("⛔ Sin continuidad")
-        return None, trend
+    if strength < 0.65:
+        return None, 0
 
-    # 5. Evitar entrar demasiado tarde
-    if not avoid_extreme_entry(df_m1):
-        print("⛔ Vela demasiado extendida (riesgo alto)")
-        return None, trend
+    # ⏱️ evitar sobreoperar
+    if time.time() - last_signal_time < 60:
+        return None, 0
 
-    print("🔥 FUERZA + DOMINIO + CONTINUIDAD CONFIRMADA")
+    last_signal_time = time.time()
 
-    # 6. Entrada
-    if trend == "up":
-        print("🎯 CALL")
-        return "call", trend
+    score = int(strength * 100)
 
-    if trend == "down":
-        print("🎯 PUT")
-        return "put", trend
-
-    return None, trend
+    return trend, score
