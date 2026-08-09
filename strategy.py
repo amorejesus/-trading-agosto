@@ -1,86 +1,49 @@
-import time
+# =========================
+# STRATEGY SNIPER 5s + M1
+# =========================
 
-# ==============================
-# OBTENER PRIMERAS 6 VELAS (0–30s)
-# ==============================
-def get_first_6_candles(df_5s):
-    now = int(time.time())
+def check_pattern(candles_5s):
+    """
+    SOLO usa:
+    ✔ Primeras 6 velas de 5 segundos (primeros 30s)
+    ✔ Patrones exactos definidos
 
-    # inicio del minuto actual
-    current_minute = now - (now % 60)
+    PATRONES:
 
-    # filtrar solo velas del minuto actual
-    candles = df_5s[df_5s["from"] >= current_minute]
+    1) rojo → verde → verde → verde → verde → rojo  → CALL
+    2) verde → rojo → rojo → rojo → rojo → verde  → PUT
+    """
 
-    # ordenar por tiempo
-    candles = candles.sort_values("from")
-
-    # tomar SOLO las primeras 6 velas (0–30s)
-    return candles.head(6)
-
-
-# ==============================
-# DETECTAR COLOR VELA
-# ==============================
-def get_color(candle):
-    if candle["close"] > candle["open"]:
-        return "g"
-    else:
-        return "r"
-
-
-# ==============================
-# DETECTAR PATRÓN
-# ==============================
-def detect_pattern(df_5s):
-    candles = get_first_6_candles(df_5s)
-
-    if len(candles) < 6:
+    # Validación mínima
+    if len(candles_5s) < 6:
         return None
 
-    colors = [get_color(c) for _, c in candles.iterrows()]
+    # Obtener colores EXACTOS
+    colors = []
+    for c in candles_5s[:6]:
+        if c["close"] > c["open"]:
+            colors.append("verde")
+        else:
+            colors.append("rojo")
 
-    # patrón 1
-    pattern_1 = ["r", "g", "g", "g", "g", "r"]
+    print(f"📊 Patrón detectado: {colors}")
 
-    # patrón 2
-    pattern_2 = ["g", "r", "r", "r", "r", "g"]
-
-    if colors == pattern_1 or colors == pattern_2:
-        return True
-
-    return False
-
-
-# ==============================
-# DIRECCIÓN M1
-# ==============================
-def get_m1_direction(df_m1):
-    last = df_m1.iloc[-2]  # vela cerrada
-
-    if last["close"] > last["open"]:
+    # =========================
+    # PATRÓN CALL
+    # =========================
+    if colors == ["rojo", "verde", "verde", "verde", "verde", "rojo"]:
+        print("✅ Patrón CALL válido")
         return "call"
-    else:
+
+    # =========================
+    # PATRÓN PUT
+    # =========================
+    if colors == ["verde", "rojo", "rojo", "rojo", "rojo", "verde"]:
+        print("✅ Patrón PUT válido")
         return "put"
 
-
-# ==============================
-# FUNCIÓN PRINCIPAL
-# ==============================
-def analyze_candle(df_5s, df_m1):
-    if df_5s is None or df_m1 is None:
-        return None, None
-
-    if len(df_5s) < 10 or len(df_m1) < 5:
-        return None, None
-
-    # 🔥 validar patrón
-    valid_pattern = detect_pattern(df_5s)
-
-    if not valid_pattern:
-        return None, None
-
-    # 🔥 dirección SOLO M1
-    direction = get_m1_direction(df_m1)
-
-    return direction, time.time()
+    # =========================
+    # NO HAY SEÑAL
+    # =========================
+    print("❌ Patrón NO válido")
+    return None
