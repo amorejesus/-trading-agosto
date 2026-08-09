@@ -4,7 +4,7 @@ MIN_CANDLES = 30
 
 
 # ============================================================
-# 🔥 TENDENCIA CLARA EN M1
+# 🔥 TENDENCIA CLARA EN M1 (VERSIÓN PRO)
 # ============================================================
 
 def live_trend(df):
@@ -23,105 +23,134 @@ def live_trend(df):
     lower_highs = sum(highs[i] < highs[i-1] for i in range(1, len(highs)))
     lower_lows = sum(lows[i] < lows[i-1] for i in range(1, len(lows)))
 
-    # Dominancia
+    # Dominancia de velas
     bullish = sum(closes > opens)
     bearish = sum(closes < opens)
 
-    # Tendencia fuerte
-    if higher_highs >= 9 and higher_lows >= 9 and bullish >= 10:
+    avg_price = closes.mean()
+    last_price = closes[-1]
+
+    # Tendencia alcista REAL
+    if (
+        higher_highs >= 8 and
+        higher_lows >= 8 and
+        bullish >= 9 and
+        last_price > avg_price
+    ):
         return "up"
 
-    if lower_highs >= 9 and lower_lows >= 9 and bearish >= 10:
+    # Tendencia bajista REAL
+    if (
+        lower_highs >= 8 and
+        lower_lows >= 8 and
+        bearish >= 9 and
+        last_price < avg_price
+    ):
         return "down"
 
     return None
 
 
 # ============================================================
-# 💥 DOMINIO DEL MERCADO
+# IMPULSO
 # ============================================================
 
-def strong_dominance(df, trend):
+def detect_impulse(df, trend):
 
-    candles = df.iloc[-10:]
+    candles = df.iloc[-6:-2]
 
     if trend == "up":
         bullish = sum(c["close"] > c["open"] for _, c in candles.iterrows())
-        return bullish >= 7
+        return bullish >= 3
 
     if trend == "down":
         bearish = sum(c["close"] < c["open"] for _, c in candles.iterrows())
-        return bearish >= 7
+        return bearish >= 3
 
     return False
 
 
 # ============================================================
-# 🔥 VELAS DE FUERZA (CUERPO GRANDE)
+# PULLBACK (RETROCESO)
 # ============================================================
 
-def strong_candles(df, trend):
+def detect_pullback(df, trend):
 
-    candles = df.iloc[-3:]
-
-    for _, c in candles.iterrows():
-
-        body = abs(c["close"] - c["open"])
-        total = c["max"] - c["min"]
-
-        if total == 0:
-            return False
-
-        body_ratio = body / total
-
-        # Debe ser vela fuerte
-        if body_ratio < 0.6:
-            return False
-
-        # Dirección correcta
-        if trend == "up" and c["close"] <= c["open"]:
-            return False
-
-        if trend == "down" and c["close"] >= c["open"]:
-            return False
-
-    return True
-
-
-# ============================================================
-# 🚀 CONTINUIDAD
-# ============================================================
-
-def continuation(df, trend):
-
-    last = df.iloc[-2]
-    prev = df.iloc[-3]
+    candles = df.iloc[-4:-1]
 
     if trend == "up":
-        return last["close"] > prev["close"]
+        return all(c["close"] < c["open"] for _, c in candles.iterrows())
 
     if trend == "down":
-        return last["close"] < prev["close"]
+        return all(c["close"] > c["open"] for _, c in candles.iterrows())
 
     return False
 
 
 # ============================================================
-# 🚫 FILTRO ANTI VELA EXTREMA (EVITA ENTRAR TARDE)
+# 🎯 ZONA MEDIA (CLAVE REAL)
 # ============================================================
 
-def avoid_extreme_entry(df):
+def mid_trend_zone(df):
+
+    recent = df.iloc[-20:]
+
+    high = recent["max"].max()
+    low = recent["min"].min()
+
+    price = df.iloc[-2]["close"]
+
+    zone_low = low + (high - low) * 0.45
+    zone_high = low + (high - low) * 0.70
+
+    return zone_low <= price <= zone_high
+
+
+# ============================================================
+# 🚫 FILTROS DE ZONAS
+# ============================================================
+
+def near_resistance(df):
+
+    recent = df.iloc[-15:]
+    resistance = recent["max"].max()
+    price = df.iloc[-2]["close"]
+
+    return abs(resistance - price) < (resistance * 0.0015)
+
+
+def near_support(df):
+
+    recent = df.iloc[-15:]
+    support = recent["min"].min()
+    price = df.iloc[-2]["close"]
+
+    return abs(price - support) < (support * 0.0015)
+
+
+# ============================================================
+# 🔥 VELA DE FUERZA (CONTINUIDAD)
+# ============================================================
+
+def strong_candle(df, trend):
 
     last = df.iloc[-2]
 
     body = abs(last["close"] - last["open"])
-    total = last["max"] - last["min"]
+    range_candle = last["max"] - last["min"]
 
-    if total == 0:
+    if range_candle == 0:
         return False
 
-    # Si la vela es exageradamente grande → probablemente ya explotó
-    return body < (total * 0.9)
+    body_ratio = body / range_candle
+
+    if trend == "up":
+        return last["close"] > last["open"] and body_ratio > 0.6
+
+    if trend == "down":
+        return last["close"] < last["open"] and body_ratio > 0.6
+
+    return False
 
 
 # ============================================================
@@ -133,38 +162,49 @@ def analyze_candle(df_m1, df_m5=None):
     if df_m1 is None or len(df_m1) < MIN_CANDLES:
         return None, None
 
-    # 1. Tendencia clara
+    # 1. Tendencia
     trend = live_trend(df_m1)
 
     if trend is None:
         print("⛔ Sin tendencia clara M1")
         return None, None
 
-    print(f"📈 Tendencia: {trend}")
+    print(f"📈 Tendencia M1: {trend}")
 
-    # 2. Dominio del mercado
-    if not strong_dominance(df_m1, trend):
-        print("⛔ Sin dominio claro")
+    # 2. Impulso
+    if not detect_impulse(df_m1, trend):
+        print("⛔ Sin impulso")
         return None, trend
 
-    # 3. Velas fuertes
-    if not strong_candles(df_m1, trend):
-        print("⛔ Sin velas de fuerza")
+    # 3. Pullback
+    if not detect_pullback(df_m1, trend):
+        print("⛔ Sin pullback")
         return None, trend
 
-    # 4. Continuidad real
-    if not continuation(df_m1, trend):
-        print("⛔ Sin continuidad")
+    print("🔄 Pullback detectado")
+
+    # 4. Zona media (CRÍTICO)
+    if not mid_trend_zone(df_m1):
+        print("⛔ Fuera de zona media")
         return None, trend
 
-    # 5. Evitar entrar demasiado tarde
-    if not avoid_extreme_entry(df_m1):
-        print("⛔ Vela demasiado extendida (riesgo alto)")
+    # 5. Filtro zonas peligrosas
+    if trend == "up" and near_resistance(df_m1):
+        print("⛔ Cerca de resistencia")
         return None, trend
 
-    print("🔥 FUERZA + DOMINIO + CONTINUIDAD CONFIRMADA")
+    if trend == "down" and near_support(df_m1):
+        print("⛔ Cerca de soporte")
+        return None, trend
 
-    # 6. Entrada
+    # 6. Confirmación de fuerza
+    if not strong_candle(df_m1, trend):
+        print("⛔ Sin vela de fuerza")
+        return None, trend
+
+    print("🔥 Continuidad confirmada")
+
+    # 7. Entrada
     if trend == "up":
         print("🎯 CALL")
         return "call", trend
