@@ -1,49 +1,58 @@
-# =========================
-# STRATEGY SNIPER 5s + M1
-# =========================
+# strategy.py
+
+def get_candle_color(candle):
+    """
+    Retorna el color de la vela
+    """
+    return "verde" if candle["close"] > candle["open"] else "rojo"
+
 
 def check_pattern(candles_5s):
     """
-    SOLO usa:
-    ✔ Primeras 6 velas de 5 segundos (primeros 30s)
-    ✔ Patrones exactos definidos
+    ✔ SOLO usa:
+    - Primeras 6 velas de 5 segundos (primeros 30s)
+    - Patrón EXACTO
 
-    PATRONES:
-
-    1) rojo → verde → verde → verde → verde → rojo  → CALL
-    2) verde → rojo → rojo → rojo → rojo → verde  → PUT
+    ❌ No aproxima
+    ❌ No interpreta
+    ❌ No usa mayoría
     """
 
     # Validación mínima
-    if len(candles_5s) < 6:
+    if candles_5s is None or len(candles_5s) < 6:
         return None
 
-    # Obtener colores EXACTOS
-    colors = []
-    for c in candles_5s[:6]:
-        if c["close"] > c["open"]:
-            colors.append("verde")
-        else:
-            colors.append("rojo")
+    # Tomar SOLO las primeras 6 velas (30 segundos)
+    first_6 = candles_5s[:6]
 
-    print(f"📊 Patrón detectado: {colors}")
+    # Convertir a colores
+    colors = [get_candle_color(c) for c in first_6]
 
-    # =========================
-    # PATRÓN CALL
-    # =========================
-    if colors == ["rojo", "verde", "verde", "verde", "verde", "rojo"]:
-        print("✅ Patrón CALL válido")
-        return "call"
+    # 🔥 PATRONES EXACTOS (NO SE CAMBIAN)
+    patron_call = ["rojo", "verde", "verde", "verde", "verde", "rojo"]
+    patron_put  = ["verde", "rojo", "rojo", "rojo", "rojo", "verde"]
 
-    # =========================
-    # PATRÓN PUT
-    # =========================
-    if colors == ["verde", "rojo", "rojo", "rojo", "rojo", "verde"]:
-        print("✅ Patrón PUT válido")
-        return "put"
+    # Comparación EXACTA
+    if colors == patron_call:
+        return "CALL"
 
-    # =========================
-    # NO HAY SEÑAL
-    # =========================
-    print("❌ Patrón NO válido")
+    if colors == patron_put:
+        return "PUT"
+
+    # ❌ Cualquier otra cosa = NO OPERAR
     return None
+
+
+def get_m1_direction(candle_m1):
+    """
+    ✔ SOLO usa:
+    - Dirección de la vela M1
+    """
+
+    if candle_m1 is None:
+        return None
+
+    if candle_m1["close"] > candle_m1["open"]:
+        return "CALL"
+    else:
+        return "PUT"
