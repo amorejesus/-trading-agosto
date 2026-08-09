@@ -1,6 +1,41 @@
 import pandas as pd
 
+
+# ============================================================
+# ⚙️ CONFIGURACIÓN
+# ============================================================
+
 MIN_CANDLES = 30
+TREND_CANDLES = 15
+DOMINANCE_CANDLES = 10
+STRENGTH_CANDLES = 3
+
+
+# ============================================================
+# 🧹 VALIDACIÓN DEL DATAFRAME
+# ============================================================
+
+def validate_dataframe(df):
+    """
+    Comprueba que el DataFrame tenga las columnas necesarias.
+    """
+
+    if df is None:
+        return False
+
+    if not isinstance(df, pd.DataFrame):
+        return False
+
+    required = ["open", "close", "max", "min"]
+
+    for column in required:
+        if column not in df.columns:
+            return False
+
+    if len(df) < MIN_CANDLES:
+        return False
+
+    return True
 
 
 # ============================================================
@@ -9,29 +44,66 @@ MIN_CANDLES = 30
 
 def live_trend(df):
 
-    recent = df.iloc[-15:]
+    if not validate_dataframe(df):
+        return None
 
-    highs = recent["max"].values
-    lows = recent["min"].values
-    closes = recent["close"].values
-    opens = recent["open"].values
+    recent = df.iloc[-TREND_CANDLES:]
 
-    # Estructura
-    higher_highs = sum(highs[i] > highs[i-1] for i in range(1, len(highs)))
-    higher_lows = sum(lows[i] > lows[i-1] for i in range(1, len(lows)))
+    highs = recent["max"].astype(float).values
+    lows = recent["min"].astype(float).values
+    closes = recent["close"].astype(float).values
+    opens = recent["open"].astype(float).values
 
-    lower_highs = sum(highs[i] < highs[i-1] for i in range(1, len(highs)))
-    lower_lows = sum(lows[i] < lows[i-1] for i in range(1, len(lows)))
+    higher_highs = 0
+    higher_lows = 0
 
-    # Dominancia
-    bullish = sum(closes > opens)
-    bearish = sum(closes < opens)
+    lower_highs = 0
+    lower_lows = 0
 
-    # Tendencia fuerte
-    if higher_highs >= 9 and higher_lows >= 9 and bullish >= 10:
+    for i in range(1, len(recent)):
+
+        if highs[i] > highs[i - 1]:
+            higher_highs += 1
+
+        if lows[i] > lows[i - 1]:
+            higher_lows += 1
+
+        if highs[i] < highs[i - 1]:
+            lower_highs += 1
+
+        if lows[i] < lows[i - 1]:
+            lower_lows += 1
+
+    bullish = sum(
+        closes[i] > opens[i]
+        for i in range(len(recent))
+    )
+
+    bearish = sum(
+        closes[i] < opens[i]
+        for i in range(len(recent))
+    )
+
+    # ========================================================
+    # 📈 TENDENCIA ALCISTA
+    # ========================================================
+
+    if (
+        higher_highs >= 9
+        and higher_lows >= 9
+        and bullish >= 9
+    ):
         return "up"
 
-    if lower_highs >= 9 and lower_lows >= 9 and bearish >= 10:
+    # ========================================================
+    # 📉 TENDENCIA BAJISTA
+    # ========================================================
+
+    if (
+        lower_highs >= 9
+        and lower_lows >= 9
+        and bearish >= 9
+    ):
         return "down"
 
     return None
@@ -43,47 +115,72 @@ def live_trend(df):
 
 def strong_dominance(df, trend):
 
-    candles = df.iloc[-10:]
+    if not validate_dataframe(df):
+        return False
+
+    candles = df.iloc[-DOMINANCE_CANDLES:]
+
+    bullish = 0
+    bearish = 0
+
+    for _, candle in candles.iterrows():
+
+        if candle["close"] > candle["open"]:
+            bullish += 1
+
+        elif candle["close"] < candle["open"]:
+            bearish += 1
 
     if trend == "up":
-        bullish = sum(c["close"] > c["open"] for _, c in candles.iterrows())
         return bullish >= 7
 
     if trend == "down":
-        bearish = sum(c["close"] < c["open"] for _, c in candles.iterrows())
         return bearish >= 7
 
     return False
 
 
 # ============================================================
-# 🔥 VELAS DE FUERZA (CUERPO GRANDE)
+# 🔥 VELAS DE FUERZA
 # ============================================================
 
 def strong_candles(df, trend):
 
-    candles = df.iloc[-3:]
+    if not validate_dataframe(df):
+        return False
 
-    for _, c in candles.iterrows():
+    candles = df.iloc[-STRENGTH_CANDLES:]
 
-        body = abs(c["close"] - c["open"])
-        total = c["max"] - c["min"]
+    for _, candle in candles.iterrows():
 
-        if total == 0:
+        open_price = float(candle["open"])
+        close_price = float(candle["close"])
+        high = float(candle["max"])
+        low = float(candle["min"])
+
+        total_range = high - low
+        body = abs(close_price - open_price)
+
+        # Evitar división por cero
+        if total_range <= 0:
             return False
 
-        body_ratio = body / total
+        body_ratio = body / total_range
 
-        # Debe ser vela fuerte
-        if body_ratio < 0.6:
+        # Cuerpo mínimo
+        if body_ratio < 0.55:
             return False
 
-        # Dirección correcta
-        if trend == "up" and c["close"] <= c["open"]:
-            return False
+        # Dirección
+        if trend == "up":
 
-        if trend == "down" and c["close"] >= c["open"]:
-            return False
+            if close_price <= open_price:
+                return False
+
+        elif trend == "down":
+
+            if close_price >= open_price:
+                return False
 
     return True
 
@@ -94,83 +191,20 @@ def strong_candles(df, trend):
 
 def continuation(df, trend):
 
-    last = df.iloc[-2]
-    prev = df.iloc[-3]
-
-    if trend == "up":
-        return last["close"] > prev["close"]
-
-    if trend == "down":
-        return last["close"] < prev["close"]
-
-    return False
-
-
-# ============================================================
-# 🚫 FILTRO ANTI VELA EXTREMA (EVITA ENTRAR TARDE)
-# ============================================================
-
-def avoid_extreme_entry(df):
-
-    last = df.iloc[-2]
-
-    body = abs(last["close"] - last["open"])
-    total = last["max"] - last["min"]
-
-    if total == 0:
+    if not validate_dataframe(df):
         return False
 
-    # Si la vela es exageradamente grande → probablemente ya explotó
-    return body < (total * 0.9)
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    # -1 = vela actual / posiblemente todavía abierta
+    # -2 = última vela cerrada
+    # -3 = vela anterior
+    # --------------------------------------------------------
 
+    last_closed = df.iloc[-2]
+    previous = df.iloc[-3]
 
-# ============================================================
-# 🧠 FUNCIÓN PRINCIPAL
-# ============================================================
+    last_close = float(last_closed["close"])
+    previous_close = float(previous["close"])
 
-def analyze_candle(df_m1, df_m5=None):
-
-    if df_m1 is None or len(df_m1) < MIN_CANDLES:
-        return None, None
-
-    # 1. Tendencia clara
-    trend = live_trend(df_m1)
-
-    if trend is None:
-        print("⛔ Sin tendencia clara M1")
-        return None, None
-
-    print(f"📈 Tendencia: {trend}")
-
-    # 2. Dominio del mercado
-    if not strong_dominance(df_m1, trend):
-        print("⛔ Sin dominio claro")
-        return None, trend
-
-    # 3. Velas fuertes
-    if not strong_candles(df_m1, trend):
-        print("⛔ Sin velas de fuerza")
-        return None, trend
-
-    # 4. Continuidad real
-    if not continuation(df_m1, trend):
-        print("⛔ Sin continuidad")
-        return None, trend
-
-    # 5. Evitar entrar demasiado tarde
-    if not avoid_extreme_entry(df_m1):
-        print("⛔ Vela demasiado extendida (riesgo alto)")
-        return None, trend
-
-    print("🔥 FUERZA + DOMINIO + CONTINUIDAD CONFIRMADA")
-
-    # 6. Entrada
     if trend == "up":
-        print("🎯 CALL")
-        return "call", trend
-
-    if trend == "down":
-        print("🎯 PUT")
-        return "put", trend
-
-    return None, trend
