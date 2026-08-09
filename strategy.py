@@ -1,102 +1,91 @@
 import pandas as pd
 
-last_signal_time = 0
+# ==============================
+# 🔍 PATRONES PERMITIDOS (5s)
+# ==============================
+
+# ROJO → VERDE → VERDE → VERDE → VERDE → ROJO
+PATTERN_1 = ["red", "green", "green", "green", "green", "red"]
+
+# VERDE → ROJO → ROJO → ROJO → ROJO → VERDE
+PATTERN_2 = ["green", "red", "red", "red", "red", "green"]
 
 
 # ==============================
-# 🔥 DETECTAR FUERZA REAL
+# 🎯 COLOR DE VELA
 # ==============================
-def strong_candle(candle):
-    body = abs(candle["close"] - candle["open"])
-    total = candle["max"] - candle["min"]
+def candle_color(c):
+    if c["close"] > c["open"]:
+        return "green"
+    else:
+        return "red"
 
-    if total == 0:
+
+# ==============================
+# 🧠 DETECTAR PATRÓN EN 5s
+# ==============================
+def detect_pattern(df_5s):
+    if df_5s is None or len(df_5s) < 6:
         return False
 
-    body_ratio = body / total
+    first_6 = df_5s.iloc[:6]  # 🔥 SOLO primeras 6 velas del minuto
 
-    upper_wick = candle["max"] - max(candle["open"], candle["close"])
-    lower_wick = min(candle["open"], candle["close"]) - candle["min"]
+    colors = [candle_color(c) for _, c in first_6.iterrows()]
 
-    # 🔥 vela fuerte = cuerpo dominante + pocas mechas
-    return body_ratio > 0.7 and upper_wick < body * 0.3 and lower_wick < body * 0.3
+    if colors == PATTERN_1 or colors == PATTERN_2:
+        return True
 
-
-# ==============================
-# 🔥 DETECTAR CONTINUIDAD (CLAVE)
-# ==============================
-def momentum_sequence(df):
-    c1 = df.iloc[-2]
-    c2 = df.iloc[-3]
-    c3 = df.iloc[-4]
-
-    # CALL: 3 velas fuertes alcistas consecutivas
-    if (
-        strong_candle(c1)
-        and strong_candle(c2)
-        and strong_candle(c3)
-        and c1["close"] > c1["open"]
-        and c2["close"] > c2["open"]
-        and c3["close"] > c3["open"]
-        and c1["close"] > c2["close"] > c3["close"]
-    ):
-        return "call"
-
-    # PUT: 3 velas fuertes bajistas consecutivas
-    if (
-        strong_candle(c1)
-        and strong_candle(c2)
-        and strong_candle(c3)
-        and c1["close"] < c1["open"]
-        and c2["close"] < c2["open"]
-        and c3["close"] < c3["open"]
-        and c1["close"] < c2["close"] < c3["close"]
-    ):
-        return "put"
-
-    return None
+    return False
 
 
 # ==============================
-# ⚠️ EVITAR MERCADO MUERTO
+# 📊 DIRECCIÓN VELA M1
 # ==============================
-def low_volatility(df):
-    recent = df.iloc[-10:]
+def m1_direction(df_m1):
+    if df_m1 is None or len(df_m1) < 2:
+        return None
 
-    avg_range = (recent["max"] - recent["min"]).mean()
-    total_range = recent["max"].max() - recent["min"].min()
+    last = df_m1.iloc[-2]  # vela cerrada
 
-    # si el rango total es muy pequeño → mercado muerto
-    return total_range < avg_range * 2
+    if last["close"] > last["open"]:
+        return "green"
+    else:
+        return "red"
 
 
 # ==============================
 # 🚀 FUNCIÓN PRINCIPAL
 # ==============================
-def analyze_candle(df_m1, df_m5=None):
-    global last_signal_time
+def analyze_candle(df_m1, df_5s):
+    """
+    Lógica EXACTA:
+    1. Detecta patrón en primeras 6 velas de 5s
+    2. Mira dirección de vela M1
+    3. Ejecuta en la MISMA dirección
+    """
 
-    if df_m1 is None or len(df_m1) < 10:
-        return None, None
+    if df_m1 is None or df_5s is None:
+        return None
 
-    # ❌ evitar mercado sin movimiento
-    if low_volatility(df_m1):
-        return None, None
+    # 🔍 patrón 5s
+    pattern_ok = detect_pattern(df_5s)
 
-    # 🔥 detectar momentum real
-    direction = momentum_sequence(df_m1)
+    if not pattern_ok:
+        return None
 
-    if direction is None:
-        return None, None
+    # 📊 dirección M1
+    direction_m1 = m1_direction(df_m1)
 
-    # ⏱️ evitar sobreoperar (1 trade cada 30s)
-    import time
-    if time.time() - last_signal_time < 30:
-        return None, None
+    if direction_m1 is None:
+        return None
 
-    last_signal_time = time.time()
+    # ==============================
+    # 🎯 ENTRADA FINAL
+    # ==============================
+    if direction_m1 == "green":
+        return "call"
 
-    # 🎯 score alto porque es entrada fuerte
-    score = 90
+    elif direction_m1 == "red":
+        return "put"
 
-    return direction, score
+    return None
