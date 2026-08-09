@@ -1,12 +1,13 @@
 import time
+import os
 import requests
 import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
 from strategy import analyze_candle
-import os
 
-# ================= CONFIG =================
-
+# ==============================
+# CONFIG
+# ==============================
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
 
@@ -14,31 +15,35 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 335
+AMOUNT = 10
 EXPIRATION = 1  # minutos
 
 last_trade_time = 0
-alert_sent = False
+last_alert_time = 0
 
-# ==========================================
-
-
-def send_telegram(message):
+# ==============================
+# TELEGRAM
+# ==============================
+def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}
         )
     except:
         pass
 
 
+# ==============================
+# CONEXIÓN IQ OPTION
+# ==============================
 def connect_iq():
     if not EMAIL:
         raise RuntimeError("❌ Falta IQ_EMAIL en Railway")
+
     if not PASSWORD:
         raise RuntimeError("❌ Falta IQ_PASSWORD en Railway")
 
@@ -56,117 +61,123 @@ def connect_iq():
     return iq
 
 
-def get_candles(iq, pair, timeframe, count=100):
+# ==============================
+# OBTENER VELAS
+# ==============================
+def get_candles(iq, timeframe, count=50):
     try:
-        candles = iq.get_candles(pair, timeframe, count, time.time())
-        if not candles:
+        data = iq.get_candles(PAIR, timeframe, count, time.time())
+        if not data:
             return None
 
-        df = pd.DataFrame(candles)
-
-        # normalizar nombres
-        df.rename(columns={
-            "max": "high",
-            "min": "low"
-        }, inplace=True)
-
+        df = pd.DataFrame(data)
         return df
 
     except Exception as e:
-        print(f"❌ Error obteniendo velas: {e}")
+        print("Error velas:", e)
         return None
 
 
-# ⏳ Espera hasta segundo 58 (entrada real)
-def wait_execution():
-    while True:
-        if int(time.time()) % 60 >= 58:
-            return
-        time.sleep(0.2)
+# ==============================
+# TIEMPO ACTUAL
+# ==============================
+def current_second():
+    return int(time.time()) % 60
 
 
-# ⏳ Espera zona de análisis (primeros 30s)
-def in_analysis_window():
-    sec = int(time.time()) % 60
-    return sec <= 30
-
-
-# 🚀 Ejecutar trade
+# ==============================
+# EJECUTAR TRADE
+# ==============================
 def execute_trade(iq, direction):
     global last_trade_time
 
     print(f"🚀 EJECUTANDO {direction.upper()}")
-    send_telegram(f"🚀 EJECUTANDO {direction.upper()}")
+    send_telegram(f"🚀 TRADE → {direction.upper()}")
 
     try:
         status, _ = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
 
         if status:
-            print("✅ Operación abierta")
+            print("✅ Trade ejecutado")
             send_telegram("✅ Trade ejecutado")
             last_trade_time = time.time()
         else:
-            print("❌ Error al abrir operación")
+            print("❌ Error trade")
             send_telegram("❌ Error al ejecutar trade")
 
     except Exception as e:
-        print("❌ Error trade:", e)
+        print("Error:", e)
 
 
-# ================= MAIN =================
-
+# ==============================
+# LOOP PRINCIPAL
+# ==============================
 def main():
-    global alert_sent
-
-    print("====================================")
-    print("🤖 BOT SNIPER 5s + M1")
-    print("====================================")
+    global last_alert_time
 
     iq = connect_iq()
 
+    print("===================================")
+    print("🤖 BOT SNIPER 5s + M1")
+    print("===================================")
+
     while True:
         try:
-            sec = int(time.time()) % 60
+            sec = current_second()
 
-            df_m1 = get_candles(iq, PAIR, 60)
-            df_5s = get_candles(iq, PAIR, 5)
+            df_m1 = get_candles(iq, 60, 50)
+            df_5s = get_candles(iq, 5, 50)
 
             if df_m1 is None or df_5s is None:
                 print("⛔ Sin datos")
                 time.sleep(1)
                 continue
 
-            # 🔎 ANALISIS SOLO EN PRIMEROS 30s
-            if in_analysis_window():
+            # ==============================
+            # ANALIZAR ESTRATEGIA
+            # ==============================
+            direction, signal_time = analyze_candle(df_5s, df_m1)
 
-                signal = analyze_candle(df_5s, df_m1)
+            # ==============================
+            # ALERTA TEMPRANA (0–30s)
+            # ==============================
+            if direction and sec < 30:
+                if time.time() - last_alert_time > 60:
+                    print(f"📡 ALERTA {direction}")
+                    send_telegram(f"📡 ALERTA → {direction.upper()}")
+                    last_alert_time = time.time()
 
-                if signal and not alert_sent:
-                    print(f"📢 ALERTA: {signal.upper()}")
-                    send_telegram(f"📢 ALERTA: {signal.upper()} (esperando cierre M1)")
-                    alert_sent = True
+            # ==============================
+            # EJECUCIÓN EN CIERRE
+            # ==============================
+            if direction and sec >= 58:
 
-            # 🎯 EJECUCIÓN EN SEGUNDO 58
-            if sec >= 58:
+                # evitar sobreoperar
+                if time.time() - last_trade_time < 120:
+                    continue
 
-                signal = analyze_candle(df_5s, df_m1)
+                # 🔥 DIRECCIÓN REAL M1 (NO INVERTIDO)
+                last_candle = df_m1.iloc[-2]
 
-                if signal:
-                    execute_trade(iq, signal)
+                if last_candle["close"] > last_candle["open"]:
+                    real_direction = "call"
                 else:
-                    print("⛔ Sin señal")
+                    real_direction = "put"
 
-                alert_sent = False  # reset ciclo
+                print(f"🎯 CONFIRMACIÓN FINAL: {real_direction}")
+
+                execute_trade(iq, real_direction)
 
             time.sleep(0.5)
 
         except Exception as e:
-            print("❌ Error general:", e)
-            send_telegram(f"❌ Error: {e}")
-            time.sleep(2)
+            print("❌ ERROR:", e)
+            send_telegram(f"❌ ERROR: {e}")
+            time.sleep(5)
 
 
-# ========================================
-
+# ==============================
+# START
+# ==============================
 if __name__ == "__main__":
     main()
