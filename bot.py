@@ -60,107 +60,116 @@ def get_candles(iq, timeframe, count):
     return candles
 
 # =========================
-# DIRECCIÓN VELA
+# COLOR VELA
 # =========================
-def get_candle_color(candle):
-    if candle["close"] > candle["open"]:
-        return "verde"
-    else:
-        return "rojo"
+def get_color(candle):
+    return "verde" if candle["close"] > candle["open"] else "rojo"
 
 # =========================
 # MAIN
 # =========================
 def main():
+
     iq = connect_iq()
+
     if iq is None:
-        print("⏳ Reintentando en 60s...")
+        print("⏳ Reintentando conexión en 60s...")
         time.sleep(60)
         return main()
 
+    print("🚀 BOT SNIPER ACTIVO")
+
     last_minute = None
     alert_sent = False
-    signal_direction = None
-
-    print("🚀 BOT SNIPER 5s + M1 INICIADO")
+    signal = None
 
     while True:
         try:
             now = datetime.now()
-            current_minute = now.minute
-            current_second = now.second
+            minute = now.minute
+            second = now.second
 
-            # Reinicio cada minuto
-            if last_minute != current_minute:
-                last_minute = current_minute
+            # RESET cada nueva vela M1
+            if minute != last_minute:
+                last_minute = minute
                 alert_sent = False
-                signal_direction = None
-                print(f"\n🕐 Nueva vela M1: {current_minute}")
+                signal = None
+                print(f"\n🕐 Nueva vela M1: {minute}")
 
             # =========================
-            # 🔎 ANALISIS EN SEGUNDO 30
+            # 🔎 ANALISIS SEGUNDO 30
             # =========================
-            if current_second == 30 and not alert_sent:
+            if second == 30 and not alert_sent:
 
                 candles_5s = get_candles(iq, 5, 6)
 
                 if len(candles_5s) < 6:
+                    print("⚠️ No hay suficientes velas")
                     continue
 
-                pattern_signal = check_pattern(candles_5s)
+                pattern = check_pattern(candles_5s)
 
-                if pattern_signal:
-                    signal_direction = pattern_signal
+                if pattern:
+                    signal = pattern
                     alert_sent = True
 
-                    send_telegram(f"📡 ALERTA SNIPER\nPar: {PAIR}\nDirección: {signal_direction.upper()}\n(Esperando cierre M1)")
+                    print(f"📡 Señal detectada: {signal}")
 
-                    print(f"📡 Señal detectada: {signal_direction}")
-
+                    send_telegram(
+                        f"📡 ALERTA SNIPER\n"
+                        f"Par: {PAIR}\n"
+                        f"Dirección: {signal.upper()}\n"
+                        f"⏳ Esperando cierre M1"
+                    )
                 else:
                     print("❌ Sin patrón válido")
 
             # =========================
-            # 🎯 EJECUCIÓN EN CIERRE M1
+            # 🎯 EJECUCIÓN SEGUNDO 58
             # =========================
-            if current_second == 58 and signal_direction:
+            if second == 58 and signal:
 
                 candles_1m = get_candles(iq, 60, 1)
 
                 if len(candles_1m) == 0:
                     continue
 
-                last_candle = candles_1m[-1]
-                candle_color = get_candle_color(last_candle)
+                candle = candles_1m[-1]
+                color = get_color(candle)
 
-                print(f"📊 Cierre M1: {candle_color}")
+                print(f"📊 Cierre M1: {color}")
 
-                # VALIDACIÓN FINAL (SIN INVERSIÓN)
-                if signal_direction == "call" and candle_color == "verde":
+                # VALIDACIÓN FINAL (CLAVE)
+                if signal == "call" and color == "verde":
                     direction = "call"
-                elif signal_direction == "put" and candle_color == "rojo":
+                elif signal == "put" and color == "rojo":
                     direction = "put"
                 else:
                     print("❌ No coincide con M1 → NO OPERAR")
-                    signal_direction = None
+                    signal = None
                     continue
 
                 print(f"🚀 EJECUTANDO {direction.upper()}")
 
-                check, id = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
+                check, order_id = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
 
                 if check:
-                    send_telegram(f"✅ ENTRADA EJECUTADA\nPar: {PAIR}\nDirección: {direction.upper()}")
-                    print("✅ Operación enviada")
+                    print("✅ Operación ejecutada")
+
+                    send_telegram(
+                        f"✅ ENTRADA EJECUTADA\n"
+                        f"Par: {PAIR}\n"
+                        f"Dirección: {direction.upper()}"
+                    )
                 else:
                     print("❌ Error al ejecutar operación")
 
-                signal_direction = None
+                signal = None
 
             time.sleep(1)
 
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ ERROR GENERAL: {e}")
             time.sleep(5)
 
 
