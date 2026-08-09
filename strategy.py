@@ -1,96 +1,86 @@
-import pandas as pd
+import time
+
+# ==============================
+# OBTENER PRIMERAS 6 VELAS (0–30s)
+# ==============================
+def get_first_6_candles(df_5s):
+    now = int(time.time())
+
+    # inicio del minuto actual
+    current_minute = now - (now % 60)
+
+    # filtrar solo velas del minuto actual
+    candles = df_5s[df_5s["from"] >= current_minute]
+
+    # ordenar por tiempo
+    candles = candles.sort_values("from")
+
+    # tomar SOLO las primeras 6 velas (0–30s)
+    return candles.head(6)
 
 
 # ==============================
-# OBTENER COLOR DE VELA
+# DETECTAR COLOR VELA
 # ==============================
-def candle_color(candle):
+def get_color(candle):
     if candle["close"] > candle["open"]:
-        return "green"
-    elif candle["close"] < candle["open"]:
-        return "red"
+        return "g"
     else:
-        return "doji"
+        return "r"
 
 
 # ==============================
-# PATRÓN 5s (primeros 30 segundos)
+# DETECTAR PATRÓN
 # ==============================
-def pattern_5s(df_5s):
-    """
-    Toma las primeras 6 velas de 5 segundos del minuto actual
-    """
+def detect_pattern(df_5s):
+    candles = get_first_6_candles(df_5s)
 
-    if df_5s is None or len(df_5s) < 6:
+    if len(candles) < 6:
         return None
 
-    # Tomar últimas 6 velas (representan los primeros 30s en tiempo real)
-    candles = df_5s.iloc[-6:]
+    colors = [get_color(c) for _, c in candles.iterrows()]
 
-    colors = [candle_color(c) for _, c in candles.iterrows()]
+    # patrón 1
+    pattern_1 = ["r", "g", "g", "g", "g", "r"]
 
-    # Patrón CALL
-    # rojo → verde → verde → verde → verde → rojo
-    if colors == ["red", "green", "green", "green", "green", "red"]:
+    # patrón 2
+    pattern_2 = ["g", "r", "r", "r", "r", "g"]
+
+    if colors == pattern_1 or colors == pattern_2:
+        return True
+
+    return False
+
+
+# ==============================
+# DIRECCIÓN M1
+# ==============================
+def get_m1_direction(df_m1):
+    last = df_m1.iloc[-2]  # vela cerrada
+
+    if last["close"] > last["open"]:
         return "call"
-
-    # Patrón PUT
-    # verde → rojo → rojo → rojo → rojo → verde
-    if colors == ["green", "red", "red", "red", "red", "green"]:
+    else:
         return "put"
-
-    return None
-
-
-# ==============================
-# DIRECCIÓN VELA M1
-# ==============================
-def direction_m1(df_m1):
-    """
-    Usa la vela cerrada anterior (NO la actual en formación)
-    """
-
-    if df_m1 is None or len(df_m1) < 2:
-        return None
-
-    last_closed = df_m1.iloc[-2]
-
-    return candle_color(last_closed)
 
 
 # ==============================
 # FUNCIÓN PRINCIPAL
 # ==============================
 def analyze_candle(df_5s, df_m1):
-    """
-    Lógica EXACTA pedida:
-
-    1. Detecta patrón en 5s
-    2. Confirma con dirección de vela M1
-    """
-
     if df_5s is None or df_m1 is None:
-        return None
+        return None, None
 
-    if len(df_5s) < 6 or len(df_m1) < 2:
-        return None
+    if len(df_5s) < 10 or len(df_m1) < 5:
+        return None, None
 
-    pattern = pattern_5s(df_5s)
-    m1_dir = direction_m1(df_m1)
+    # 🔥 validar patrón
+    valid_pattern = detect_pattern(df_5s)
 
-    if pattern is None or m1_dir is None:
-        return None
+    if not valid_pattern:
+        return None, None
 
-    # ==============================
-    # SINERGIA FINAL
-    # ==============================
+    # 🔥 dirección SOLO M1
+    direction = get_m1_direction(df_m1)
 
-    # CALL
-    if pattern == "call" and m1_dir == "green":
-        return "call"
-
-    # PUT
-    if pattern == "put" and m1_dir == "red":
-        return "put"
-
-    return None
+    return direction, time.time()
