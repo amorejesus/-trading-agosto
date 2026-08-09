@@ -9,7 +9,7 @@ from strategy import check_pattern, get_m1_direction
 # CONFIG
 # ==============================
 PAIR = "EURUSD-OTC"
-AMOUNT = 20
+AMOUNT = 75
 EXPIRATION = 1
 
 EMAIL = os.getenv("IQ_EMAIL")
@@ -32,32 +32,48 @@ def send_telegram(msg):
 
 
 # ==============================
-# CONEXIÓN ROBUSTA
+# CONEXIÓN ROBUSTA (NO SE CAE)
 # ==============================
 def connect_iq():
     if not EMAIL or not PASSWORD:
-        raise RuntimeError("❌ Faltan IQ_EMAIL o IQ_PASSWORD")
+        print("❌ Faltan credenciales")
+        return None
 
     iq = IQ_Option(EMAIL, PASSWORD)
 
     print("🔄 Conectando a IQ Option...")
 
     for i in range(5):
-        iq.connect()
-        time.sleep(2)
+        try:
+            status, reason = iq.connect()
+            print(f"Intento {i+1} → {status} | {reason}")
 
-        if iq.check_connect():
-            print("✅ Conectado")
-            iq.change_balance("PRACTICE")
-            return iq
+            if iq.check_connect():
+                print("✅ Conectado correctamente")
+                iq.change_balance("PRACTICE")
+                return iq
 
-        print(f"❌ Intento {i+1} fallido...")
+        except Exception as e:
+            print("Error conexión:", e)
 
-    raise RuntimeError("❌ No se pudo conectar a IQ Option")
+        time.sleep(3)
+
+    print("❌ No se pudo conectar a IQ Option")
+    return None
 
 
 # ==============================
-# VELAS
+# RECONEXIÓN AUTOMÁTICA
+# ==============================
+def ensure_connection(iq):
+    if iq is None or not iq.check_connect():
+        print("🔁 Reconectando...")
+        return connect_iq()
+    return iq
+
+
+# ==============================
+# OBTENER VELAS
 # ==============================
 def get_candles(iq):
     try:
@@ -65,7 +81,7 @@ def get_candles(iq):
         candles_1m = iq.get_candles(PAIR, 60, 2, time.time())
         return candles_5s, candles_1m
     except Exception as e:
-        print("⚠️ Error velas:", e)
+        print("⚠️ Error obteniendo velas:", e)
         return None, None
 
 
@@ -83,11 +99,18 @@ def main():
 
     while True:
         try:
+            iq = ensure_connection(iq)
+
+            if iq is None:
+                print("⏳ Esperando conexión...")
+                time.sleep(10)
+                continue
+
             now = datetime.now()
             second = now.second
             minute = now.minute
 
-            # reset cada minuto
+            # RESET cada nuevo minuto
             if minute != last_minute:
                 signal = None
                 alert_sent = False
@@ -100,14 +123,14 @@ def main():
                 continue
 
             # ==========================
-            # DETECCIÓN (0 - 30s)
+            # DETECCIÓN (PRIMEROS 30s)
             # ==========================
             if 5 <= second <= 30 and signal is None:
 
                 pattern = check_pattern(candles_5s)
 
                 if pattern:
-                    last_closed_m1 = candles_1m[-2]  # 🔥 clave
+                    last_closed_m1 = candles_1m[-2]
                     direction = get_m1_direction(last_closed_m1)
 
                     signal = direction
@@ -125,13 +148,17 @@ def main():
 
                 print(f"🎯 Ejecutando {signal.upper()}")
 
-                status, _ = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
+                try:
+                    status, _ = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
-                if status:
-                    print("✅ Trade ejecutado")
-                    send_telegram(f"✅ Entrada {signal.upper()}")
-                else:
-                    print("❌ Error trade")
+                    if status:
+                        print("✅ Trade ejecutado")
+                        send_telegram(f"✅ Entrada {signal.upper()}")
+                    else:
+                        print("❌ Error al ejecutar trade")
+
+                except Exception as e:
+                    print("❌ Error al operar:", e)
 
                 signal = None
 
@@ -139,13 +166,7 @@ def main():
 
         except Exception as e:
             print("❌ Error general:", e)
-
-            # 🔄 reconectar automático
-            try:
-                iq = connect_iq()
-            except:
-                print("⏳ Reintentando conexión en 10s...")
-                time.sleep(10)
+            time.sleep(5)
 
 
 # ==============================
