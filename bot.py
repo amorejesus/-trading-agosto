@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 33
+AMOUNT = 335
 EXPIRATION = 1  # minutos
 
 last_trade_time = 0
