@@ -1,177 +1,132 @@
 import os
 import time
-import requests
 from datetime import datetime
 from iqoptionapi.stable_api import IQ_Option
 from strategy import check_pattern
+import requests
 
-# =========================
+# ==============================
 # CONFIG
-# =========================
-PAIR = "EURUSD-OTC"
-AMOUNT = 10
-EXPIRATION = 1  # minutos
-
-# =========================
-# TELEGRAM
-# =========================
+# ==============================
+EMAIL = os.getenv("IQ_EMAIL")
+PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+PAIR = "EURUSD-OTC"
+AMOUNT = 3333
+EXPIRATION = 1  # 1 minuto
+
+# ==============================
+# TELEGRAM
+# ==============================
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram no configurado")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-    except:
-        pass
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+        try:
+            requests.post(url, data=data)
+        except:
+            pass
 
-# =========================
-# CONEXIÓN IQ OPTION
-# =========================
+# ==============================
+# CONEXION IQ
+# ==============================
 def connect_iq():
-    EMAIL = os.getenv("IQ_EMAIL")
-    PASSWORD = os.getenv("IQ_PASSWORD")
-
     if not EMAIL or not PASSWORD:
-        print("❌ ERROR: Faltan credenciales IQ Option")
-        return None
+        raise RuntimeError("❌ Faltan IQ_EMAIL o IQ_PASSWORD")
 
     iq = IQ_Option(EMAIL, PASSWORD)
     iq.connect()
 
     if not iq.check_connect():
-        print("❌ Error conectando a IQ Option")
-        return None
+        raise RuntimeError("❌ Error conectando a IQ Option")
 
     iq.change_balance("PRACTICE")
-    print("✅ Conectado a IQ Option")
-
     return iq
 
-# =========================
+# ==============================
 # OBTENER VELAS
-# =========================
-def get_candles(iq, timeframe, count):
-    candles = iq.get_candles(PAIR, timeframe, count, time.time())
-    candles = sorted(candles, key=lambda x: x['from'])
-    return candles
+# ==============================
+def get_candles(iq):
+    # 5 segundos (últimas 6)
+    candles_5s = iq.get_candles(PAIR, 5, 6, time.time())
 
-# =========================
-# COLOR VELA
-# =========================
-def get_color(candle):
-    return "verde" if candle["close"] > candle["open"] else "rojo"
+    # 1 minuto (últimas 2, usamos la cerrada)
+    candles_1m = iq.get_candles(PAIR, 60, 2, time.time())
 
-# =========================
+    return candles_5s, candles_1m
+
+# ==============================
 # MAIN
-# =========================
+# ==============================
 def main():
+    print("🚀 BOT SNIPER 5s + M1 INICIADO")
 
     iq = connect_iq()
 
-    if iq is None:
-        print("⏳ Reintentando conexión en 60s...")
-        time.sleep(60)
-        return main()
-
-    print("🚀 BOT SNIPER ACTIVO")
-
     last_minute = None
-    alert_sent = False
     signal = None
+    alert_sent = False
 
     while True:
         try:
             now = datetime.now()
-            minute = now.minute
             second = now.second
+            minute = now.minute
 
-            # RESET cada nueva vela M1
-            if minute != last_minute:
-                last_minute = minute
-                alert_sent = False
-                signal = None
-                print(f"\n🕐 Nueva vela M1: {minute}")
+            candles_5s, candles_1m = get_candles(iq)
 
-            # =========================
-            # 🔎 ANALISIS SEGUNDO 30
-            # =========================
-            if second == 30 and not alert_sent:
+            # ==============================
+            # 1. DETECTAR PATRON (0s - 30s)
+            # ==============================
+            if 5 <= second <= 30:
+                pattern_signal = check_pattern(candles_5s)
 
-                candles_5s = get_candles(iq, 5, 6)
+                if pattern_signal and not signal:
+                    # Validar con vela M1 CERRADA
+                    last_m1 = candles_1m[-2]
 
-                if len(candles_5s) < 6:
-                    print("⚠️ No hay suficientes velas")
-                    continue
+                    if last_m1["close"] > last_m1["open"]:
+                        direction = "call"
+                    else:
+                        direction = "put"
 
-                pattern = check_pattern(candles_5s)
+                    signal = direction
+                    print(f"✅ Señal detectada: {signal.upper()}")
 
-                if pattern:
-                    signal = pattern
-                    alert_sent = True
+                    # ALERTA TELEGRAM
+                    if not alert_sent:
+                        send_telegram(f"🚨 Señal: {signal.upper()} en próxima vela")
+                        alert_sent = True
 
-                    print(f"📡 Señal detectada: {signal}")
+            # ==============================
+            # 2. EJECUTAR SOLO EN SEGUNDO 0
+            # ==============================
+            if second == 0 and signal and minute != last_minute:
+                print(f"🎯 EJECUTANDO {signal.upper()}")
 
-                    send_telegram(
-                        f"📡 ALERTA SNIPER\n"
-                        f"Par: {PAIR}\n"
-                        f"Dirección: {signal.upper()}\n"
-                        f"⏳ Esperando cierre M1"
-                    )
-                else:
-                    print("❌ Sin patrón válido")
-
-            # =========================
-            # 🎯 EJECUCIÓN SEGUNDO 58
-            # =========================
-            if second == 58 and signal:
-
-                candles_1m = get_candles(iq, 60, 1)
-
-                if len(candles_1m) == 0:
-                    continue
-
-                candle = candles_1m[-1]
-                color = get_color(candle)
-
-                print(f"📊 Cierre M1: {color}")
-
-                # VALIDACIÓN FINAL (CLAVE)
-                if signal == "call" and color == "verde":
-                    direction = "call"
-                elif signal == "put" and color == "rojo":
-                    direction = "put"
-                else:
-                    print("❌ No coincide con M1 → NO OPERAR")
-                    signal = None
-                    continue
-
-                print(f"🚀 EJECUTANDO {direction.upper()}")
-
-                check, order_id = iq.buy(AMOUNT, PAIR, direction, EXPIRATION)
+                check, id = iq.buy(AMOUNT, PAIR, signal, EXPIRATION)
 
                 if check:
-                    print("✅ Operación ejecutada")
-
-                    send_telegram(
-                        f"✅ ENTRADA EJECUTADA\n"
-                        f"Par: {PAIR}\n"
-                        f"Dirección: {direction.upper()}"
-                    )
+                    print("✅ Entrada ejecutada")
+                    send_telegram(f"📈 Entrada {signal.upper()} ejecutada")
                 else:
-                    print("❌ Error al ejecutar operación")
+                    print("❌ Error al ejecutar")
 
+                # Reset
                 signal = None
+                alert_sent = False
+                last_minute = minute
 
             time.sleep(1)
 
         except Exception as e:
-            print(f"❌ ERROR GENERAL: {e}")
-            time.sleep(5)
+            print(f"⚠️ Error: {e}")
+            time.sleep(2)
 
-
+# ==============================
+# RUN
+# ==============================
 if __name__ == "__main__":
     main()
