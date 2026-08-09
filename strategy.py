@@ -1,17 +1,18 @@
 import pandas as pd
 
 
-MIN_CANDLES = 30
-TREND_CANDLES = 15
-DOMINANCE_CANDLES = 10
-STRENGTH_CANDLES = 3
+# ============================================================
+# 🎯 CONFIGURACIÓN
+# ============================================================
+
+MIN_5S_CANDLES = 6
 
 
 # ============================================================
-# VALIDACIÓN
+# 🧹 VALIDAR DATAFRAME
 # ============================================================
 
-def validate_dataframe(df):
+def valid_dataframe(df):
 
     if df is None:
         return False
@@ -19,472 +20,315 @@ def validate_dataframe(df):
     if not isinstance(df, pd.DataFrame):
         return False
 
-    required = ["open", "close", "max", "min"]
+    required = ["open", "close"]
 
-    if not all(column in df.columns for column in required):
-        return False
-
-    if len(df) < MIN_CANDLES:
-        return False
+    for column in required:
+        if column not in df.columns:
+            return False
 
     return True
 
 
 # ============================================================
-# TENDENCIA M1
+# 🕯️ COLOR DE VELA
 # ============================================================
 
-def live_trend(df):
-
-    if not validate_dataframe(df):
-        return None
-
-    recent = df.iloc[-TREND_CANDLES:]
-
-    highs = recent["max"].astype(float).values
-    lows = recent["min"].astype(float).values
-    closes = recent["close"].astype(float).values
-    opens = recent["open"].astype(float).values
-
-    higher_highs = 0
-    higher_lows = 0
-    lower_highs = 0
-    lower_lows = 0
-
-    for i in range(1, len(recent)):
-
-        if highs[i] > highs[i - 1]:
-            higher_highs += 1
-
-        if lows[i] > lows[i - 1]:
-            higher_lows += 1
-
-        if highs[i] < highs[i - 1]:
-            lower_highs += 1
-
-        if lows[i] < lows[i - 1]:
-            lower_lows += 1
-
-    bullish = sum(
-        closes[i] > opens[i]
-        for i in range(len(recent))
-    )
-
-    bearish = sum(
-        closes[i] < opens[i]
-        for i in range(len(recent))
-    )
-
-    # Tendencia alcista
-    if (
-        higher_highs >= 9
-        and higher_lows >= 9
-        and bullish >= 9
-    ):
-        return "up"
-
-    # Tendencia bajista
-    if (
-        lower_highs >= 9
-        and lower_lows >= 9
-        and bearish >= 9
-    ):
-        return "down"
-
-    return None
-
-
-# ============================================================
-# DOMINIO
-# ============================================================
-
-def strong_dominance(df, trend):
-
-    if not validate_dataframe(df):
-        return False
-
-    candles = df.iloc[-DOMINANCE_CANDLES:]
-
-    bullish = 0
-    bearish = 0
-
-    for _, candle in candles.iterrows():
-
-        if candle["close"] > candle["open"]:
-            bullish += 1
-
-        elif candle["close"] < candle["open"]:
-            bearish += 1
-
-    if trend == "up":
-        return bullish >= 7
-
-    if trend == "down":
-        return bearish >= 7
-
-    return False
-
-
-# ============================================================
-# VELAS DE FUERZA
-# ============================================================
-
-def strong_candles(df, trend):
-
-    if not validate_dataframe(df):
-        return False
-
-    candles = df.iloc[-STRENGTH_CANDLES:]
-
-    for _, candle in candles.iterrows():
-
-        open_price = float(candle["open"])
-        close_price = float(candle["close"])
-        high = float(candle["max"])
-        low = float(candle["min"])
-
-        total_range = high - low
-        body = abs(close_price - open_price)
-
-        if total_range <= 0:
-            return False
-
-        body_ratio = body / total_range
-
-        if body_ratio < 0.55:
-            return False
-
-        if trend == "up":
-
-            if close_price <= open_price:
-                return False
-
-        elif trend == "down":
-
-            if close_price >= open_price:
-                return False
-
-    return True
-
-
-# ============================================================
-# CONTINUIDAD
-# ============================================================
-
-def continuation(df, trend):
-
-    if not validate_dataframe(df):
-        return False
-
-    # -1 = vela actual
-    # -2 = última vela cerrada
-    # -3 = vela anterior
-
-    last_closed = df.iloc[-2]
-    previous = df.iloc[-3]
-
-    last_close = float(last_closed["close"])
-    previous_close = float(previous["close"])
-
-    if trend == "up":
-        return last_close > previous_close
-
-    if trend == "down":
-        return last_close < previous_close
-
-    return False
-
-
-# ============================================================
-# FILTRO VELA EXTREMA
-# ============================================================
-
-def avoid_extreme_entry(df):
-
-    if not validate_dataframe(df):
-        return False
-
-    candle = df.iloc[-2]
+def candle_color(candle):
 
     open_price = float(candle["open"])
     close_price = float(candle["close"])
-    high = float(candle["max"])
-    low = float(candle["min"])
 
-    total_range = high - low
-    body = abs(close_price - open_price)
+    if close_price > open_price:
+        return "green"
 
-    if total_range <= 0:
-        return False
-
-    body_ratio = body / total_range
-
-    if body_ratio >= 0.90:
-        return False
-
-    return True
-
-
-# ============================================================
-# FILTRO DE UBICACIÓN
-# ============================================================
-
-def avoid_bad_location(
-    df,
-    lookback=20,
-    tolerance=0.0003
-):
-
-    if not validate_dataframe(df):
-        return False
-
-    if len(df) < lookback + 3:
-        return True
-
-    closed = df.iloc[:-1]
-
-    last_close = float(
-        closed.iloc[-1]["close"]
-    )
-
-    recent_high = float(
-        closed["max"].iloc[-lookback:].max()
-    )
-
-    recent_low = float(
-        closed["min"].iloc[-lookback:].min()
-    )
-
-    distance_high = abs(
-        last_close - recent_high
-    )
-
-    distance_low = abs(
-        last_close - recent_low
-    )
-
-    if distance_high <= tolerance:
-        return False
-
-    if distance_low <= tolerance:
-        return False
-
-    return True
-
-
-# ============================================================
-# LECTURA DE LA ÚLTIMA VELA CERRADA
-# ============================================================
-
-def read_last_candle(df):
-
-    if not validate_dataframe(df):
-        return "unknown"
-
-    candle = df.iloc[-2]
-
-    if candle["close"] > candle["open"]:
-        return "bullish"
-
-    if candle["close"] < candle["open"]:
-        return "bearish"
+    if close_price < open_price:
+        return "red"
 
     return "neutral"
 
 
 # ============================================================
-# STRUCTURE SCORE
+# 🔍 OBTENER LAS 6 VELAS DE 5 SEGUNDOS
 # ============================================================
 
-def structure_score(df, trend):
+def get_first_30_seconds(df_5s):
 
-    if not validate_dataframe(df):
-        return 0
+    if not valid_dataframe(df_5s):
+        return None
 
-    recent = df.iloc[-8:]
+    if len(df_5s) < MIN_5S_CANDLES:
+        return None
 
-    highs = recent["max"].astype(float).values
-    lows = recent["min"].astype(float).values
+    # Últimas 6 velas de 5 segundos.
+    candles = df_5s.iloc[-6:].copy()
 
-    score = 0
-
-    if trend == "up":
-
-        for i in range(1, len(recent)):
-
-            if highs[i] > highs[i - 1]:
-                score += 1
-
-            if lows[i] > lows[i - 1]:
-                score += 1
-
-    elif trend == "down":
-
-        for i in range(1, len(recent)):
-
-            if highs[i] < highs[i - 1]:
-                score += 1
-
-            if lows[i] < lows[i - 1]:
-                score += 1
-
-    return min(score, 5)
+    return candles
 
 
 # ============================================================
-# FUNCIÓN COMPATIBLE CON bot.py
+# 🟢 PATRÓN CALL
+#
+# ROJO → VERDE → VERDE → VERDE → VERDE → ROJO
 # ============================================================
 
-def check_pattern(df):
+def is_call_pattern(df_5s):
 
-    return analyze_candle(df)
+    candles = get_first_30_seconds(df_5s)
+
+    if candles is None:
+        return False
+
+    pattern = [
+        candle_color(candles.iloc[0]),
+        candle_color(candles.iloc[1]),
+        candle_color(candles.iloc[2]),
+        candle_color(candles.iloc[3]),
+        candle_color(candles.iloc[4]),
+        candle_color(candles.iloc[5]),
+    ]
+
+    expected = [
+        "red",
+        "green",
+        "green",
+        "green",
+        "green",
+        "red",
+    ]
+
+    return pattern == expected
 
 
 # ============================================================
-# FUNCIÓN PRINCIPAL
+# 🔴 PATRÓN PUT
+#
+# VERDE → ROJO → ROJO → ROJO → ROJO → VERDE
 # ============================================================
 
-def analyze_candle(df_m1, df_m5=None):
+def is_put_pattern(df_5s):
 
-    if not validate_dataframe(df_m1):
+    candles = get_first_30_seconds(df_5s)
 
-        print("⛔ Datos M1 insuficientes o incorrectos")
+    if candles is None:
+        return False
 
-        return None, None
+    pattern = [
+        candle_color(candles.iloc[0]),
+        candle_color(candles.iloc[1]),
+        candle_color(candles.iloc[2]),
+        candle_color(candles.iloc[3]),
+        candle_color(candles.iloc[4]),
+        candle_color(candles.iloc[5]),
+    ]
 
-    # --------------------------------------------------------
-    # 1. TENDENCIA
-    # --------------------------------------------------------
+    expected = [
+        "green",
+        "red",
+        "red",
+        "red",
+        "red",
+        "green",
+    ]
 
-    trend = live_trend(df_m1)
+    return pattern == expected
 
-    if trend is None:
 
-        print("⛔ Sin tendencia clara M1")
+# ============================================================
+# 🚨 DETECTAR PATRÓN EXACTO
+#
+# SE EJECUTA AL SEGUNDO 30
+# ============================================================
 
-        return None, None
+def detect_5s_pattern(df_5s):
 
-    print(f"📈 Tendencia M1: {trend}")
+    if not valid_dataframe(df_5s):
+        return None
 
-    # --------------------------------------------------------
-    # 2. DOMINIO
-    # --------------------------------------------------------
-
-    if not strong_dominance(df_m1, trend):
-
-        print("⛔ Sin dominio claro")
-
-        return None, trend
-
-    print("💪 Dominio confirmado")
-
-    # --------------------------------------------------------
-    # 3. ESTRUCTURA
-    # --------------------------------------------------------
-
-    score = structure_score(
-        df_m1,
-        trend
-    )
-
-    print(f"📊 Structure Score: {score}/5")
-
-    if score < 5:
-
-        print("⛔ Estructura insuficiente")
-
-        return None, trend
-
-    # --------------------------------------------------------
-    # 4. VELAS DE FUERZA
-    # --------------------------------------------------------
-
-    if not strong_candles(
-        df_m1,
-        trend
-    ):
-
-        print("⛔ Sin velas de fuerza")
-
-        return None, trend
-
-    print("🔥 Velas de fuerza confirmadas")
-
-    # --------------------------------------------------------
-    # 5. CONTINUIDAD
-    # --------------------------------------------------------
-
-    if not continuation(
-        df_m1,
-        trend
-    ):
-
-        print("⛔ Sin continuidad")
-
-        return None, trend
-
-    print("🚀 Continuidad confirmada")
-
-    # --------------------------------------------------------
-    # 6. UBICACIÓN
-    # --------------------------------------------------------
-
-    if not avoid_bad_location(df_m1):
+    # CALL
+    if is_call_pattern(df_5s):
 
         print(
-            "⛔ Mala ubicación / "
-            "posible zona de reversión"
+            "🟢 PATRÓN CALL DETECTADO:"
+            " RED → GREEN → GREEN → GREEN → GREEN → RED"
         )
 
-        return None, trend
+        return "call"
 
-    print("📍 Ubicación aceptable")
-
-    # --------------------------------------------------------
-    # 7. VELA EXTREMA
-    # --------------------------------------------------------
-
-    if not avoid_extreme_entry(df_m1):
+    # PUT
+    if is_put_pattern(df_5s):
 
         print(
-            "⛔ Vela demasiado extendida"
+            "🔴 PATRÓN PUT DETECTADO:"
+            " GREEN → RED → RED → RED → RED → GREEN"
         )
 
-        return None, trend
+        return "put"
 
-    # --------------------------------------------------------
-    # 8. LECTURA
-    # --------------------------------------------------------
+    # Cualquier otra combinación = NO SEÑAL
+    print("⛔ Sin patrón exacto")
 
-    candle_read = read_last_candle(
-        df_m1
-    )
+    return None
 
-    print(
-        f"🕯️ Última vela cerrada: "
-        f"{candle_read}"
-    )
 
-    # --------------------------------------------------------
-    # 9. ENTRADA
-    # --------------------------------------------------------
+# ============================================================
+# 📊 VALIDACIÓN DE LA VELA M1 CERRADA
+# ============================================================
 
-    if trend == "up":
+def validate_m1(signal, df_m1):
+
+    if signal not in ("call", "put"):
+        return False
+
+    if not valid_dataframe(df_m1):
+        return False
+
+    # Última vela M1 cerrada
+    candle = df_m1.iloc[-1]
+
+    color = candle_color(candle)
+
+    # CALL necesita M1 verde
+    if signal == "call":
+
+        if color == "green":
+
+            print(
+                "✅ CALL CONFIRMADO:"
+                " M1 cerró VERDE"
+            )
+
+            return True
 
         print(
-            "🎯 CALL - "
-            "CONTINUIDAD ALCISTA"
+            "❌ CALL CANCELADO:"
+            " M1 no cerró verde"
         )
 
-        return "call", trend
+        return False
 
-    if trend == "down":
+    # PUT necesita M1 roja
+    if signal == "put":
+
+        if color == "red":
+
+            print(
+                "✅ PUT CONFIRMADO:"
+                " M1 cerró ROJA"
+            )
+
+            return True
 
         print(
-            "🎯 PUT - "
-            "CONTINUIDAD BAJISTA"
+            "❌ PUT CANCELADO:"
+            " M1 no cerró roja"
         )
 
-        return "put", trend
+        return False
 
-    return None, trend
+    return False
+
+
+# ============================================================
+# 🎯 VALIDACIÓN FINAL
+#
+# PATRÓN 5S + CIERRE M1
+# ============================================================
+
+def check_pattern(df_5s, df_m1=None):
+
+    # --------------------------------------------------------
+    # PASO 1
+    # Buscar patrón exacto en 5 segundos
+    # --------------------------------------------------------
+
+    signal = detect_5s_pattern(df_5s)
+
+    if signal is None:
+        return None
+
+    # --------------------------------------------------------
+    # PASO 2
+    # Si todavía no tenemos M1 cerrada,
+    # existe una señal pendiente.
+    # --------------------------------------------------------
+
+    if df_m1 is None:
+
+        print(
+            f"🚨 ALERTA {signal.upper()}: "
+            "esperando cierre de M1"
+        )
+
+        return signal
+
+    # --------------------------------------------------------
+    # PASO 3
+    # Confirmar color de M1
+    # --------------------------------------------------------
+
+    if validate_m1(signal, df_m1):
+
+        print(
+            f"🎯 ENTRADA CONFIRMADA: "
+            f"{signal.upper()}"
+        )
+
+        return signal
+
+    # --------------------------------------------------------
+    # PASO 4
+    # M1 no confirmó
+    # --------------------------------------------------------
+
+    print("⛔ SEÑAL CANCELADA")
+
+    return None
+
+
+# ============================================================
+# 🔔 FUNCIÓN PARA LA ALERTA DEL SEGUNDO 30
+# ============================================================
+
+def get_alert(df_5s):
+
+    signal = detect_5s_pattern(df_5s)
+
+    if signal == "call":
+
+        return {
+            "signal": "call",
+            "message": (
+                "🚨 ALERTA CALL\n"
+                "Patrón 5S exacto detectado.\n"
+                "Esperando cierre de M1."
+            )
+        }
+
+    if signal == "put":
+
+        return {
+            "signal": "put",
+            "message": (
+                "🚨 ALERTA PUT\n"
+                "Patrón 5S exacto detectado.\n"
+                "Esperando cierre de M1."
+            )
+        }
+
+    return None
+
+
+# ============================================================
+# 🎯 DECISIÓN FINAL
+# ============================================================
+
+def final_decision(signal, df_m1):
+
+    if signal is None:
+        return None
+
+    if validate_m1(signal, df_m1):
+
+        return signal
+
+    return None
