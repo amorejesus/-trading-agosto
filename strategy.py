@@ -1,49 +1,47 @@
 # =========================
-# STRATEGY SNIPER 5s + M1
+# STRATEGY SNIPER 5s
 # =========================
 
+def get_candle_color(candle):
+    """
+    Retorna 'verde' o 'rojo' según la vela
+    """
+    return "verde" if candle["close"] > candle["open"] else "rojo"
+
+
+# =========================
+# PATRÓN PRINCIPAL
+# =========================
 def check_pattern(candles_5s):
     """
-    SOLO usa:
-    ✔ Primeras 6 velas de 5 segundos (primeros 30s)
-    ✔ Patrones exactos definidos
+    Evalúa SOLO los primeros 30 segundos (6 velas de 5s)
 
-    PATRONES:
+    PATRONES VÁLIDOS:
 
     1) rojo → verde → verde → verde → verde → rojo  → CALL
     2) verde → rojo → rojo → rojo → rojo → verde  → PUT
     """
 
-    # Validación mínima
     if len(candles_5s) < 6:
         return None
 
-    # Obtener colores EXACTOS
-    colors = []
-    for c in candles_5s[:6]:
-        if c["close"] > c["open"]:
-            colors.append("verde")
-        else:
-            colors.append("rojo")
+    # Obtener colores
+    colors = [get_candle_color(c) for c in candles_5s[:6]]
 
     print(f"📊 Patrón detectado: {colors}")
 
     # =========================
     # PATRÓN CALL
+    # rojo → verde → verde → verde → verde → rojo
     # =========================
     if colors == ["rojo", "verde", "verde", "verde", "verde", "rojo"]:
-        print("✅ Patrón CALL válido")
         return "call"
 
     # =========================
     # PATRÓN PUT
+    # verde → rojo → rojo → rojo → rojo → verde
     # =========================
     if colors == ["verde", "rojo", "rojo", "rojo", "rojo", "verde"]:
-        print("✅ Patrón PUT válido")
         return "put"
 
-    # =========================
-    # NO HAY SEÑAL
-    # =========================
-    print("❌ Patrón NO válido")
     return None
