@@ -4,8 +4,6 @@ import logging
 import requests
 import pandas as pd
 
-from datetime import datetime
-
 from iqoptionapi.stable_api import IQ_Option
 
 from strategy import analyze_market
@@ -21,31 +19,36 @@ IQ_PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Importe solicitado
+
+# ============================================================
+# TRADING
+# ============================================================
+
 AMOUNT = 100
 
-# Velas de 1 minuto
 TIMEFRAME = 60
 
-# Expiración 1 minuto
 EXPIRATION = 1
 
-# Pares OTC
+CANDLE_COUNT = 60
+
+
+# ============================================================
+# PARES OTC
+# ============================================================
+
 PAIRS = [
     "EURUSD-OTC",
     "GBPUSD-OTC",
     "EURJPY-OTC",
 ]
 
-# Máximo de velas analizadas
-CANDLE_COUNT = 60
 
-# Tiempo mínimo entre operaciones del mismo par
+# ============================================================
+# CONTROL
+# ============================================================
+
 TRADE_COOLDOWN = 60
-
-# ============================================================
-# ESTADO
-# ============================================================
 
 BOT_RUNNING = False
 
@@ -75,13 +78,26 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def telegram_send(message):
+    """
+    Envía un mensaje al chat configurado.
+    """
 
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+    if not TELEGRAM_TOKEN:
+        logger.warning(
+            "TELEGRAM_TOKEN no configurado"
+        )
+        return False
+
+    if not TELEGRAM_CHAT_ID:
+        logger.warning(
+            "TELEGRAM_CHAT_ID no configurado"
+        )
+        return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendMessage"
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/sendMessage"
     )
 
     data = {
@@ -90,24 +106,42 @@ def telegram_send(message):
     }
 
     try:
-        requests.post(
+
+        response = requests.post(
             url,
             data=data,
             timeout=10
         )
 
+        if response.status_code != 200:
+
+            logger.error(
+                "Telegram respondió: %s",
+                response.text
+            )
+
+            return False
+
+        return True
+
     except Exception as e:
 
         logger.error(
-            f"Error Telegram: {e}"
+            "Error enviando Telegram: %s",
+            e
         )
+
+        return False
 
 
 # ============================================================
-# TELEGRAM COMMANDS
+# COMANDOS TELEGRAM
 # ============================================================
 
 def check_commands():
+    """
+    Lee /start, /stop y /status.
+    """
 
     global LAST_UPDATE_ID
     global BOT_RUNNING
@@ -116,8 +150,9 @@ def check_commands():
         return
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/getUpdates"
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/getUpdates"
     )
 
     params = {
@@ -126,7 +161,9 @@ def check_commands():
 
     if LAST_UPDATE_ID is not None:
 
-        params["offset"] = LAST_UPDATE_ID + 1
+        params["offset"] = (
+            LAST_UPDATE_ID + 1
+        )
 
     try:
 
@@ -141,9 +178,16 @@ def check_commands():
         if not data.get("ok"):
             return
 
-        for update in data.get("result", []):
+        updates = data.get(
+            "result",
+            []
+        )
 
-            LAST_UPDATE_ID = update["update_id"]
+        for update in updates:
+
+            LAST_UPDATE_ID = update[
+                "update_id"
+            ]
 
             message = update.get(
                 "message",
@@ -153,21 +197,34 @@ def check_commands():
             text = message.get(
                 "text",
                 ""
-            ).strip().lower()
+            )
+
+            text = text.strip().lower()
+
+            chat = message.get(
+                "chat",
+                {}
+            )
 
             chat_id = str(
-                message.get(
-                    "chat",
-                    {}
-                ).get(
+                chat.get(
                     "id",
                     ""
                 )
             )
 
-            # Seguridad: solo el chat configurado
-            if chat_id != str(TELEGRAM_CHAT_ID):
+            # ------------------------------------------------
+            # SEGURIDAD
+            # ------------------------------------------------
+
+            if chat_id != str(
+                TELEGRAM_CHAT_ID
+            ):
                 continue
+
+            # ------------------------------------------------
+            # START
+            # ------------------------------------------------
 
             if text == "/start":
 
@@ -176,59 +233,92 @@ def check_commands():
                 telegram_send(
                     "🟢 BOT ACTIVADO\n\n"
                     "Estrategia: CONTINUIDAD\n"
-                    "Marco: 1 minuto\n"
+                    "Temporalidad: 1 minuto\n"
+                    "Expiración: 1 minuto\n"
                     "Importe: $100\n\n"
-                    "Filtros activos:\n"
-                    "• Tendencia\n"
-                    "• Estructura 60 velas\n"
-                    "• Sin rechazo\n"
-                    "• Sin soporte/resistencia\n"
-                    "• Sin pullback\n"
-                    "• Sin debilidad\n"
-                    "• Sin final de tendencia"
+                    "Filtros:\n"
+                    "✅ Tendencia\n"
+                    "✅ Estructura 1M\n"
+                    "✅ Máximo 60 velas\n"
+                    "✅ Continuidad\n"
+                    "❌ Final de tendencia\n"
+                    "❌ Rechazo\n"
+                    "❌ Soporte/resistencia\n"
+                    "❌ Pullback\n"
+                    "❌ Debilidad"
                 )
+
+                logger.info(
+                    "BOT ACTIVADO desde Telegram"
+                )
+
+            # ------------------------------------------------
+            # STOP
+            # ------------------------------------------------
 
             elif text == "/stop":
 
                 BOT_RUNNING = False
 
                 telegram_send(
-                    "🔴 BOT DETENIDO"
+                    "🔴 BOT DETENIDO\n\n"
+                    "No se abrirán nuevas operaciones."
                 )
+
+                logger.info(
+                    "BOT DETENIDO desde Telegram"
+                )
+
+            # ------------------------------------------------
+            # STATUS
+            # ------------------------------------------------
 
             elif text == "/status":
 
-                estado = (
-                    "ACTIVO"
-                    if BOT_RUNNING
-                    else "DETENIDO"
-                )
+                if BOT_RUNNING:
+
+                    status = "🟢 ACTIVO"
+
+                else:
+
+                    status = "🔴 DETENIDO"
 
                 telegram_send(
-                    f"📊 Estado: {estado}\n"
-                    f"💵 Importe: ${AMOUNT}\n"
-                    f"⏱ Expiración: 1 minuto"
+                    "📊 ESTADO DEL BOT\n\n"
+                    f"Estado: {status}\n"
+                    "Temporalidad: 1 minuto\n"
+                    "Expiración: 1 minuto\n"
+                    "Importe: $100\n"
+                    f"Pares: {len(PAIRS)}"
                 )
 
     except Exception as e:
 
         logger.error(
-            f"Telegram error: {e}"
+            "Error leyendo Telegram: %s",
+            e
         )
 
 
 # ============================================================
-# CONEXIÓN IQ OPTION
+# CONECTAR IQ OPTION
 # ============================================================
 
 def connect_iq():
+    """
+    Conecta con IQ Option.
+    """
 
     global IQ
 
-    if not IQ_EMAIL or not IQ_PASSWORD:
-
+    if not IQ_EMAIL:
         raise ValueError(
-            "Faltan IQ_EMAIL o IQ_PASSWORD"
+            "Falta IQ_EMAIL"
+        )
+
+    if not IQ_PASSWORD:
+        raise ValueError(
+            "Falta IQ_PASSWORD"
         )
 
     logger.info(
@@ -240,12 +330,13 @@ def connect_iq():
         IQ_PASSWORD
     )
 
-    check, reason = IQ.connect()
+    connected, reason = IQ.connect()
 
-    if not check:
+    if not connected:
 
         raise ConnectionError(
-            f"No se pudo conectar a IQ Option: {reason}"
+            "No se pudo conectar a IQ Option: "
+            + str(reason)
         )
 
     logger.info(
@@ -253,14 +344,15 @@ def connect_iq():
     )
 
     telegram_send(
-        "🟢 Conectado a IQ Option"
+        "🟢 CONECTADO A IQ OPTION\n\n"
+        "El bot está listo."
     )
 
-    return IQ
+    return True
 
 
 # ============================================================
-# RECONEXIÓN
+# VERIFICAR CONEXIÓN
 # ============================================================
 
 def ensure_connection():
@@ -270,31 +362,44 @@ def ensure_connection():
     try:
 
         if IQ is None:
+
             connect_iq()
+
             return True
 
         if not IQ.check_connect():
 
             logger.warning(
-                "Conexión perdida. Reconectando..."
+                "Conexión IQ Option perdida."
             )
 
-            check, reason = IQ.connect()
+            telegram_send(
+                "⚠️ Conexión IQ Option perdida.\n"
+                "Intentando reconectar..."
+            )
 
-            if not check:
+            connected, reason = IQ.connect()
 
-                telegram_send(
-                    f"⚠️ Error reconectando: {reason}"
+            if not connected:
+
+                logger.error(
+                    "No se pudo reconectar: %s",
+                    reason
                 )
 
                 return False
+
+            telegram_send(
+                "🟢 IQ Option reconectado."
+            )
 
         return True
 
     except Exception as e:
 
         logger.error(
-            f"Error conexión: {e}"
+            "Error de conexión: %s",
+            e
         )
 
         return False
@@ -305,6 +410,12 @@ def ensure_connection():
 # ============================================================
 
 def get_candles(pair):
+    """
+    Obtiene las últimas 60 velas de 1 minuto.
+    """
+
+    if IQ is None:
+        return None
 
     try:
 
@@ -316,19 +427,31 @@ def get_candles(pair):
         )
 
         if not candles:
+
+            logger.warning(
+                "%s no devolvió velas",
+                pair
+            )
+
             return None
 
-        df = pd.DataFrame(candles)
+        df = pd.DataFrame(
+            candles
+        )
 
         if df.empty:
             return None
 
-        # Normalizar columnas
-        df = df.rename(
+        # ----------------------------------------------------
+        # NORMALIZAR COLUMNAS IQ OPTION
+        # ----------------------------------------------------
+
+        df.rename(
             columns={
                 "max": "high",
                 "min": "low"
-            }
+            },
+            inplace=True
         )
 
         required = [
@@ -341,20 +464,50 @@ def get_candles(pair):
         for column in required:
 
             if column not in df.columns:
+
+                logger.error(
+                    "%s falta en velas de %s",
+                    column,
+                    pair
+                )
+
                 return None
 
-        # timestamp
-        if "from" in df.columns:
+        # ----------------------------------------------------
+        # CONVERTIR A NÚMEROS
+        # ----------------------------------------------------
 
-            df["timestamp"] = pd.to_datetime(
-                df["from"],
-                unit="s"
+        for column in required:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
             )
 
-        df = df.sort_values(
-            "from"
-        ).reset_index(
-            drop=True
+        df.dropna(
+            subset=required,
+            inplace=True
+        )
+
+        # ----------------------------------------------------
+        # ORDEN CRONOLÓGICO
+        # ----------------------------------------------------
+
+        if "from" in df.columns:
+
+            df["from"] = pd.to_numeric(
+                df["from"],
+                errors="coerce"
+            )
+
+            df.sort_values(
+                "from",
+                inplace=True
+            )
+
+        df.reset_index(
+            drop=True,
+            inplace=True
         )
 
         return df
@@ -362,96 +515,203 @@ def get_candles(pair):
     except Exception as e:
 
         logger.error(
-            f"Error obteniendo velas {pair}: {e}"
+            "Error obteniendo velas %s: %s",
+            pair,
+            e
         )
 
         return None
 
 
 # ============================================================
-# VELA ACTUAL
+# TIMESTAMP DE VELA
 # ============================================================
 
-def get_current_candle_timestamp(df):
+def get_candle_timestamp(df):
 
-    if df is None or df.empty:
+    if df is None:
         return None
 
-    return int(
-        df.iloc[-1]["from"]
+    if df.empty:
+        return None
+
+    if "from" not in df.columns:
+        return None
+
+    try:
+
+        return int(
+            df.iloc[-1]["from"]
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# COMPROBAR COOLDOWN
+# ============================================================
+
+def cooldown_active(pair):
+
+    last_time = LAST_TRADE_TIME.get(
+        pair,
+        0
     )
+
+    elapsed = (
+        time.time()
+        - last_time
+    )
+
+    if elapsed < TRADE_COOLDOWN:
+
+        return True
+
+    return False
 
 
 # ============================================================
 # EJECUTAR OPERACIÓN
 # ============================================================
 
-def execute_trade(pair, direction):
+def execute_trade(
+    pair,
+    signal,
+    candle_timestamp
+):
+    """
+    Ejecuta CALL o PUT por $100
+    con expiración de 1 minuto.
+    """
 
     global LAST_TRADE_TIME
     global LAST_TRADE_CANDLE
 
-    now = time.time()
+    # --------------------------------------------------------
+    # EVITAR OPERAR LA MISMA VELA
+    # --------------------------------------------------------
+
+    previous_candle = (
+        LAST_TRADE_CANDLE.get(
+            pair
+        )
+    )
+
+    if (
+        previous_candle
+        == candle_timestamp
+    ):
+
+        logger.info(
+            "%s | Ya se operó esta vela",
+            pair
+        )
+
+        return False
 
     # --------------------------------------------------------
     # COOLDOWN
     # --------------------------------------------------------
 
-    previous_trade = LAST_TRADE_TIME.get(
-        pair,
-        0
-    )
+    if cooldown_active(pair):
 
-    if now - previous_trade < TRADE_COOLDOWN:
+        logger.info(
+            "%s | Cooldown activo",
+            pair
+        )
 
         return False
 
     # --------------------------------------------------------
-    # OPERACIÓN
+    # VALIDAR SEÑAL
+    # --------------------------------------------------------
+
+    if signal not in (
+        "call",
+        "put"
+    ):
+
+        return False
+
+    # --------------------------------------------------------
+    # MENSAJE PREVIO
+    # --------------------------------------------------------
+
+    direction_text = (
+        "CALL 🟢"
+        if signal == "call"
+        else "PUT 🔴"
+    )
+
+    telegram_send(
+        "📢 SEÑAL DE CONTINUIDAD\n\n"
+        f"Par: {pair}\n"
+        f"Dirección: {direction_text}\n"
+        "Temporalidad: 1 minuto\n"
+        "Expiración: 1 minuto\n"
+        "Importe: $100\n\n"
+        "✅ Tendencia confirmada\n"
+        "✅ Estructura confirmada\n"
+        "✅ Continuidad confirmada"
+    )
+
+    # --------------------------------------------------------
+    # EJECUTAR
     # --------------------------------------------------------
 
     try:
 
-        action = (
-            "call"
-            if direction == "call"
-            else "put"
-        )
-
-        telegram_send(
-            f"📈 SEÑAL CONFIRMADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {action.upper()}\n"
-            f"Importe: ${AMOUNT}\n"
-            f"Expiración: 1 minuto\n"
-            f"Motivo: CONTINUIDAD"
-        )
-
         status, order_id = IQ.buy(
             AMOUNT,
             pair,
-            action,
+            signal,
             EXPIRATION
         )
 
         if not status:
 
             telegram_send(
-                f"❌ OPERACIÓN RECHAZADA\n"
-                f"{pair}"
+                "❌ OPERACIÓN RECHAZADA\n\n"
+                f"Par: {pair}\n"
+                f"Dirección: {signal.upper()}"
+            )
+
+            logger.error(
+                "%s | Operación rechazada",
+                pair
             )
 
             return False
 
-        LAST_TRADE_TIME[pair] = now
+        # ----------------------------------------------------
+        # GUARDAR OPERACIÓN
+        # ----------------------------------------------------
+
+        LAST_TRADE_TIME[pair] = (
+            time.time()
+        )
+
+        LAST_TRADE_CANDLE[pair] = (
+            candle_timestamp
+        )
 
         telegram_send(
-            f"✅ OPERACIÓN ABIERTA\n\n"
-            f"{pair}\n"
-            f"{action.upper()}\n"
-            f"${AMOUNT}\n"
-            f"Expiración: 1 minuto\n"
+            "✅ OPERACIÓN ABIERTA\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {signal.upper()}\n"
+            "Importe: $100\n"
+            "Expiración: 1 minuto\n"
             f"ID: {order_id}"
+        )
+
+        logger.info(
+            "%s | %s | $%s | ID=%s",
+            pair,
+            signal.upper(),
+            AMOUNT,
+            order_id
         )
 
         return True
@@ -459,13 +719,15 @@ def execute_trade(pair, direction):
     except Exception as e:
 
         logger.error(
-            f"Error ejecutando operación: {e}"
+            "Error ejecutando operación %s: %s",
+            pair,
+            e
         )
 
         telegram_send(
-            f"❌ ERROR OPERACIÓN\n"
-            f"{pair}\n"
-            f"{str(e)}"
+            "❌ ERROR AL OPERAR\n\n"
+            f"Par: {pair}\n"
+            f"Error: {str(e)}"
         )
 
         return False
@@ -477,34 +739,49 @@ def execute_trade(pair, direction):
 
 def analyze_pair(pair):
 
-    df = get_candles(pair)
+    # --------------------------------------------------------
+    # OBTENER VELAS
+    # --------------------------------------------------------
+
+    df = get_candles(
+        pair
+    )
 
     if df is None:
         return
 
+    # --------------------------------------------------------
+    # NECESITAMOS 60 VELAS
+    # --------------------------------------------------------
+
     if len(df) < 60:
+
+        logger.info(
+            "%s | Esperando velas: %s/60",
+            pair,
+            len(df)
+        )
+
         return
 
     # --------------------------------------------------------
-    # IMPORTANTE
-    #
-    # La última vela puede estar actualmente formándose.
-    # La estrategia recibe las últimas 60 velas y analiza
-    # también el cierre/precio actual de esa vela.
+    # ANALIZAR ESTRATEGIA
     # --------------------------------------------------------
 
-    result = analyze_market(df)
+    result = analyze_market(
+        df
+    )
 
     signal = result.get(
         "signal"
     )
 
-    reason = result.get(
-        "reason"
-    )
-
     direction = result.get(
         "direction"
+    )
+
+    reason = result.get(
+        "reason"
     )
 
     score = result.get(
@@ -513,55 +790,77 @@ def analyze_pair(pair):
     )
 
     # --------------------------------------------------------
-    # SIN OPERACIÓN
+    # LOG
+    # --------------------------------------------------------
+
+    logger.info(
+        "%s | tendencia=%s | señal=%s | "
+        "score=%s | %s",
+        pair,
+        direction,
+        signal,
+        score,
+        reason
+    )
+
+    # --------------------------------------------------------
+    # SIN SEÑAL
     # --------------------------------------------------------
 
     if signal is None:
-
-        logger.info(
-            f"{pair} | "
-            f"{direction} | "
-            f"NO OPERAR | "
-            f"{reason}"
-        )
-
         return
 
     # --------------------------------------------------------
-    # EVITAR REPETIR LA MISMA VELA
+    # TIMESTAMP DE VELA
     # --------------------------------------------------------
 
     candle_timestamp = (
-        get_current_candle_timestamp(df)
+        get_candle_timestamp(
+            df
+        )
     )
 
     if candle_timestamp is None:
         return
 
-    if LAST_TRADE_CANDLE.get(pair) == candle_timestamp:
-
-        return
-
     # --------------------------------------------------------
-    # ENTRADA
+    # EJECUTAR
     # --------------------------------------------------------
 
-    logger.info(
-        f"{pair} | "
-        f"SEÑAL {signal.upper()} | "
-        f"SCORE {score}"
-    )
-
-    success = execute_trade(
+    execute_trade(
         pair,
-        signal
+        signal,
+        candle_timestamp
     )
 
-    if success:
 
-        LAST_TRADE_CANDLE[pair] = (
-            candle_timestamp
-        )
+# ============================================================
+# ANALIZAR TODOS LOS PARES
+# ============================================================
+
+def analyze_all_pairs():
+
+    for pair in PAIRS:
+
+        if not BOT_RUNNING:
+            return
+
+        try:
+
+            analyze_pair(
+                pair
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "Error analizando %s: %s",
+                pair,
+                e
+            )
+
+        # Pequeña separación entre peticiones
+        time.sleep(0.5)
 
 
 # ============================================================
@@ -572,59 +871,160 @@ def main():
 
     global BOT_RUNNING
 
-    telegram_send(
-        "🤖 BOT INICIADO\n\n"
-        "Esperando /start"
+    logger.info(
+        "========================================"
     )
+
+    logger.info(
+        "BOT IQ OPTION INICIANDO"
+    )
+
+    logger.info(
+        "Estrategia: CONTINUIDAD"
+    )
+
+    logger.info(
+        "Temporalidad: 1 MINUTO"
+    )
+
+    logger.info(
+        "Importe: $100"
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    # --------------------------------------------------------
+    # VALIDAR VARIABLES
+    # --------------------------------------------------------
+
+    if not IQ_EMAIL:
+
+        logger.error(
+            "IQ_EMAIL no configurado"
+        )
+
+        telegram_send(
+            "❌ Falta IQ_EMAIL en Railway."
+        )
+
+        return
+
+    if not IQ_PASSWORD:
+
+        logger.error(
+            "IQ_PASSWORD no configurado"
+        )
+
+        telegram_send(
+            "❌ Falta IQ_PASSWORD en Railway."
+        )
+
+        return
+
+    if not TELEGRAM_TOKEN:
+
+        logger.error(
+            "TELEGRAM_TOKEN no configurado"
+        )
+
+        return
+
+    if not TELEGRAM_CHAT_ID:
+
+        logger.error(
+            "TELEGRAM_CHAT_ID no configurado"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CONECTAR IQ OPTION
+    # --------------------------------------------------------
+
+    try:
+
+        connect_iq()
+
+    except Exception as e:
+
+        logger.error(
+            "No se pudo iniciar IQ Option: %s",
+            e
+        )
+
+        telegram_send(
+            "❌ No se pudo conectar a IQ Option.\n\n"
+            + str(e)
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # BOT ESPERANDO /START
+    # --------------------------------------------------------
+
+    telegram_send(
+        "🤖 BOT LISTO\n\n"
+        "Conectado a IQ Option.\n"
+        "Escribe /start para comenzar.\n"
+        "Escribe /status para consultar estado."
+    )
+
+    # ========================================================
+    # LOOP
+    # ========================================================
 
     while True:
 
         try:
 
-            # Telegram siempre se revisa
+            # ------------------------------------------------
+            # TELEGRAM
+            # ------------------------------------------------
+
             check_commands()
 
-            # Si está detenido no opera
+            # ------------------------------------------------
+            # BOT DETENIDO
+            # ------------------------------------------------
+
             if not BOT_RUNNING:
 
                 time.sleep(1)
+
                 continue
 
-            # Verificar conexión
+            # ------------------------------------------------
+            # CONEXIÓN
+            # ------------------------------------------------
+
             if not ensure_connection():
 
                 time.sleep(5)
+
                 continue
 
             # ------------------------------------------------
-            # ANALIZAR TODOS LOS PARES
+            # ANALIZAR MERCADO
             # ------------------------------------------------
 
-            for pair in PAIRS:
+            analyze_all_pairs()
 
-                if not BOT_RUNNING:
-                    break
+            # ------------------------------------------------
+            # PAUSA
+            # ------------------------------------------------
 
-                try:
-
-                    analyze_pair(pair)
-
-                except Exception as e:
-
-                    logger.error(
-                        f"Error analizando "
-                        f"{pair}: {e}"
-                    )
-
-                # pequeña pausa
-                time.sleep(0.3)
-
-            # No saturar API
             time.sleep(1)
 
         except KeyboardInterrupt:
 
             BOT_RUNNING = False
+
+            logger.info(
+                "Bot detenido manualmente."
+            )
 
             telegram_send(
                 "🔴 BOT DETENIDO MANUALMENTE"
@@ -634,15 +1034,20 @@ def main():
 
         except Exception as e:
 
-            logger.error(
-                f"Error principal: {e}"
+            logger.exception(
+                "Error en loop principal"
             )
 
-            time.sleep(3)
+            telegram_send(
+                "⚠️ ERROR EN BOT\n\n"
+                + str(e)
+            )
+
+            time.sleep(5)
 
 
 # ============================================================
-# EJECUCIÓN
+# ARRANQUE
 # ============================================================
 
 if __name__ == "__main__":
