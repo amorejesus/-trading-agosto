@@ -1,18 +1,18 @@
 import pandas as pd
 
 # ==============================
-# ðŸ” PATRONES PERMITIDOS (5s)
+# 🔍 PATRONES PERMITIDOS (5s)
 # ==============================
 
-# ROJO â†’ VERDE â†’ VERDE â†’ VERDE â†’ VERDE â†’ ROJO
+# ROJO → VERDE → VERDE → VERDE → VERDE → ROJO
 PATTERN_1 = ["red", "green", "green", "green", "green", "red"]
 
-# VERDE â†’ ROJO â†’ ROJO â†’ ROJO â†’ ROJO â†’ VERDE
+# VERDE → ROJO → ROJO → ROJO → ROJO → VERDE
 PATTERN_2 = ["green", "red", "red", "red", "red", "green"]
 
 
 # ==============================
-# ðŸŽ¯ COLOR DE VELA
+# 🎯 COLOR DE VELA
 # ==============================
 def candle_color(c):
     if c["close"] > c["open"]:
@@ -22,13 +22,13 @@ def candle_color(c):
 
 
 # ==============================
-# ðŸ§  DETECTAR PATRÃ“N EN 5s
+# 🧠 DETECTAR PATRÓN EN 5s
 # ==============================
 def detect_pattern(df_5s):
     if df_5s is None or len(df_5s) < 6:
         return False
 
-    first_6 = df_5s.iloc[:6]  # ðŸ”¥ SOLO primeras 6 velas del minuto
+    first_6 = df_5s.iloc[:6]  # 🔥 SOLO primeras 6 velas del minuto
 
     colors = [candle_color(c) for _, c in first_6.iterrows()]
 
@@ -39,7 +39,7 @@ def detect_pattern(df_5s):
 
 
 # ==============================
-# ðŸ“Š DIRECCIÃ“N VELA M1
+# 📊 DIRECCIÓN VELA M1
 # ==============================
 def m1_direction(df_m1):
     if df_m1 is None or len(df_m1) < 2:
@@ -54,33 +54,33 @@ def m1_direction(df_m1):
 
 
 # ==============================
-# ðŸš€ FUNCIÃ“N PRINCIPAL
+# 🚀 FUNCIÓN PRINCIPAL
 # ==============================
 def analyze_candle(df_m1, df_5s):
     """
-    LÃ³gica EXACTA:
-    1. Detecta patrÃ³n en primeras 6 velas de 5s
-    2. Mira direcciÃ³n de vela M1
-    3. Ejecuta en la MISMA direcciÃ³n
+    Lógica EXACTA:
+    1. Detecta patrón en primeras 6 velas de 5s
+    2. Mira dirección de vela M1
+    3. Ejecuta en la MISMA dirección
     """
 
     if df_m1 is None or df_5s is None:
         return None
 
-    # ðŸ” patrÃ³n 5s
+    # 🔍 patrón 5s
     pattern_ok = detect_pattern(df_5s)
 
     if not pattern_ok:
         return None
 
-    # ðŸ“Š direcciÃ³n M1
+    # 📊 dirección M1
     direction_m1 = m1_direction(df_m1)
 
     if direction_m1 is None:
         return None
 
     # ==============================
-    # ðŸŽ¯ ENTRADA FINAL
+    # 🎯 ENTRADA FINAL
     # ==============================
     if direction_m1 == "green":
         return "call"
