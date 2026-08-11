@@ -3,41 +3,30 @@ import numpy as np
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN DE LA ESTRATEGIA
 # ============================================================
 
 MAX_CANDLES = 60
-MIN_CANDLES = 25
 
-# Velas para estructura general
-STRUCTURE_LOOKBACK = 30
+# Cuántas velas recientes usamos para determinar estructura
+STRUCTURE_CANDLES = 20
 
-# Velas para buscar zonas de soporte/resistencia
-SR_LOOKBACK = 60
+# Ventana para detectar soporte/resistencia
+SR_WINDOW = 20
 
-# Cantidad mínima de toques para considerar una zona importante
-MIN_SR_TOUCHES = 2
+# Tolerancias relativas
+SR_TOLERANCE = 0.0010
 
-# Distancia máxima entre niveles para agruparlos
-# Se adapta también al ATR.
-SR_CLUSTER_TOLERANCE = 0.00020
+# Fuerza mínima de cuerpo respecto al rango
+MIN_BODY_RATIO = 0.45
 
-# Protección adicional alrededor de una zona
-SR_PROTECTION_ATR = 0.45
+# Evitar velas extremadamente pequeñas
+MIN_RANGE_RATIO = 0.00005
 
-# Cuántas velas recientes se usan para detectar rechazo
-REJECTION_LOOKBACK = 6
-
-# Cuántas velas para detectar pullback
-PULLBACK_LOOKBACK = 6
-
-# Cuántas velas para detectar debilidad
-WEAKNESS_LOOKBACK = 5
 
 # ============================================================
 # UTILIDADES
 # ============================================================
-
 
 def safe_float(value, default=0.0):
 
@@ -47,9 +36,6 @@ def safe_float(value, default=0.0):
         if np.isnan(value):
             return default
 
-        if np.isinf(value):
-            return default
-
         return value
 
     except Exception:
@@ -57,44 +43,21 @@ def safe_float(value, default=0.0):
 
 
 # ============================================================
-# VALIDACIÓN
+# PREPARAR DATAFRAME
 # ============================================================
-
-
-def validate_dataframe(df):
-
-    if df is None:
-        return False
-
-    if not isinstance(df, pd.DataFrame):
-        return False
-
-    if df.empty:
-        return False
-
-    required = [
-        "open",
-        "high",
-        "low",
-        "close"
-    ]
-
-    for column in required:
-
-        if column not in df.columns:
-            return False
-
-    return True
-
-
-# ============================================================
-# PREPARAR DATA
-# ============================================================
-
 
 def prepare_dataframe(df):
 
-    df = df.copy()
+    if df is None:
+        return None
+
+    if not isinstance(df, pd.DataFrame):
+        return None
+
+    if df.empty:
+        return None
+
+    data = df.copy()
 
     required = [
         "open",
@@ -105,383 +68,212 @@ def prepare_dataframe(df):
 
     for column in required:
 
-        df[column] = pd.to_numeric(
-            df[column],
+        if column not in data.columns:
+            return None
+
+        data[column] = pd.to_numeric(
+            data[column],
             errors="coerce"
         )
 
-    df.dropna(
+    data.dropna(
         subset=required,
         inplace=True
     )
 
-    if "from" in df.columns:
-
-        df["from"] = pd.to_numeric(
-            df["from"],
-            errors="coerce"
-        )
-
-        df.dropna(
-            subset=["from"],
-            inplace=True
-        )
-
-        df.sort_values(
-            "from",
-            inplace=True
-        )
-
-    df.reset_index(
+    data.reset_index(
         drop=True,
         inplace=True
     )
 
-    # Nunca utilizar más de 60 velas
-    if len(df) > MAX_CANDLES:
+    if len(data) < 10:
+        return None
 
-        df = df.tail(
-            MAX_CANDLES
-        ).reset_index(
-            drop=True
-        )
-
-    return df
+    return data
 
 
 # ============================================================
-# INDICADORES
+# DATOS DE LA VELA
 # ============================================================
 
+def candle_range(candle):
 
-def add_indicators(df):
+    high = safe_float(candle["high"])
+    low = safe_float(candle["low"])
 
-    df = df.copy()
-
-    # --------------------------------------------------------
-    # RANGO
-    # --------------------------------------------------------
-
-    df["range"] = (
-        df["high"] -
-        df["low"]
+    return max(
+        high - low,
+        0.0
     )
 
-    df["range"] = df["range"].replace(
-        0,
-        np.nan
+
+def candle_body(candle):
+
+    open_price = safe_float(
+        candle["open"]
     )
 
-    # --------------------------------------------------------
-    # CUERPO
-    # --------------------------------------------------------
-
-    df["body"] = (
-        df["close"] -
-        df["open"]
-    ).abs()
-
-    # --------------------------------------------------------
-    # DIRECCIÓN
-    # --------------------------------------------------------
-
-    df["direction"] = np.where(
-        df["close"] > df["open"],
-        1,
-        np.where(
-            df["close"] < df["open"],
-            -1,
-            0
-        )
+    close_price = safe_float(
+        candle["close"]
     )
 
-    # --------------------------------------------------------
-    # PROPORCIÓN DEL CUERPO
-    # --------------------------------------------------------
-
-    df["body_ratio"] = (
-        df["body"] /
-        df["range"]
+    return abs(
+        close_price - open_price
     )
-
-    df["body_ratio"] = (
-        df["body_ratio"]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-        .fillna(0)
-    )
-
-    # --------------------------------------------------------
-    # MECHAS
-    # --------------------------------------------------------
-
-    df["upper_wick"] = (
-        df["high"] -
-        df[["open", "close"]].max(axis=1)
-    )
-
-    df["lower_wick"] = (
-        df[["open", "close"]].min(axis=1) -
-        df["low"]
-    )
-
-    # --------------------------------------------------------
-    # TRUE RANGE
-    # --------------------------------------------------------
-
-    previous_close = df["close"].shift(1)
-
-    tr1 = (
-        df["high"] -
-        df["low"]
-    )
-
-    tr2 = (
-        df["high"] -
-        previous_close
-    ).abs()
-
-    tr3 = (
-        df["low"] -
-        previous_close
-    ).abs()
-
-    df["tr"] = pd.concat(
-        [
-            tr1,
-            tr2,
-            tr3
-        ],
-        axis=1
-    ).max(axis=1)
-
-    # --------------------------------------------------------
-    # ATR
-    # --------------------------------------------------------
-
-    df["atr"] = (
-        df["tr"]
-        .rolling(
-            14,
-            min_periods=5
-        )
-        .mean()
-    )
-
-    # --------------------------------------------------------
-    # EMA
-    # --------------------------------------------------------
-
-    df["ema9"] = (
-        df["close"]
-        .ewm(
-            span=9,
-            adjust=False
-        )
-        .mean()
-    )
-
-    df["ema21"] = (
-        df["close"]
-        .ewm(
-            span=21,
-            adjust=False
-        )
-        .mean()
-    )
-
-    df["ema50"] = (
-        df["close"]
-        .ewm(
-            span=50,
-            adjust=False
-        )
-        .mean()
-    )
-
-    return df
-
-
-# ============================================================
-# DIRECCIÓN DE VELA
-# ============================================================
 
 
 def candle_direction(candle):
 
-    if candle["close"] > candle["open"]:
+    open_price = safe_float(
+        candle["open"]
+    )
+
+    close_price = safe_float(
+        candle["close"]
+    )
+
+    if close_price > open_price:
         return "bull"
 
-    if candle["close"] < candle["open"]:
+    if close_price < open_price:
         return "bear"
 
     return "neutral"
 
 
 # ============================================================
-# DETECCIÓN DE ESTRUCTURA
+# CARACTERÍSTICAS DE VELA
 # ============================================================
 
+def candle_strength(candle):
+
+    rng = candle_range(
+        candle
+    )
+
+    body = candle_body(
+        candle
+    )
+
+    if rng <= 0:
+        return 0.0
+
+    return body / rng
+
+
+def upper_wick(candle):
+
+    high = safe_float(
+        candle["high"]
+    )
+
+    open_price = safe_float(
+        candle["open"]
+    )
+
+    close_price = safe_float(
+        candle["close"]
+    )
+
+    return max(
+        0.0,
+        high - max(
+            open_price,
+            close_price
+        )
+    )
+
+
+def lower_wick(candle):
+
+    low = safe_float(
+        candle["low"]
+    )
+
+    open_price = safe_float(
+        candle["open"]
+    )
+
+    close_price = safe_float(
+        candle["close"]
+    )
+
+    return max(
+        0.0,
+        min(
+            open_price,
+            close_price
+        ) - low
+    )
+
+
+# ============================================================
+# ESTRUCTURA DE MERCADO
+# ============================================================
 
 def detect_structure(df):
 
-    if len(df) < 12:
+    if df is None or len(df) < 6:
 
-        return {
-            "structure": "range",
-            "bullish": False,
-            "bearish": False
-        }
+        return "range"
 
     data = df.tail(
-        STRUCTURE_LOOKBACK
-    )
+        min(
+            STRUCTURE_CANDLES,
+            len(df)
+        )
+    ).copy()
 
-    highs = data["high"].values
-    lows = data["low"].values
+    highs = data["high"].astype(float).values
+    lows = data["low"].astype(float).values
 
-    higher_highs = 0
-    higher_lows = 0
-    lower_highs = 0
-    lower_lows = 0
-
-    # --------------------------------------------------------
-    # ESTRUCTURA
-    # --------------------------------------------------------
+    hh = 0
+    hl = 0
+    lh = 0
+    ll = 0
 
     for i in range(1, len(highs)):
 
         if highs[i] > highs[i - 1]:
-            higher_highs += 1
+            hh += 1
 
         elif highs[i] < highs[i - 1]:
-            lower_highs += 1
+            lh += 1
 
         if lows[i] > lows[i - 1]:
-            higher_lows += 1
+            hl += 1
 
         elif lows[i] < lows[i - 1]:
-            lower_lows += 1
+            ll += 1
 
     # --------------------------------------------------------
-    # ESTRUCTURA RECIENTE
+    # ESTRUCTURA ALCISTA
     # --------------------------------------------------------
 
-    recent = data.tail(8)
-
-    recent_hh = 0
-    recent_hl = 0
-    recent_lh = 0
-    recent_ll = 0
-
-    for i in range(1, len(recent)):
-
-        if recent["high"].iloc[i] > recent["high"].iloc[i - 1]:
-            recent_hh += 1
-
-        elif recent["high"].iloc[i] < recent["high"].iloc[i - 1]:
-            recent_lh += 1
-
-        if recent["low"].iloc[i] > recent["low"].iloc[i - 1]:
-            recent_hl += 1
-
-        elif recent["low"].iloc[i] < recent["low"].iloc[i - 1]:
-            recent_ll += 1
-
-    # --------------------------------------------------------
-    # ALCISTA
-    # --------------------------------------------------------
-
-    bullish = (
-        higher_highs >= lower_highs
-        and
-        higher_lows >= lower_lows
-        and
-        recent_hh >= 3
-        and
-        recent_hl >= 3
+    bullish_score = (
+        hh + hl
     )
 
-    # --------------------------------------------------------
-    # BAJISTA
-    # --------------------------------------------------------
-
-    bearish = (
-        lower_highs >= higher_highs
-        and
-        lower_lows >= higher_lows
-        and
-        recent_lh >= 3
-        and
-        recent_ll >= 3
+    bearish_score = (
+        lh + ll
     )
-
-    if bullish and not bearish:
-
-        return {
-            "structure": "bullish",
-            "bullish": True,
-            "bearish": False
-        }
-
-    if bearish and not bullish:
-
-        return {
-            "structure": "bearish",
-            "bullish": False,
-            "bearish": True
-        }
-
-    return {
-        "structure": "range",
-        "bullish": False,
-        "bearish": False
-    }
-
-
-# ============================================================
-# TENDENCIA
-# ============================================================
-
-
-def detect_trend(df):
-
-    if len(df) < 20:
-        return "range"
-
-    current = df.iloc[-1]
-
-    ema9 = safe_float(current["ema9"])
-    ema21 = safe_float(current["ema21"])
-    ema50 = safe_float(current["ema50"])
-    close = safe_float(current["close"])
-
-    # --------------------------------------------------------
-    # TENDENCIA ALCISTA
-    # --------------------------------------------------------
 
     if (
-        ema9 > ema21
-        and
-        ema21 > ema50
-        and
-        close > ema9
+        hh >= 7
+        and hl >= 7
+        and bullish_score > bearish_score + 3
     ):
 
         return "bullish"
 
     # --------------------------------------------------------
-    # TENDENCIA BAJISTA
+    # ESTRUCTURA BAJISTA
     # --------------------------------------------------------
 
     if (
-        ema9 < ema21
-        and
-        ema21 < ema50
-        and
-        close < ema9
+        lh >= 7
+        and ll >= 7
+        and bearish_score > bullish_score + 3
     ):
 
         return "bearish"
@@ -490,710 +282,325 @@ def detect_trend(df):
 
 
 # ============================================================
-# FUERZA DE TENDENCIA
+# TENDENCIA
 # ============================================================
 
+def detect_trend(df):
 
-def trend_strength(df, direction):
+    if df is None or len(df) < 10:
 
-    if len(df) < 6:
-        return 0
-
-    data = df.tail(6)
-
-    if direction == "bullish":
-
-        return int(
-            (data["direction"] == 1).sum()
-        )
-
-    if direction == "bearish":
-
-        return int(
-            (data["direction"] == -1).sum()
-        )
-
-    return 0
-
-
-# ============================================================
-# DETECTAR DEBILIDAD
-# ============================================================
-
-
-def detect_weakness(df, direction):
-
-    if len(df) < WEAKNESS_LOOKBACK:
-
-        return True
+        return "range"
 
     data = df.tail(
-        WEAKNESS_LOOKBACK
+        min(
+            20,
+            len(df)
+        )
     )
 
-    current = data.iloc[-1]
-
-    # --------------------------------------------------------
-    # CUERPO PEQUEÑO
-    # --------------------------------------------------------
-
-    body_ratio = safe_float(
-        current["body_ratio"]
+    closes = (
+        data["close"]
+        .astype(float)
+        .values
     )
 
-    if body_ratio < 0.45:
-
-        return True
-
     # --------------------------------------------------------
-    # RANGO PEQUEÑO
+    # DIVIDIR EN DOS BLOQUES
     # --------------------------------------------------------
 
-    previous_ranges = (
-        data["range"]
-        .iloc[:-1]
-        .mean()
+    middle = len(closes) // 2
+
+    first = closes[:middle]
+    second = closes[middle:]
+
+    if len(first) < 3 or len(second) < 3:
+        return "range"
+
+    first_mean = np.mean(first)
+    second_mean = np.mean(second)
+
+    movement = (
+        second_mean - first_mean
     )
 
-    current_range = safe_float(
-        current["range"]
+    last_price = closes[-1]
+
+    first_price = closes[0]
+
+    total_move = (
+        last_price - first_price
     )
 
-    if previous_ranges > 0:
-
-        if current_range < (
-            previous_ranges * 0.50
-        ):
-
-            return True
-
     # --------------------------------------------------------
-    # VELAS CONTRARIAS
+    # TOLERANCIA
     # --------------------------------------------------------
 
-    if direction == "bullish":
+    reference = max(
+        abs(first_price),
+        1e-9
+    )
 
-        opposite = (
-            data["direction"] == -1
-        ).sum()
+    relative_move = (
+        abs(total_move)
+        / reference
+    )
 
-    elif direction == "bearish":
+    # Movimiento demasiado pequeño
+    # = sin tendencia clara
 
-        opposite = (
-            data["direction"] == 1
-        ).sum()
+    if relative_move < MIN_RANGE_RATIO:
 
-    else:
+        return "range"
 
-        return True
+    # --------------------------------------------------------
+    # ALCISTA
+    # --------------------------------------------------------
 
-    if opposite >= 3:
+    if (
+        movement > 0
+        and total_move > 0
+    ):
 
-        return True
+        return "bullish"
 
-    return False
+    # --------------------------------------------------------
+    # BAJISTA
+    # --------------------------------------------------------
+
+    if (
+        movement < 0
+        and total_move < 0
+    ):
+
+        return "bearish"
+
+    return "range"
+
+
+# ============================================================
+# SOPORTE Y RESISTENCIA
+# ============================================================
+
+def detect_support_resistance(df):
+
+    if df is None or len(df) < 5:
+
+        return False, False
+
+    data = df.tail(
+        min(
+            SR_WINDOW,
+            len(df)
+        )
+    )
+
+    current_price = safe_float(
+        data.iloc[-1]["close"]
+    )
+
+    highest = safe_float(
+        data["high"].max()
+    )
+
+    lowest = safe_float(
+        data["low"].min()
+    )
+
+    if current_price <= 0:
+        return False, False
+
+    resistance_distance = (
+        abs(
+            highest - current_price
+        )
+        / current_price
+    )
+
+    support_distance = (
+        abs(
+            current_price - lowest
+        )
+        / current_price
+    )
+
+    near_resistance = (
+        resistance_distance
+        <= SR_TOLERANCE
+    )
+
+    near_support = (
+        support_distance
+        <= SR_TOLERANCE
+    )
+
+    return (
+        near_support,
+        near_resistance
+    )
 
 
 # ============================================================
 # RECHAZO
 # ============================================================
 
+def detect_rejection(candle):
 
-def detect_rejection(df):
-
-    if len(df) < REJECTION_LOOKBACK:
-
-        return True
-
-    data = df.tail(
-        REJECTION_LOOKBACK
+    rng = candle_range(
+        candle
     )
 
-    for _, candle in data.iterrows():
+    if rng <= 0:
+        return False
 
-        candle_range = safe_float(
-            candle["range"]
-        )
-
-        body = safe_float(
-            candle["body"]
-        )
-
-        upper = safe_float(
-            candle["upper_wick"]
-        )
-
-        lower = safe_float(
-            candle["lower_wick"]
-        )
-
-        if candle_range <= 0:
-            continue
-
-        # ----------------------------------------------------
-        # RECHAZO SUPERIOR
-        # ----------------------------------------------------
-
-        if (
-            upper >= candle_range * 0.35
-            and
-            upper >= body * 1.5
-        ):
-
-            return True
-
-        # ----------------------------------------------------
-        # RECHAZO INFERIOR
-        # ----------------------------------------------------
-
-        if (
-            lower >= candle_range * 0.35
-            and
-            lower >= body * 1.5
-        ):
-
-            return True
-
-    return False
-
-
-# ============================================================
-# CREAR NIVELES DE SOPORTE / RESISTENCIA
-#
-# Aquí está la corrección principal.
-#
-# No usamos únicamente:
-#
-#     máximo de 60
-#     mínimo de 60
-#
-# Buscamos múltiples reacciones agrupadas.
-# ============================================================
-
-
-def build_sr_levels(df):
-
-    if len(df) < 15:
-
-        return {
-            "supports": [],
-            "resistances": []
-        }
-
-    # --------------------------------------------------------
-    # IMPORTANTE:
-    # NO utilizar la vela actual para construir niveles.
-    # --------------------------------------------------------
-
-    data = df.tail(
-        SR_LOOKBACK
+    body = candle_body(
+        candle
     )
 
-    if len(data) > 3:
-
-        historical = data.iloc[:-1].copy()
-
-    else:
-
-        historical = data.copy()
-
-    if len(historical) < 10:
-
-        return {
-            "supports": [],
-            "resistances": []
-        }
-
-    atr = safe_float(
-        df.iloc[-1]["atr"]
+    upper = upper_wick(
+        candle
     )
 
-    if atr <= 0:
-
-        atr = safe_float(
-            historical["range"].mean()
-        )
-
-    if atr <= 0:
-
-        atr = SR_CLUSTER_TOLERANCE
-
-    # --------------------------------------------------------
-    # TOLERANCIA DE AGRUPACIÓN
-    # --------------------------------------------------------
-
-    cluster_tolerance = max(
-        SR_CLUSTER_TOLERANCE,
-        atr * 0.30
+    lower = lower_wick(
+        candle
     )
 
     # --------------------------------------------------------
-    # BUSCAR SWINGS
+    # Rechazo superior
     # --------------------------------------------------------
 
-    support_candidates = []
-    resistance_candidates = []
-
-    highs = historical["high"].values
-    lows = historical["low"].values
-
-    # Usamos ventanas de 5 velas
-    for i in range(
-        2,
-        len(historical) - 2
+    if (
+        upper / rng >= 0.45
+        and upper > body * 1.3
     ):
 
-        high_value = safe_float(
-            highs[i]
-        )
-
-        low_value = safe_float(
-            lows[i]
-        )
-
-        # ----------------------------------------------------
-        # SWING HIGH
-        # ----------------------------------------------------
-
-        if (
-            high_value >= highs[i - 1]
-            and
-            high_value >= highs[i - 2]
-            and
-            high_value >= highs[i + 1]
-            and
-            high_value >= highs[i + 2]
-        ):
-
-            resistance_candidates.append(
-                high_value
-            )
-
-        # ----------------------------------------------------
-        # SWING LOW
-        # ----------------------------------------------------
-
-        if (
-            low_value <= lows[i - 1]
-            and
-            low_value <= lows[i - 2]
-            and
-            low_value <= lows[i + 1]
-            and
-            low_value <= lows[i + 2]
-        ):
-
-            support_candidates.append(
-                low_value
-            )
-
-    # --------------------------------------------------------
-    # AGRUPAR NIVELES
-    # --------------------------------------------------------
-
-    def cluster_levels(levels):
-
-        if not levels:
-            return []
-
-        levels = sorted(levels)
-
-        clusters = []
-
-        current_cluster = [
-            levels[0]
-        ]
-
-        for level in levels[1:]:
-
-            cluster_mean = (
-                sum(current_cluster)
-                /
-                len(current_cluster)
-            )
-
-            if abs(
-                level - cluster_mean
-            ) <= cluster_tolerance:
-
-                current_cluster.append(
-                    level
-                )
-
-            else:
-
-                clusters.append(
-                    current_cluster
-                )
-
-                current_cluster = [
-                    level
-                ]
-
-        clusters.append(
-            current_cluster
-        )
-
-        result = []
-
-        for cluster in clusters:
-
-            result.append(
-                {
-                    "level": (
-                        sum(cluster)
-                        /
-                        len(cluster)
-                    ),
-                    "touches": len(cluster)
-                }
-            )
-
-        return result
-
-    supports = cluster_levels(
-        support_candidates
-    )
-
-    resistances = cluster_levels(
-        resistance_candidates
-    )
-
-    # --------------------------------------------------------
-    # SOLO NIVELES CON AL MENOS 2 REACCIONES
-    # --------------------------------------------------------
-
-    supports = [
-        level
-        for level in supports
-        if level["touches"] >= MIN_SR_TOUCHES
-    ]
-
-    resistances = [
-        level
-        for level in resistances
-        if level["touches"] >= MIN_SR_TOUCHES
-    ]
-
-    return {
-        "supports": supports,
-        "resistances": resistances
-    }
-
-
-# ============================================================
-# ZONA DE PROTECCIÓN S/R
-# ============================================================
-
-
-def get_sr_protection_distance(df):
-
-    if len(df) == 0:
-        return SR_CLUSTER_TOLERANCE
-
-    atr = safe_float(
-        df.iloc[-1]["atr"]
-    )
-
-    if atr <= 0:
-
-        atr = safe_float(
-            df["range"].tail(10).mean()
-        )
-
-    if atr <= 0:
-
-        atr = SR_CLUSTER_TOLERANCE
-
-    # --------------------------------------------------------
-    # Zona de seguridad alrededor del nivel.
-    # --------------------------------------------------------
-
-    protection = max(
-        SR_CLUSTER_TOLERANCE,
-        atr * SR_PROTECTION_ATR
-    )
-
-    return protection
-
-
-# ============================================================
-# COMPROBAR SOPORTE
-# ============================================================
-
-
-def is_near_support(df):
-
-    if len(df) < 15:
-
         return True
 
-    levels = build_sr_levels(
-        df
-    )
+    # --------------------------------------------------------
+    # Rechazo inferior
+    # --------------------------------------------------------
 
-    current_price = safe_float(
-        df.iloc[-1]["close"]
-    )
+    if (
+        lower / rng >= 0.45
+        and lower > body * 1.3
+    ):
 
-    protection = (
-        get_sr_protection_distance(df)
-    )
-
-    for support in levels["supports"]:
-
-        level = safe_float(
-            support["level"]
-        )
-
-        # Precio por encima o prácticamente sobre soporte
-        if abs(
-            current_price - level
-        ) <= protection:
-
-            return True
+        return True
 
     return False
 
 
 # ============================================================
-# COMPROBAR RESISTENCIA
+# DEBILIDAD
 # ============================================================
 
+def detect_weakness(
+    df,
+    direction
+):
 
-def is_near_resistance(df):
+    if df is None or len(df) < 5:
+        return True
 
-    if len(df) < 15:
+    recent = df.tail(5)
+
+    strengths = []
+
+    directions = []
+
+    for _, candle in recent.iterrows():
+
+        strengths.append(
+            candle_strength(
+                candle
+            )
+        )
+
+        directions.append(
+            candle_direction(
+                candle
+            )
+        )
+
+    # --------------------------------------------------------
+    # Dirección esperada
+    # --------------------------------------------------------
+
+    expected = (
+        "bull"
+        if direction == "bullish"
+        else "bear"
+    )
+
+    matching = sum(
+        1
+        for d in directions
+        if d == expected
+    )
+
+    average_strength = np.mean(
+        strengths
+    )
+
+    # Pocas velas a favor
+    if matching < 2:
 
         return True
 
-    levels = build_sr_levels(
-        df
-    )
+    # Fuerza media demasiado baja
+    if average_strength < 0.25:
 
-    current_price = safe_float(
-        df.iloc[-1]["close"]
-    )
-
-    protection = (
-        get_sr_protection_distance(df)
-    )
-
-    for resistance in levels["resistances"]:
-
-        level = safe_float(
-            resistance["level"]
-        )
-
-        if abs(
-            current_price - level
-        ) <= protection:
-
-            return True
+        return True
 
     return False
-
-
-# ============================================================
-# COMPROBACIÓN GENERAL S/R
-# ============================================================
-
-
-def check_support_resistance(df):
-
-    """
-    Devuelve:
-
-        in_zone
-        near_support
-        near_resistance
-        support_level
-        resistance_level
-    """
-
-    if len(df) < 15:
-
-        return {
-            "in_zone": True,
-            "near_support": True,
-            "near_resistance": True,
-            "support_level": None,
-            "resistance_level": None
-        }
-
-    levels = build_sr_levels(
-        df
-    )
-
-    current_price = safe_float(
-        df.iloc[-1]["close"]
-    )
-
-    protection = (
-        get_sr_protection_distance(df)
-    )
-
-    nearest_support = None
-    nearest_resistance = None
-
-    support_distance = float("inf")
-    resistance_distance = float("inf")
-
-    # --------------------------------------------------------
-    # SOPORTES
-    # --------------------------------------------------------
-
-    for support in levels["supports"]:
-
-        level = safe_float(
-            support["level"]
-        )
-
-        distance = abs(
-            current_price - level
-        )
-
-        if distance < support_distance:
-
-            support_distance = distance
-            nearest_support = level
-
-    # --------------------------------------------------------
-    # RESISTENCIAS
-    # --------------------------------------------------------
-
-    for resistance in levels["resistances"]:
-
-        level = safe_float(
-            resistance["level"]
-        )
-
-        distance = abs(
-            current_price - level
-        )
-
-        if distance < resistance_distance:
-
-            resistance_distance = distance
-            nearest_resistance = level
-
-    near_support = (
-        nearest_support is not None
-        and
-        support_distance <= protection
-    )
-
-    near_resistance = (
-        nearest_resistance is not None
-        and
-        resistance_distance <= protection
-    )
-
-    return {
-        "in_zone": (
-            near_support
-            or
-            near_resistance
-        ),
-        "near_support": near_support,
-        "near_resistance": near_resistance,
-        "support_level": nearest_support,
-        "resistance_level": nearest_resistance
-    }
 
 
 # ============================================================
 # PULLBACK
 # ============================================================
 
+def detect_pullback(
+    df,
+    direction
+):
 
-def detect_pullback(df, direction):
-
-    if len(df) < PULLBACK_LOOKBACK:
+    if df is None or len(df) < 6:
 
         return True
 
-    data = df.tail(
-        PULLBACK_LOOKBACK
-    )
+    recent = df.tail(6)
 
-    current = data.iloc[-1]
+    bullish_count = 0
+    bearish_count = 0
 
-    close = safe_float(
-        current["close"]
-    )
+    for _, candle in recent.iterrows():
 
-    ema9 = safe_float(
-        current["ema9"]
-    )
-
-    ema21 = safe_float(
-        current["ema21"]
-    )
-
-    atr = safe_float(
-        current["atr"]
-    )
-
-    if atr <= 0:
-
-        atr = safe_float(
-            current["range"]
+        direction_candle = candle_direction(
+            candle
         )
 
-    if atr <= 0:
+        if direction_candle == "bull":
+            bullish_count += 1
 
-        return True
+        elif direction_candle == "bear":
+            bearish_count += 1
 
     # --------------------------------------------------------
-    # PULLBACK A EMA21
+    # Tendencia alcista
     # --------------------------------------------------------
 
     if direction == "bullish":
 
-        if (
-            abs(close - ema21)
-            <= atr * 0.40
-            and
-            close < ema9
-        ):
-
-            return True
-
-    if direction == "bearish":
-
-        if (
-            abs(close - ema21)
-            <= atr * 0.40
-            and
-            close > ema9
-        ):
+        if bearish_count >= 4:
 
             return True
 
     # --------------------------------------------------------
-    # RETROCESO DE ESTRUCTURA
+    # Tendencia bajista
     # --------------------------------------------------------
-
-    previous = data.iloc[-2]
-
-    if direction == "bullish":
-
-        if (
-            current["low"]
-            <
-            previous["low"]
-        ):
-
-            return True
 
     if direction == "bearish":
 
-        if (
-            current["high"]
-            >
-            previous["high"]
-        ):
+        if bullish_count >= 4:
 
             return True
 
@@ -1204,97 +611,83 @@ def detect_pullback(df, direction):
 # FINAL DE TENDENCIA
 # ============================================================
 
+def detect_end_of_trend(
+    df,
+    direction
+):
 
-def detect_end_of_trend(df, direction):
-
-    if len(df) < 10:
-
-        return True
-
-    data = df.tail(10)
-
-    current = data.iloc[-1]
-
-    ema9 = safe_float(
-        current["ema9"]
-    )
-
-    ema21 = safe_float(
-        current["ema21"]
-    )
-
-    ema50 = safe_float(
-        current["ema50"]
-    )
-
-    # --------------------------------------------------------
-    # ESTRUCTURA EMA
-    # --------------------------------------------------------
-
-    if direction == "bullish":
-
-        if not (
-            ema9 > ema21 > ema50
-        ):
-
-            return True
-
-    elif direction == "bearish":
-
-        if not (
-            ema9 < ema21 < ema50
-        ):
-
-            return True
-
-    else:
+    if df is None or len(df) < 8:
 
         return True
 
-    # --------------------------------------------------------
-    # DEMASIADAS VELAS CONTRARIAS
-    # --------------------------------------------------------
+    recent = df.tail(8)
 
-    if direction == "bullish":
+    ranges = []
 
-        opposite = (
-            data["direction"] == -1
-        ).sum()
+    bodies = []
 
-    else:
+    for _, candle in recent.iterrows():
 
-        opposite = (
-            data["direction"] == 1
-        ).sum()
-
-    if opposite >= 4:
-
-        return True
-
-    # --------------------------------------------------------
-    # PÉRDIDA DE SEPARACIÓN
-    # --------------------------------------------------------
-
-    gaps = (
-        data["ema9"] -
-        data["ema21"]
-    ).abs()
-
-    if len(gaps) >= 4:
-
-        old_gap = safe_float(
-            gaps.iloc[-4]
+        ranges.append(
+            candle_range(
+                candle
+            )
         )
 
-        new_gap = safe_float(
-            gaps.iloc[-1]
+        bodies.append(
+            candle_body(
+                candle
+            )
         )
 
-        if (
-            old_gap > 0
-            and
-            new_gap < old_gap * 0.45
-        ):
+    # --------------------------------------------------------
+    # Promedios
+    # --------------------------------------------------------
+
+    average_range = np.mean(
+        ranges[:-2]
+    )
+
+    last_range = np.mean(
+        ranges[-2:]
+    )
+
+    if average_range <= 0:
+
+        return True
+
+    # --------------------------------------------------------
+    # Contracción fuerte
+    # --------------------------------------------------------
+
+    if (
+        last_range
+        < average_range * 0.45
+    ):
+
+        return True
+
+    # --------------------------------------------------------
+    # Últimas velas con mechas grandes
+    # --------------------------------------------------------
+
+    last_candle = recent.iloc[-1]
+
+    rng = candle_range(
+        last_candle
+    )
+
+    body = candle_body(
+        last_candle
+    )
+
+    if rng > 0:
+
+        body_ratio = (
+            body / rng
+        )
+
+        if body_ratio < 0.25:
 
             return True
 
@@ -1302,315 +695,138 @@ def detect_end_of_trend(df, direction):
 
 
 # ============================================================
-# CONTINUIDAD ALCISTA
+# CONTINUIDAD
 # ============================================================
 
+def detect_continuity(
+    df,
+    direction
+):
 
-def bullish_continuity(df):
-
-    if len(df) < 10:
-
-        return False
-
-    data = df.tail(6)
-
-    current = data.iloc[-1]
-
-    # --------------------------------------------------------
-    # VELA ALCISTA
-    # --------------------------------------------------------
-
-    if current["close"] <= current["open"]:
+    if df is None or len(df) < 5:
 
         return False
 
-    # --------------------------------------------------------
-    # CUERPO FUERTE
-    # --------------------------------------------------------
+    current = df.iloc[-1]
 
-    if safe_float(
-        current["body_ratio"]
-    ) < 0.50:
+    previous = df.iloc[-2]
 
-        return False
-
-    # --------------------------------------------------------
-    # CIERRE CERCA DEL MÁXIMO
-    # --------------------------------------------------------
-
-    candle_range = safe_float(
-        current["range"]
+    current_direction = candle_direction(
+        current
     )
 
-    if candle_range <= 0:
-
-        return False
-
-    close_position = (
-        current["close"] -
-        current["low"]
-    ) / candle_range
-
-    if close_position < 0.65:
-
-        return False
-
-    # --------------------------------------------------------
-    # MÍNIMO DE VELAS ALCISTAS
-    # --------------------------------------------------------
-
-    bullish_count = (
-        data["direction"] == 1
-    ).sum()
-
-    if bullish_count < 4:
-
-        return False
-
-    # --------------------------------------------------------
-    # HACER NUEVO MÁXIMO
-    # --------------------------------------------------------
-
-    if (
-        current["high"]
-        <=
-        data["high"].iloc[-2]
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # NO DEBE DEJAR GRAN MECHA SUPERIOR
-    # --------------------------------------------------------
-
-    if (
-        current["upper_wick"]
-        >
-        current["body"] * 0.80
-    ):
-
-        return False
-
-    return True
-
-
-# ============================================================
-# CONTINUIDAD BAJISTA
-# ============================================================
-
-
-def bearish_continuity(df):
-
-    if len(df) < 10:
-
-        return False
-
-    data = df.tail(6)
-
-    current = data.iloc[-1]
-
-    # --------------------------------------------------------
-    # VELA BAJISTA
-    # --------------------------------------------------------
-
-    if current["close"] >= current["open"]:
-
-        return False
-
-    # --------------------------------------------------------
-    # CUERPO FUERTE
-    # --------------------------------------------------------
-
-    if safe_float(
-        current["body_ratio"]
-    ) < 0.50:
-
-        return False
-
-    # --------------------------------------------------------
-    # CIERRE CERCA DEL MÍNIMO
-    # --------------------------------------------------------
-
-    candle_range = safe_float(
-        current["range"]
+    previous_direction = candle_direction(
+        previous
     )
 
-    if candle_range <= 0:
-
-        return False
-
-    close_position = (
-        current["high"] -
-        current["close"]
-    ) / candle_range
-
-    if close_position < 0.65:
-
-        return False
+    current_strength = candle_strength(
+        current
+    )
 
     # --------------------------------------------------------
-    # MÍNIMO DE VELAS BAJISTAS
+    # ALCISTA
     # --------------------------------------------------------
 
-    bearish_count = (
-        data["direction"] == -1
-    ).sum()
+    if direction == "bullish":
 
-    if bearish_count < 4:
+        if current_direction != "bull":
+            return False
 
-        return False
+        if current_strength < MIN_BODY_RATIO:
+            return False
+
+        # La vela actual debe mantener
+        # estructura respecto a la anterior.
+
+        if (
+            safe_float(current["close"])
+            < safe_float(previous["close"])
+        ):
+
+            return False
+
+        return True
 
     # --------------------------------------------------------
-    # HACER NUEVO MÍNIMO
+    # BAJISTA
     # --------------------------------------------------------
 
-    if (
-        current["low"]
-        >=
-        data["low"].iloc[-2]
-    ):
+    if direction == "bearish":
 
-        return False
+        if current_direction != "bear":
+            return False
 
-    # --------------------------------------------------------
-    # NO DEBE DEJAR GRAN MECHA INFERIOR
-    # --------------------------------------------------------
+        if current_strength < MIN_BODY_RATIO:
+            return False
 
-    if (
-        current["lower_wick"]
-        >
-        current["body"] * 0.80
-    ):
+        if (
+            safe_float(current["close"])
+            > safe_float(previous["close"])
+        ):
 
-        return False
+            return False
 
-    return True
+        return True
+
+    return False
 
 
 # ============================================================
-# SCORE DE ESTRUCTURA
+# SCORE
 # ============================================================
 
-
-def structure_score(df, direction):
-
-    if len(df) < 15:
-
-        return 0
-
-    data = df.tail(12)
+def calculate_score(
+    df,
+    direction
+):
 
     score = 0
 
-    current = data.iloc[-1]
-
     # --------------------------------------------------------
-    # EMA
+    # Estructura
     # --------------------------------------------------------
 
-    if direction == "bullish":
+    structure = detect_structure(
+        df
+    )
 
-        if (
-            current["ema9"]
-            >
-            current["ema21"]
-            >
-            current["ema50"]
-        ):
+    if structure == direction:
 
-            score += 1
-
-    elif direction == "bearish":
-
-        if (
-            current["ema9"]
-            <
-            current["ema21"]
-            <
-            current["ema50"]
-        ):
-
-            score += 1
+        score += 2
 
     # --------------------------------------------------------
-    # ESTRUCTURA
+    # Tendencia
     # --------------------------------------------------------
 
-    if direction == "bullish":
+    trend = detect_trend(
+        df
+    )
 
-        hh = 0
-        hl = 0
+    if trend == direction:
 
-        for i in range(1, len(data)):
-
-            if (
-                data["high"].iloc[i]
-                >
-                data["high"].iloc[i - 1]
-            ):
-
-                hh += 1
-
-            if (
-                data["low"].iloc[i]
-                >
-                data["low"].iloc[i - 1]
-            ):
-
-                hl += 1
-
-        if hh >= 6:
-            score += 1
-
-        if hl >= 6:
-            score += 1
-
-    elif direction == "bearish":
-
-        lh = 0
-        ll = 0
-
-        for i in range(1, len(data)):
-
-            if (
-                data["high"].iloc[i]
-                <
-                data["high"].iloc[i - 1]
-            ):
-
-                lh += 1
-
-            if (
-                data["low"].iloc[i]
-                <
-                data["low"].iloc[i - 1]
-            ):
-
-                ll += 1
-
-        if lh >= 6:
-            score += 1
-
-        if ll >= 6:
-            score += 1
+        score += 2
 
     # --------------------------------------------------------
-    # VELAS
+    # Continuidad
     # --------------------------------------------------------
 
-    if direction == "bullish":
+    if detect_continuity(
+        df,
+        direction
+    ):
 
-        count = (
-            data["direction"] == 1
-        ).sum()
+        score += 2
 
-    else:
+    # --------------------------------------------------------
+    # Vela fuerte
+    # --------------------------------------------------------
 
-        count = (
-            data["direction"] == -1
-        ).sum()
+    current = df.iloc[-1]
 
-    if count >= 7:
+    if (
+        candle_strength(current)
+        >= MIN_BODY_RATIO
+    ):
 
         score += 1
 
@@ -1618,162 +834,66 @@ def structure_score(df, direction):
 
 
 # ============================================================
-# ANALYZE MARKET
+# ANALIZAR MERCADO
 # ============================================================
-
 
 def analyze_market(df):
 
-    """
-    FUNCIÓN PRINCIPAL PARA BOT.PY
+    data = prepare_dataframe(
+        df
+    )
 
-    Devuelve:
-
-        {
-            "signal": "call",
-            "direction": "bullish",
-            "reason": "...",
-            "score": 5
-        }
-
-    o:
-
-        {
-            "signal": None,
-            ...
-        }
-
-    La estrategia NO ejecuta operaciones.
-    """
-
-    # ========================================================
-    # VALIDAR
-    # ========================================================
-
-    if not validate_dataframe(df):
+    if data is None:
 
         return {
             "signal": None,
             "direction": "range",
-            "reason": "DataFrame inválido",
+            "reason": "Datos insuficientes",
             "score": 0
         }
 
     # ========================================================
-    # PREPARAR
+    # MÁXIMO 60 VELAS
     # ========================================================
 
-    df = prepare_dataframe(
-        df
-    )
+    if len(data) > MAX_CANDLES:
 
-    if len(df) < MIN_CANDLES:
-
-        return {
-            "signal": None,
-            "direction": "range",
-            "reason": "Velas insuficientes",
-            "score": 0
-        }
-
-    # ========================================================
-    # INDICADORES
-    # ========================================================
-
-    df = add_indicators(
-        df
-    )
-
-    # ========================================================
-    # ========================================================
-    # PRIMER FILTRO: UBICACIÓN
-    #
-    # LA UBICACIÓN ES MÁS IMPORTANTE QUE EL MOMENTUM.
-    #
-    # Si estamos en soporte/resistencia:
-    #
-    #       NO SE SIGUE ANALIZANDO.
-    #
-    # ========================================================
-    # ========================================================
-
-    sr = check_support_resistance(
-        df
-    )
-
-    if sr["in_zone"]:
-
-        if (
-            sr["near_support"]
-            and
-            sr["near_resistance"]
-        ):
-
-            reason = (
-                "Precio dentro de zona "
-                "de soporte/resistencia"
-            )
-
-        elif sr["near_support"]:
-
-            reason = (
-                "PRECIO EN SOPORTE - "
-                "OPERACIÓN BLOQUEADA"
-            )
-
-        else:
-
-            reason = (
-                "PRECIO EN RESISTENCIA - "
-                "OPERACIÓN BLOQUEADA"
-            )
-
-        return {
-            "signal": None,
-            "direction": "range",
-            "reason": reason,
-            "score": 0,
-            "support_level": sr["support_level"],
-            "resistance_level": sr["resistance_level"]
-        }
-
-    # ========================================================
-    # ESTRUCTURA
-    # ========================================================
-
-    structure = detect_structure(
-        df
-    )
-
-    structure_direction = (
-        structure["structure"]
-    )
+        data = data.tail(
+            MAX_CANDLES
+        ).reset_index(
+            drop=True
+        )
 
     # ========================================================
     # TENDENCIA
     # ========================================================
 
     trend = detect_trend(
-        df
+        data
     )
 
-    if trend not in (
-        "bullish",
-        "bearish"
-    ):
+    structure = detect_structure(
+        data
+    )
+
+    # --------------------------------------------------------
+    # SIN TENDENCIA
+    # --------------------------------------------------------
+
+    if trend == "range":
 
         return {
             "signal": None,
-            "direction": trend,
+            "direction": "range",
             "reason": "No existe tendencia clara",
             "score": 0
         }
 
     # ========================================================
-    # ESTRUCTURA DEBE COINCIDIR
+    # LA ESTRUCTURA DEBE COINCIDIR
     # ========================================================
 
-    if structure_direction != trend:
+    if structure != trend:
 
         return {
             "signal": None,
@@ -1786,65 +906,56 @@ def analyze_market(df):
         }
 
     # ========================================================
-    # FUERZA
+    # SOPORTE / RESISTENCIA
     # ========================================================
 
-    strength = trend_strength(
-        df,
-        trend
+    near_support, near_resistance = (
+        detect_support_resistance(
+            data
+        )
     )
 
-    if strength < 4:
+    if near_support:
 
         return {
             "signal": None,
             "direction": trend,
-            "reason": "Tendencia insuficientemente fuerte",
-            "score": strength
+            "reason": (
+                "PRECIO EN SOPORTE - "
+                "OPERACIÓN BLOQUEADA"
+            ),
+            "score": 0
+        }
+
+    if near_resistance:
+
+        return {
+            "signal": None,
+            "direction": trend,
+            "reason": (
+                "PRECIO EN RESISTENCIA - "
+                "OPERACIÓN BLOQUEADA"
+            ),
+            "score": 0
         }
 
     # ========================================================
     # RECHAZO
     # ========================================================
 
-    if detect_rejection(df):
+    current = data.iloc[-1]
 
-        return {
-            "signal": None,
-            "direction": trend,
-            "reason": "Rechazo detectado",
-            "score": 0
-        }
-
-    # ========================================================
-    # PULLBACK
-    # ========================================================
-
-    if detect_pullback(
-        df,
-        trend
+    if detect_rejection(
+        current
     ):
 
         return {
             "signal": None,
             "direction": trend,
-            "reason": "Pullback detectado",
-            "score": 0
-        }
-
-    # ========================================================
-    # DEBILIDAD
-    # ========================================================
-
-    if detect_weakness(
-        df,
-        trend
-    ):
-
-        return {
-            "signal": None,
-            "direction": trend,
-            "reason": "Debilidad detectada",
+            "reason": (
+                "Zona de rechazo - "
+                "operación bloqueada"
+            ),
             "score": 0
         }
 
@@ -1853,14 +964,76 @@ def analyze_market(df):
     # ========================================================
 
     if detect_end_of_trend(
-        df,
+        data,
         trend
     ):
 
         return {
             "signal": None,
             "direction": trend,
-            "reason": "Final de tendencia detectado",
+            "reason": (
+                "Posible final de tendencia - "
+                "operación bloqueada"
+            ),
+            "score": 0
+        }
+
+    # ========================================================
+    # PULLBACK
+    # ========================================================
+
+    if detect_pullback(
+        data,
+        trend
+    ):
+
+        return {
+            "signal": None,
+            "direction": trend,
+            "reason": (
+                "Pullback detectado - "
+                "operación bloqueada"
+            ),
+            "score": 0
+        }
+
+    # ========================================================
+    # DEBILIDAD
+    # ========================================================
+
+    if detect_weakness(
+        data,
+        trend
+    ):
+
+        return {
+            "signal": None,
+            "direction": trend,
+            "reason": (
+                "Debilidad detectada - "
+                "operación bloqueada"
+            ),
+            "score": 0
+        }
+
+    # ========================================================
+    # CONTINUIDAD
+    # ========================================================
+
+    continuity = detect_continuity(
+        data,
+        trend
+    )
+
+    if not continuity:
+
+        return {
+            "signal": None,
+            "direction": trend,
+            "reason": (
+                "No existe continuidad "
+                "confirmada"
+            ),
             "score": 0
         }
 
@@ -1868,235 +1041,111 @@ def analyze_market(df):
     # SCORE
     # ========================================================
 
-    score = structure_score(
-        df,
+    score = calculate_score(
+        data,
         trend
     )
 
-    # Solo estructura fuerte
-    if score < 4:
+    # ========================================================
+    # SCORE MÍNIMO
+    # ========================================================
+
+    if score < 5:
 
         return {
             "signal": None,
             "direction": trend,
             "reason": (
-                "Score de continuidad insuficiente"
+                "Continuidad insuficiente "
+                f"(score={score})"
             ),
             "score": score
         }
 
     # ========================================================
-    # CONTINUIDAD ALCISTA
+    # SEÑAL
     # ========================================================
 
     if trend == "bullish":
 
-        if not bullish_continuity(df):
+        signal = "call"
 
-            return {
-                "signal": None,
-                "direction": "bullish",
-                "reason": (
-                    "No existe continuidad alcista válida"
-                ),
-                "score": score
-            }
-
-        # ----------------------------------------------------
-        # SEGUNDA PROTECCIÓN S/R
-        # ----------------------------------------------------
-
-        sr_final = check_support_resistance(
-            df
+        reason = (
+            "CONTINUIDAD ALCISTA "
+            "CONFIRMADA"
         )
 
-        if sr_final["near_resistance"]:
+    elif trend == "bearish":
 
-            return {
-                "signal": None,
-                "direction": "bullish",
-                "reason": (
-                    "CALL bloqueado: "
-                    "cerca de resistencia"
-                ),
-                "score": score,
-                "resistance_level": (
-                    sr_final["resistance_level"]
-                )
-            }
+        signal = "put"
 
-        return {
-            "signal": "call",
-            "direction": "bullish",
-            "reason": (
-                "CONTINUIDAD ALCISTA "
-                "CONFIRMADA - ZONA LIBRE"
-            ),
-            "score": score,
-            "support_level": (
-                sr_final["support_level"]
-            ),
-            "resistance_level": (
-                sr_final["resistance_level"]
-            )
-        }
-
-    # ========================================================
-    # CONTINUIDAD BAJISTA
-    # ========================================================
-
-    if trend == "bearish":
-
-        if not bearish_continuity(df):
-
-            return {
-                "signal": None,
-                "direction": "bearish",
-                "reason": (
-                    "No existe continuidad bajista válida"
-                ),
-                "score": score
-            }
-
-        # ----------------------------------------------------
-        # SEGUNDA PROTECCIÓN S/R
-        # ----------------------------------------------------
-
-        sr_final = check_support_resistance(
-            df
+        reason = (
+            "CONTINUIDAD BAJISTA "
+            "CONFIRMADA"
         )
 
-        if sr_final["near_support"]:
+    else:
 
-            return {
-                "signal": None,
-                "direction": "bearish",
-                "reason": (
-                    "PUT bloqueado: "
-                    "cerca de soporte"
-                ),
-                "score": score,
-                "support_level": (
-                    sr_final["support_level"]
-                )
-            }
+        signal = None
 
-        return {
-            "signal": "put",
-            "direction": "bearish",
-            "reason": (
-                "CONTINUIDAD BAJISTA "
-                "CONFIRMADA - ZONA LIBRE"
-            ),
-            "score": score,
-            "support_level": (
-                sr_final["support_level"]
-            ),
-            "resistance_level": (
-                sr_final["resistance_level"]
-            )
-        }
+        reason = "Sin señal"
 
     # ========================================================
-    # SIN OPERACIÓN
+    # RESULTADO
     # ========================================================
 
     return {
-        "signal": None,
+        "signal": signal,
         "direction": trend,
-        "reason": "Sin continuidad",
+        "reason": reason,
         "score": score
     }
 
 
 # ============================================================
-# FUNCIÓN SIMPLE PARA BOT.PY
+# FUNCIÓN DE PRUEBA
 # ============================================================
 
-
-def get_signal(df):
+def test_strategy(df):
 
     result = analyze_market(
         df
     )
 
-    return result.get(
-        "signal"
-    )
-
-
-# ============================================================
-# INFORMACIÓN DE LA ESTRATEGIA
-# ============================================================
-
-
-def strategy_info():
-
-    return {
-        "timeframe": "1m",
-        "max_candles": MAX_CANDLES,
-        "strategy": "continuidad",
-        "trend_filter": True,
-        "support_filter": True,
-        "resistance_filter": True,
-        "rejection_filter": True,
-        "pullback_filter": True,
-        "weakness_filter": True,
-        "end_of_trend_filter": True
-    }
-
-
-# ============================================================
-# PRUEBA
-# ============================================================
-
-
-if __name__ == "__main__":
-
-    print("=" * 60)
-    print("STRATEGY.PY CARGADO CORRECTAMENTE")
-    print("=" * 60)
-
     print(
-        "Estrategia: CONTINUIDAD"
+        "===================================="
     )
 
     print(
-        "Timeframe: 1 MINUTO"
+        "RESULTADO DE ESTRATEGIA"
     )
 
     print(
-        "Máximo de velas:",
-        MAX_CANDLES
+        "===================================="
     )
 
     print(
-        "Soporte: BLOQUEADO"
+        "Dirección:",
+        result.get("direction")
     )
 
     print(
-        "Resistencia: BLOQUEADO"
+        "Señal:",
+        result.get("signal")
     )
 
     print(
-        "Rechazo: BLOQUEADO"
+        "Score:",
+        result.get("score")
     )
 
     print(
-        "Pullback: BLOQUEADO"
+        "Razón:",
+        result.get("reason")
     )
 
     print(
-        "Debilidad: BLOQUEADO"
+        "===================================="
     )
 
-    print(
-        "Final de tendencia: BLOQUEADO"
-    )
-
-    print(
-        "Función:",
-        "analyze_market(df)"
-    )
-
-    print("=" * 60)
+    return result
