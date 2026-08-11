@@ -39,8 +39,7 @@ CANDLE_COUNT = 60
 
 PAIRS = [
     "EURUSD-OTC",
-    "GBPUSD-OTC",
-    "EURJPY-OTC",
+    "GBPUSD-OTC"
 ]
 
 
@@ -62,6 +61,13 @@ IQ = None
 
 
 # ============================================================
+# SEÑALES PENDIENTES
+# ============================================================
+
+PENDING_SIGNALS = {}
+
+
+# ============================================================
 # LOGGING
 # ============================================================
 
@@ -78,9 +84,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def telegram_send(message):
-    """
-    Envía un mensaje al chat configurado.
-    """
 
     if not TELEGRAM_TOKEN:
         logger.warning(
@@ -135,13 +138,10 @@ def telegram_send(message):
 
 
 # ============================================================
-# COMANDOS TELEGRAM
+# TELEGRAM - COMANDOS
 # ============================================================
 
 def check_commands():
-    """
-    Lee /start, /stop y /status.
-    """
 
     global LAST_UPDATE_ID
     global BOT_RUNNING
@@ -222,9 +222,9 @@ def check_commands():
             ):
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # START
-            # ------------------------------------------------
+            # =================================================
 
             if text == "/start":
 
@@ -236,6 +236,13 @@ def check_commands():
                     "Temporalidad: 1 minuto\n"
                     "Expiración: 1 minuto\n"
                     "Importe: $100\n\n"
+                    "La señal se analiza durante "
+                    "la vela actual.\n\n"
+                    "La dirección se mantiene durante "
+                    "la vela mientras no exista "
+                    "una invalidación fuerte.\n\n"
+                    "La operación se ejecuta únicamente "
+                    "en la apertura de la siguiente vela.\n\n"
                     "Filtros:\n"
                     "✅ Tendencia\n"
                     "✅ Estructura 1M\n"
@@ -252,36 +259,41 @@ def check_commands():
                     "BOT ACTIVADO desde Telegram"
                 )
 
-            # ------------------------------------------------
+            # =================================================
             # STOP
-            # ------------------------------------------------
+            # =================================================
 
             elif text == "/stop":
 
                 BOT_RUNNING = False
 
+                PENDING_SIGNALS.clear()
+
                 telegram_send(
                     "🔴 BOT DETENIDO\n\n"
-                    "No se abrirán nuevas operaciones."
+                    "No se abrirán nuevas operaciones.\n"
+                    "Las señales pendientes fueron canceladas."
                 )
 
                 logger.info(
                     "BOT DETENIDO desde Telegram"
                 )
 
-            # ------------------------------------------------
+            # =================================================
             # STATUS
-            # ------------------------------------------------
+            # =================================================
 
             elif text == "/status":
 
-                if BOT_RUNNING:
+                status = (
+                    "🟢 ACTIVO"
+                    if BOT_RUNNING
+                    else "🔴 DETENIDO"
+                )
 
-                    status = "🟢 ACTIVO"
-
-                else:
-
-                    status = "🔴 DETENIDO"
+                pending_count = len(
+                    PENDING_SIGNALS
+                )
 
                 telegram_send(
                     "📊 ESTADO DEL BOT\n\n"
@@ -289,7 +301,8 @@ def check_commands():
                     "Temporalidad: 1 minuto\n"
                     "Expiración: 1 minuto\n"
                     "Importe: $100\n"
-                    f"Pares: {len(PAIRS)}"
+                    f"Pares: {len(PAIRS)}\n"
+                    f"Señales pendientes: {pending_count}"
                 )
 
     except Exception as e:
@@ -305,9 +318,6 @@ def check_commands():
 # ============================================================
 
 def connect_iq():
-    """
-    Conecta con IQ Option.
-    """
 
     global IQ
 
@@ -352,7 +362,7 @@ def connect_iq():
 
 
 # ============================================================
-# VERIFICAR CONEXIÓN
+# COMPROBAR CONEXIÓN
 # ============================================================
 
 def ensure_connection():
@@ -410,9 +420,6 @@ def ensure_connection():
 # ============================================================
 
 def get_candles(pair):
-    """
-    Obtiene las últimas 60 velas de 1 minuto.
-    """
 
     if IQ is None:
         return None
@@ -443,7 +450,7 @@ def get_candles(pair):
             return None
 
         # ----------------------------------------------------
-        # NORMALIZAR COLUMNAS IQ OPTION
+        # NORMALIZAR COLUMNAS
         # ----------------------------------------------------
 
         df.rename(
@@ -550,7 +557,41 @@ def get_candle_timestamp(df):
 
 
 # ============================================================
-# COMPROBAR COOLDOWN
+# PRECIO APERTURA
+# ============================================================
+
+def get_candle_open(df):
+
+    try:
+
+        return float(
+            df.iloc[-1]["open"]
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# PRECIO CIERRE ACTUAL
+# ============================================================
+
+def get_candle_close(df):
+
+    try:
+
+        return float(
+            df.iloc[-1]["close"]
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# COOLDOWN
 # ============================================================
 
 def cooldown_active(pair):
@@ -565,79 +606,76 @@ def cooldown_active(pair):
         - last_time
     )
 
-    if elapsed < TRADE_COOLDOWN:
-
-        return True
-
-    return False
+    return elapsed < TRADE_COOLDOWN
 
 
 # ============================================================
-# EJECUTAR OPERACIÓN
+# GUARDAR SEÑAL
 # ============================================================
 
-def execute_trade(
+def save_pending_signal(
     pair,
     signal,
-    candle_timestamp
+    df,
+    candle_timestamp,
+    result
 ):
-    """
-    Ejecuta CALL o PUT por $100
-    con expiración de 1 minuto.
-    """
 
-    global LAST_TRADE_TIME
-    global LAST_TRADE_CANDLE
-
-    # --------------------------------------------------------
-    # EVITAR OPERAR LA MISMA VELA
-    # --------------------------------------------------------
-
-    previous_candle = (
-        LAST_TRADE_CANDLE.get(
-            pair
-        )
+    existing = PENDING_SIGNALS.get(
+        pair
     )
 
-    if (
-        previous_candle
-        == candle_timestamp
-    ):
-
-        logger.info(
-            "%s | Ya se operó esta vela",
-            pair
-        )
-
-        return False
-
     # --------------------------------------------------------
-    # COOLDOWN
+    # SI YA EXISTE UNA SEÑAL EN ESTA VELA
     # --------------------------------------------------------
 
-    if cooldown_active(pair):
+    if existing:
 
-        logger.info(
-            "%s | Cooldown activo",
-            pair
-        )
+        if (
+            existing["candle_timestamp"]
+            == candle_timestamp
+        ):
 
-        return False
-
-    # --------------------------------------------------------
-    # VALIDAR SEÑAL
-    # --------------------------------------------------------
-
-    if signal not in (
-        "call",
-        "put"
-    ):
-
-        return False
+            return False
 
     # --------------------------------------------------------
-    # MENSAJE PREVIO
+    # PRECIOS
     # --------------------------------------------------------
+
+    candle_open = get_candle_open(
+        df
+    )
+
+    candle_close = get_candle_close(
+        df
+    )
+
+    # --------------------------------------------------------
+    # GUARDAR
+    # --------------------------------------------------------
+
+    PENDING_SIGNALS[pair] = {
+
+        "signal": signal,
+
+        "candle_timestamp":
+            candle_timestamp,
+
+        "candle_open":
+            candle_open,
+
+        "last_close":
+            candle_close,
+
+        "score":
+            result.get(
+                "score",
+                0
+            ),
+
+        "created_at":
+            time.time()
+    }
 
     direction_text = (
         "CALL 🟢"
@@ -645,21 +683,255 @@ def execute_trade(
         else "PUT 🔴"
     )
 
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
     telegram_send(
-        "📢 SEÑAL DE CONTINUIDAD\n\n"
+        "📢 CONTINUIDAD DETECTADA\n\n"
         f"Par: {pair}\n"
         f"Dirección: {direction_text}\n"
-        "Temporalidad: 1 minuto\n"
-        "Expiración: 1 minuto\n"
-        "Importe: $100\n\n"
-        "✅ Tendencia confirmada\n"
-        "✅ Estructura confirmada\n"
-        "✅ Continuidad confirmada"
+        f"Score: {result.get('score', 0)}\n\n"
+        "🕯 VELA DE CONTINUIDAD\n"
+        f"Apertura: {candle_open}\n"
+        f"Cierre actual: {candle_close}\n\n"
+        "💾 SEÑAL GUARDADA\n"
+        "La dirección se mantiene durante "
+        "esta vela.\n\n"
+        "⏳ NO SE EJECUTA EN ESTA VELA.\n"
+        "Se espera la apertura de la siguiente."
+    )
+
+    logger.info(
+        "%s | SEÑAL GUARDADA | %s | "
+        "vela=%s | apertura=%s | cierre=%s",
+        pair,
+        signal.upper(),
+        candle_timestamp,
+        candle_open,
+        candle_close
+    )
+
+    return True
+
+
+# ============================================================
+# ACTUALIZAR SEÑAL PENDIENTE
+# ============================================================
+
+def update_pending_signal(
+    pair,
+    df,
+    result
+):
+
+    pending = PENDING_SIGNALS.get(
+        pair
+    )
+
+    if not pending:
+        return
+
+    signal = pending["signal"]
+
+    direction = result.get(
+        "direction"
     )
 
     # --------------------------------------------------------
-    # EJECUTAR
+    # ACTUALIZAR CIERRE
     # --------------------------------------------------------
+
+    current_close = get_candle_close(
+        df
+    )
+
+    if current_close is not None:
+
+        pending["last_close"] = (
+            current_close
+        )
+
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    #
+    # Si la señal es CALL:
+    # NO se convierte en PUT.
+    #
+    # Si la señal es PUT:
+    # NO se convierte en CALL.
+    #
+    # Solo se cancela si la estrategia
+    # deja de confirmar completamente
+    # la dirección original.
+    # --------------------------------------------------------
+
+    valid_direction = (
+        (
+            signal == "call"
+            and direction == "bullish"
+        )
+        or
+        (
+            signal == "put"
+            and direction == "bearish"
+        )
+    )
+
+    # --------------------------------------------------------
+    # Si la estrategia dice otra dirección,
+    # NO cambiar la señal.
+    #
+    # Se mantiene mientras no haya
+    # invalidación estructural.
+    # --------------------------------------------------------
+
+    if valid_direction:
+
+        pending["last_valid_check"] = (
+            time.time()
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # No cambiamos CALL por PUT ni PUT por CALL.
+    #
+    # La señal permanece.
+    #
+    # La comprobación final se hará
+    # en la apertura de la siguiente vela.
+    # --------------------------------------------------------
+
+    logger.info(
+        "%s | Señal %s mantenida. "
+        "La dirección no cambia durante "
+        "la misma vela.",
+        pair,
+        signal.upper()
+    )
+
+
+# ============================================================
+# EJECUTAR SEÑAL PENDIENTE
+# ============================================================
+
+def execute_pending_signal(
+    pair,
+    df
+):
+
+    pending = PENDING_SIGNALS.get(
+        pair
+    )
+
+    if not pending:
+        return False
+
+    current_timestamp = (
+        get_candle_timestamp(df)
+    )
+
+    if current_timestamp is None:
+        return False
+
+    signal_timestamp = (
+        pending["candle_timestamp"]
+    )
+
+    # ========================================================
+    # PROTECCIÓN PRINCIPAL
+    # ========================================================
+    #
+    # NO ejecutar mientras estemos
+    # dentro de la misma vela.
+    #
+    # Solo:
+    #
+    # current > signal
+    #
+    # ========================================================
+
+    if current_timestamp <= signal_timestamp:
+
+        return False
+
+    # ========================================================
+    # APERTURA DE LA NUEVA VELA
+    # ========================================================
+
+    execution_open = get_candle_open(
+        df
+    )
+
+    if execution_open is None:
+
+        logger.warning(
+            "%s | No se pudo obtener "
+            "apertura de ejecución",
+            pair
+        )
+
+        return False
+
+    # ========================================================
+    # COOLDOWN
+    # ========================================================
+
+    if cooldown_active(pair):
+
+        logger.info(
+            "%s | Cooldown activo. "
+            "Se cancela señal.",
+            pair
+        )
+
+        del PENDING_SIGNALS[pair]
+
+        return False
+
+    # ========================================================
+    # EVITAR DOS OPERACIONES EN LA MISMA VELA
+    # ========================================================
+
+    if (
+        LAST_TRADE_CANDLE.get(pair)
+        == current_timestamp
+    ):
+
+        del PENDING_SIGNALS[pair]
+
+        return False
+
+    # ========================================================
+    # DIRECCIÓN
+    # ========================================================
+
+    direction_text = (
+        "CALL 🟢"
+        if signal == "call"
+        else "PUT 🔴"
+    )
+
+    # ========================================================
+    # MENSAJE ANTES DE EJECUTAR
+    # ========================================================
+
+    telegram_send(
+        "🚨 NUEVA VELA DE EJECUCIÓN\n\n"
+        f"Par: {pair}\n"
+        f"Dirección: {direction_text}\n\n"
+        "🕯 VELA DE CONTINUIDAD\n"
+        f"Apertura: {pending['candle_open']}\n"
+        f"Cierre: {pending['last_close']}\n\n"
+        "🕯 VELA DE EJECUCIÓN\n"
+        f"Apertura: {execution_open}\n\n"
+        "⚡ Ejecutando operación..."
+    )
+
+    # ========================================================
+    # EJECUTAR
+    # ========================================================
 
     try:
 
@@ -675,7 +947,8 @@ def execute_trade(
             telegram_send(
                 "❌ OPERACIÓN RECHAZADA\n\n"
                 f"Par: {pair}\n"
-                f"Dirección: {signal.upper()}"
+                f"Dirección: {signal.upper()}\n"
+                f"Apertura: {execution_open}"
             )
 
             logger.error(
@@ -683,34 +956,57 @@ def execute_trade(
                 pair
             )
 
+            del PENDING_SIGNALS[pair]
+
             return False
 
-        # ----------------------------------------------------
+        # ====================================================
         # GUARDAR OPERACIÓN
-        # ----------------------------------------------------
+        # ====================================================
 
         LAST_TRADE_TIME[pair] = (
             time.time()
         )
 
         LAST_TRADE_CANDLE[pair] = (
-            candle_timestamp
+            current_timestamp
         )
+
+        # ====================================================
+        # ELIMINAR SEÑAL
+        # ====================================================
+
+        del PENDING_SIGNALS[pair]
+
+        # ====================================================
+        # TELEGRAM
+        # ====================================================
 
         telegram_send(
             "✅ OPERACIÓN ABIERTA\n\n"
             f"Par: {pair}\n"
             f"Dirección: {signal.upper()}\n"
             "Importe: $100\n"
-            "Expiración: 1 minuto\n"
+            "Expiración: 1 minuto\n\n"
+            "🕯 CONTINUIDAD\n"
+            f"Apertura: {pending['candle_open']}\n"
+            f"Cierre: {pending['last_close']}\n\n"
+            "🕯 EJECUCIÓN\n"
+            f"Apertura: {execution_open}\n\n"
             f"ID: {order_id}"
         )
 
         logger.info(
-            "%s | %s | $%s | ID=%s",
+            "%s | %s | $%s | "
+            "VELA CONTINUIDAD=%s | "
+            "VELA EJECUCIÓN=%s | "
+            "APERTURA=%s | ID=%s",
             pair,
             signal.upper(),
             AMOUNT,
+            signal_timestamp,
+            current_timestamp,
+            execution_open,
             order_id
         )
 
@@ -730,6 +1026,8 @@ def execute_trade(
             f"Error: {str(e)}"
         )
 
+        del PENDING_SIGNALS[pair]
+
         return False
 
 
@@ -739,9 +1037,9 @@ def execute_trade(
 
 def analyze_pair(pair):
 
-    # --------------------------------------------------------
+    # ========================================================
     # OBTENER VELAS
-    # --------------------------------------------------------
+    # ========================================================
 
     df = get_candles(
         pair
@@ -750,9 +1048,9 @@ def analyze_pair(pair):
     if df is None:
         return
 
-    # --------------------------------------------------------
-    # NECESITAMOS 60 VELAS
-    # --------------------------------------------------------
+    # ========================================================
+    # MÍNIMO 60 VELAS
+    # ========================================================
 
     if len(df) < 60:
 
@@ -764,9 +1062,57 @@ def analyze_pair(pair):
 
         return
 
-    # --------------------------------------------------------
-    # ANALIZAR ESTRATEGIA
-    # --------------------------------------------------------
+    # ========================================================
+    # TIMESTAMP ACTUAL
+    # ========================================================
+
+    current_timestamp = (
+        get_candle_timestamp(df)
+    )
+
+    if current_timestamp is None:
+        return
+
+    # ========================================================
+    # 1. SI HAY SEÑAL PENDIENTE
+    # ========================================================
+
+    pending = PENDING_SIGNALS.get(
+        pair
+    )
+
+    if pending:
+
+        signal_timestamp = (
+            pending["candle_timestamp"]
+        )
+
+        # ----------------------------------------------------
+        # TODAVÍA ES LA MISMA VELA
+        # ----------------------------------------------------
+
+        if current_timestamp == signal_timestamp:
+
+            # Actualizar cierre actual
+            pending["last_close"] = (
+                get_candle_close(df)
+            )
+
+        # ----------------------------------------------------
+        # NUEVA VELA
+        # ----------------------------------------------------
+
+        elif current_timestamp > signal_timestamp:
+
+            # Primero ejecutar la señal
+            execute_pending_signal(
+                pair,
+                df
+            )
+
+    # ========================================================
+    # 2. ANALIZAR VELA ACTUAL
+    # ========================================================
 
     result = analyze_market(
         df
@@ -789,9 +1135,9 @@ def analyze_pair(pair):
         0
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # LOG
-    # --------------------------------------------------------
+    # ========================================================
 
     logger.info(
         "%s | tendencia=%s | señal=%s | "
@@ -803,34 +1149,58 @@ def analyze_pair(pair):
         reason
     )
 
-    # --------------------------------------------------------
-    # SIN SEÑAL
-    # --------------------------------------------------------
+    # ========================================================
+    # SI EXISTE UNA SEÑAL PENDIENTE
+    # ========================================================
 
-    if signal is None:
-        return
-
-    # --------------------------------------------------------
-    # TIMESTAMP DE VELA
-    # --------------------------------------------------------
-
-    candle_timestamp = (
-        get_candle_timestamp(
-            df
-        )
+    pending = PENDING_SIGNALS.get(
+        pair
     )
 
-    if candle_timestamp is None:
+    if pending:
+
+        # ----------------------------------------------------
+        # ACTUALIZAR CIERRE
+        # ----------------------------------------------------
+
+        if (
+            pending["candle_timestamp"]
+            == current_timestamp
+        ):
+
+            update_pending_signal(
+                pair,
+                df,
+                result
+            )
+
+        # ----------------------------------------------------
+        # NO CREAR OTRA SEÑAL
+        # ----------------------------------------------------
+
         return
 
-    # --------------------------------------------------------
-    # EJECUTAR
-    # --------------------------------------------------------
+    # ========================================================
+    # SIN SEÑAL NUEVA
+    # ========================================================
 
-    execute_trade(
+    if signal not in (
+        "call",
+        "put"
+    ):
+
+        return
+
+    # ========================================================
+    # GUARDAR SEÑAL
+    # ========================================================
+
+    save_pending_signal(
         pair,
         signal,
-        candle_timestamp
+        df,
+        current_timestamp,
+        result
     )
 
 
@@ -859,12 +1229,15 @@ def analyze_all_pairs():
                 e
             )
 
-        # Pequeña separación entre peticiones
-        time.sleep(0.5)
+        # ----------------------------------------------------
+        # Pequeña separación entre pares
+        # ----------------------------------------------------
+
+        time.sleep(0.20)
 
 
 # ============================================================
-# LOOP PRINCIPAL
+# MAIN
 # ============================================================
 
 def main():
@@ -880,24 +1253,28 @@ def main():
     )
 
     logger.info(
-        "Estrategia: CONTINUIDAD"
+        "ESTRATEGIA: CONTINUIDAD"
     )
 
     logger.info(
-        "Temporalidad: 1 MINUTO"
+        "TEMPORALIDAD: 1 MINUTO"
     )
 
     logger.info(
-        "Importe: $100"
+        "EXPIRACIÓN: 1 MINUTO"
+    )
+
+    logger.info(
+        "IMPORTE: $100"
     )
 
     logger.info(
         "========================================"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # VALIDAR VARIABLES
-    # --------------------------------------------------------
+    # ========================================================
 
     if not IQ_EMAIL:
 
@@ -939,9 +1316,9 @@ def main():
 
         return
 
-    # --------------------------------------------------------
-    # CONECTAR IQ OPTION
-    # --------------------------------------------------------
+    # ========================================================
+    # CONECTAR
+    # ========================================================
 
     try:
 
@@ -955,25 +1332,34 @@ def main():
         )
 
         telegram_send(
-            "❌ No se pudo conectar a IQ Option.\n\n"
+            "❌ NO SE PUDO CONECTAR A IQ OPTION\n\n"
             + str(e)
         )
 
         return
 
-    # --------------------------------------------------------
-    # BOT ESPERANDO /START
-    # --------------------------------------------------------
+    # ========================================================
+    # BOT LISTO
+    # ========================================================
 
     telegram_send(
         "🤖 BOT LISTO\n\n"
-        "Conectado a IQ Option.\n"
-        "Escribe /start para comenzar.\n"
-        "Escribe /status para consultar estado."
+        "Conectado a IQ Option.\n\n"
+        "Configuración:\n"
+        "📊 Análisis: 1 minuto\n"
+        "🕯 Estructura: máximo 60 velas\n"
+        "🎯 Estrategia: continuidad\n"
+        "💵 Importe: $100\n"
+        "⏱ Expiración: 1 minuto\n\n"
+        "La señal se mantiene durante "
+        "la vela de continuidad.\n\n"
+        "La operación se ejecuta únicamente "
+        "en la apertura de la siguiente vela.\n\n"
+        "Escribe /start para comenzar."
     )
 
     # ========================================================
-    # LOOP
+    # LOOP PRINCIPAL
     # ========================================================
 
     while True:
@@ -1007,20 +1393,22 @@ def main():
                 continue
 
             # ------------------------------------------------
-            # ANALIZAR MERCADO
+            # ANALIZAR
             # ------------------------------------------------
 
             analyze_all_pairs()
 
             # ------------------------------------------------
-            # PAUSA
+            # CICLO RÁPIDO
             # ------------------------------------------------
 
-            time.sleep(1)
+            time.sleep(0.40)
 
         except KeyboardInterrupt:
 
             BOT_RUNNING = False
+
+            PENDING_SIGNALS.clear()
 
             logger.info(
                 "Bot detenido manualmente."
