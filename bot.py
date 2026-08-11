@@ -24,7 +24,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # TRADING
 # ============================================================
 
-AMOUNT = 100
+AMOUNT = 5.89
 
 TIMEFRAME = 60
 
