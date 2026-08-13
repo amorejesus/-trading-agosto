@@ -14,15 +14,13 @@ EMA_SLOW = 50
 
 ATR_PERIOD = 14
 
-# Porcentaje máximo de extensión respecto al rango reciente
-MAX_EXTENSION = 0.78
-
-# Proximidad a extremos recientes
 SR_LOOKBACK = 60
 
-# Número máximo de velas consecutivas fuertes antes de
-# considerar que la tendencia puede estar demasiado extendida
 MAX_CONSECUTIVE = 6
+
+# Movimiento máximo permitido de la vela de confirmación
+MAX_CONFIRMATION_RANGE_ATR = 1.80
+MAX_CONFIRMATION_BODY_ATR = 1.50
 
 
 # ============================================================
@@ -30,9 +28,6 @@ MAX_CONSECUTIVE = 6
 # ============================================================
 
 def normalize_dataframe(df):
-    """
-    Normaliza las columnas recibidas desde IQ Option.
-    """
 
     if df is None:
         return None
@@ -45,13 +40,11 @@ def normalize_dataframe(df):
 
     data = df.copy()
 
-    rename = {
-        "max": "high",
-        "min": "low"
-    }
-
     data.rename(
-        columns=rename,
+        columns={
+            "max": "high",
+            "min": "low"
+        },
         inplace=True
     )
 
@@ -87,6 +80,11 @@ def normalize_dataframe(df):
             errors="coerce"
         )
 
+        data.dropna(
+            subset=["from"],
+            inplace=True
+        )
+
         data.sort_values(
             "from",
             inplace=True
@@ -98,7 +96,7 @@ def normalize_dataframe(df):
     )
 
     # --------------------------------------------------------
-    # MÁXIMO 60 VELAS
+    # SOLO LAS ÚLTIMAS 60 VELAS
     # --------------------------------------------------------
 
     data = data.tail(
@@ -122,7 +120,7 @@ def add_indicators(df):
     data = df.copy()
 
     # --------------------------------------------------------
-    # EMA
+    # EMA 9
     # --------------------------------------------------------
 
     data["ema9"] = (
@@ -134,6 +132,10 @@ def add_indicators(df):
         .mean()
     )
 
+    # --------------------------------------------------------
+    # EMA 21
+    # --------------------------------------------------------
+
     data["ema21"] = (
         data["close"]
         .ewm(
@@ -142,6 +144,10 @@ def add_indicators(df):
         )
         .mean()
     )
+
+    # --------------------------------------------------------
+    # EMA 50
+    # --------------------------------------------------------
 
     data["ema50"] = (
         data["close"]
@@ -215,7 +221,7 @@ def add_indicators(df):
     )
 
     # --------------------------------------------------------
-    # MECHAS
+    # MECHA SUPERIOR
     # --------------------------------------------------------
 
     data["upper_wick"] = (
@@ -225,6 +231,10 @@ def add_indicators(df):
         ].max(axis=1)
     )
 
+    # --------------------------------------------------------
+    # MECHA INFERIOR
+    # --------------------------------------------------------
+
     data["lower_wick"] = (
         data[
             ["open", "close"]
@@ -233,7 +243,7 @@ def add_indicators(df):
     )
 
     # --------------------------------------------------------
-    # FUERZA DEL CUERPO
+    # PROPORCIÓN DEL CUERPO
     # --------------------------------------------------------
 
     data["body_ratio"] = np.where(
@@ -271,11 +281,11 @@ def detect_trend(df):
 
     last = df.iloc[-1]
 
+    close = last["close"]
+
     ema9 = last["ema9"]
     ema21 = last["ema21"]
     ema50 = last["ema50"]
-
-    close = last["close"]
 
     # --------------------------------------------------------
     # ALCISTA
@@ -303,7 +313,7 @@ def detect_trend(df):
 
 
 # ============================================================
-# ESTRUCTURA
+# ESTRUCTURA DE MERCADO
 # ============================================================
 
 def detect_structure(df):
@@ -350,25 +360,26 @@ def trend_strength(df, direction):
 
     recent = df.tail(8)
 
+    if len(recent) == 0:
+        return 0
+
     if direction == "bullish":
 
-        bullish = 0
-
-        for _, candle in recent.iterrows():
-
-            if candle["close"] > candle["open"]:
-                bullish += 1
+        bullish = sum(
+            1
+            for _, candle in recent.iterrows()
+            if candle["close"] > candle["open"]
+        )
 
         return bullish / len(recent)
 
     if direction == "bearish":
 
-        bearish = 0
-
-        for _, candle in recent.iterrows():
-
-            if candle["close"] < candle["open"]:
-                bearish += 1
+        bearish = sum(
+            1
+            for _, candle in recent.iterrows()
+            if candle["close"] < candle["open"]
+        )
 
         return bearish / len(recent)
 
@@ -376,7 +387,7 @@ def trend_strength(df, direction):
 
 
 # ============================================================
-# DETECTAR DEBILIDAD
+# DEBILIDAD
 # ============================================================
 
 def has_weakness(df, direction):
@@ -386,10 +397,6 @@ def has_weakness(df, direction):
 
     recent = df.tail(6)
 
-    # --------------------------------------------------------
-    # CUERPOS
-    # --------------------------------------------------------
-
     bodies = recent["body"].values
 
     avg_body = np.mean(bodies)
@@ -397,18 +404,17 @@ def has_weakness(df, direction):
     if avg_body <= 0:
         return True
 
-    # --------------------------------------------------------
-    # CUERPO DE LA ÚLTIMA VELA
-    # --------------------------------------------------------
-
     last = recent.iloc[-1]
 
-    # Una vela demasiado pequeña = pérdida de fuerza
+    # --------------------------------------------------------
+    # CUERPO MUY PEQUEÑO
+    # --------------------------------------------------------
+
     if last["body"] < avg_body * 0.45:
         return True
 
     # --------------------------------------------------------
-    # MECHAS CONTRARIAS
+    # MECHA CONTRARIA
     # --------------------------------------------------------
 
     if direction == "bullish":
@@ -428,30 +434,30 @@ def has_weakness(df, direction):
             return True
 
     # --------------------------------------------------------
-    # TRES VELAS DE PÉRDIDA
+    # PÉRDIDA DE FUERZA PROGRESIVA
     # --------------------------------------------------------
 
-    if direction == "bullish":
+    last_three = recent.tail(3)
 
-        last_three = recent.tail(3)
+    bodies_three = (
+        last_three["body"].values
+    )
 
-        if all(
-            last_three["body"].iloc[i]
-            < last_three["body"].iloc[i - 1]
-            for i in range(1, 3)
+    decreasing = 0
+
+    for i in range(
+        1,
+        len(bodies_three)
+    ):
+
+        if (
+            bodies_three[i]
+            < bodies_three[i - 1]
         ):
-            return True
+            decreasing += 1
 
-    if direction == "bearish":
-
-        last_three = recent.tail(3)
-
-        if all(
-            last_three["body"].iloc[i]
-            < last_three["body"].iloc[i - 1]
-            for i in range(1, 3)
-        ):
-            return True
+    if decreasing >= 2:
+        return True
 
     return False
 
@@ -468,7 +474,7 @@ def is_end_of_trend(df, direction):
     recent = df.tail(15)
 
     # --------------------------------------------------------
-    # DEMASIADAS VELAS CONSECUTIVAS
+    # VELAS CONSECUTIVAS
     # --------------------------------------------------------
 
     consecutive = 0
@@ -495,7 +501,7 @@ def is_end_of_trend(df, direction):
         return True
 
     # --------------------------------------------------------
-    # CUERPOS REDUCIÉNDOSE
+    # CUERPOS DECRECIENTES
     # --------------------------------------------------------
 
     last_five = recent.tail(5)
@@ -513,7 +519,7 @@ def is_end_of_trend(df, direction):
         return True
 
     # --------------------------------------------------------
-    # DISTANCIA A EMA9
+    # PRECIO DEMASIADO ALEJADO DE EMA9
     # --------------------------------------------------------
 
     last = df.iloc[-1]
@@ -528,12 +534,11 @@ def is_end_of_trend(df, direction):
         - last["ema9"]
     )
 
-    # Precio demasiado alejado de EMA9
     if distance > atr * 2.0:
         return True
 
     # --------------------------------------------------------
-    # MECHA DE RECHAZO CONTRARIA
+    # RECHAZO EN EXTREMO
     # --------------------------------------------------------
 
     if direction == "bullish":
@@ -571,15 +576,12 @@ def is_near_support_resistance(
 
     price = current["close"]
 
-    # --------------------------------------------------------
-    # RANGO DE LAS ÚLTIMAS 60
-    # --------------------------------------------------------
-
     lookback = df.tail(
         SR_LOOKBACK
     )
 
     highest = lookback["high"].max()
+
     lowest = lookback["low"].min()
 
     total_range = (
@@ -588,10 +590,6 @@ def is_near_support_resistance(
 
     if total_range <= 0:
         return True
-
-    # --------------------------------------------------------
-    # DISTANCIA NORMALIZADA
-    # --------------------------------------------------------
 
     distance_high = (
         highest - price
@@ -602,7 +600,7 @@ def is_near_support_resistance(
     )
 
     # --------------------------------------------------------
-    # NO COMPRAR CERCA DE RESISTENCIA
+    # CALL CERCA DE RESISTENCIA
     # --------------------------------------------------------
 
     if direction == "bullish":
@@ -614,7 +612,7 @@ def is_near_support_resistance(
             return True
 
     # --------------------------------------------------------
-    # NO VENDER CERCA DE SOPORTE
+    # PUT CERCA DE SOPORTE
     # --------------------------------------------------------
 
     if direction == "bearish":
@@ -629,10 +627,13 @@ def is_near_support_resistance(
 
 
 # ============================================================
-# EXTENSIÓN DEL MOVIMIENTO
+# SOBREEXTENSIÓN
 # ============================================================
 
-def is_overextended(df, direction):
+def is_overextended(
+    df,
+    direction
+):
 
     if len(df) < 20:
         return True
@@ -640,6 +641,7 @@ def is_overextended(df, direction):
     recent = df.tail(20)
 
     highest = recent["high"].max()
+
     lowest = recent["low"].min()
 
     current = recent.iloc[-1]["close"]
@@ -657,7 +659,7 @@ def is_overextended(df, direction):
             current - lowest
         ) / total_range
 
-        if position >= MAX_EXTENSION:
+        if position >= 0.78:
             return True
 
     if direction == "bearish":
@@ -666,7 +668,7 @@ def is_overextended(df, direction):
             highest - current
         ) / total_range
 
-        if position >= MAX_EXTENSION:
+        if position >= 0.78:
             return True
 
     return False
@@ -676,7 +678,10 @@ def is_overextended(df, direction):
 # RECHAZO
 # ============================================================
 
-def has_rejection(df, direction):
+def has_rejection(
+    df,
+    direction
+):
 
     if len(df) < 5:
         return True
@@ -692,7 +697,6 @@ def has_rejection(df, direction):
 
         if direction == "bullish":
 
-            # Rechazo fuerte desde arriba
             if (
                 candle["upper_wick"]
                 > body * 1.8
@@ -701,7 +705,6 @@ def has_rejection(df, direction):
 
         if direction == "bearish":
 
-            # Rechazo fuerte desde abajo
             if (
                 candle["lower_wick"]
                 > body * 1.8
@@ -715,7 +718,10 @@ def has_rejection(df, direction):
 # PULLBACK
 # ============================================================
 
-def is_pullback(df, direction):
+def is_pullback(
+    df,
+    direction
+):
 
     if len(df) < 6:
         return True
@@ -726,25 +732,18 @@ def is_pullback(df, direction):
 
     if direction == "bullish":
 
-        # Si la última vela es bajista,
-        # no se considera continuidad limpia.
         if last["close"] < last["open"]:
-
             return True
 
-        # Precio debajo de EMA9
         if last["close"] < last["ema9"]:
-
             return True
 
     if direction == "bearish":
 
         if last["close"] > last["open"]:
-
             return True
 
         if last["close"] > last["ema9"]:
-
             return True
 
     return False
@@ -754,7 +753,10 @@ def is_pullback(df, direction):
 # CONTINUIDAD
 # ============================================================
 
-def is_continuation(df, direction):
+def is_continuation(
+    df,
+    direction
+):
 
     if len(df) < 8:
         return False
@@ -762,17 +764,15 @@ def is_continuation(df, direction):
     recent = df.tail(8)
 
     # --------------------------------------------------------
-    # ALCISTA
+    # CONTINUIDAD ALCISTA
     # --------------------------------------------------------
 
     if direction == "bullish":
 
         bullish_count = sum(
             1
-            for _, candle
-            in recent.iterrows()
-            if candle["close"]
-            > candle["open"]
+            for _, candle in recent.iterrows()
+            if candle["close"] > candle["open"]
         )
 
         if bullish_count < 5:
@@ -786,8 +786,8 @@ def is_continuation(df, direction):
         if last["ema9"] <= last["ema21"]:
             return False
 
-        # Máximos y mínimos recientes
         highs = recent["high"].values
+
         lows = recent["low"].values
 
         higher_highs = sum(
@@ -809,17 +809,15 @@ def is_continuation(df, direction):
         return True
 
     # --------------------------------------------------------
-    # BAJISTA
+    # CONTINUIDAD BAJISTA
     # --------------------------------------------------------
 
     if direction == "bearish":
 
         bearish_count = sum(
             1
-            for _, candle
-            in recent.iterrows()
-            if candle["close"]
-            < candle["open"]
+            for _, candle in recent.iterrows()
+            if candle["close"] < candle["open"]
         )
 
         if bearish_count < 5:
@@ -834,6 +832,7 @@ def is_continuation(df, direction):
             return False
 
         highs = recent["high"].values
+
         lows = recent["low"].values
 
         lower_highs = sum(
@@ -858,6 +857,165 @@ def is_continuation(df, direction):
 
 
 # ============================================================
+# CONFIRMACIÓN DE VELA CERRADA
+# ============================================================
+
+def confirm_closed_candle(
+    df,
+    direction
+):
+    """
+    Analiza la vela de confirmación YA CERRADA.
+
+    No analiza una vela a mitad de formación.
+    """
+
+    if len(df) < 2:
+        return False
+
+    candle = df.iloc[-1]
+
+    candle_range = (
+        candle["high"]
+        - candle["low"]
+    )
+
+    if candle_range <= 0:
+        return False
+
+    body = abs(
+        candle["close"]
+        - candle["open"]
+    )
+
+    upper_wick = (
+        candle["high"]
+        - max(
+            candle["open"],
+            candle["close"]
+        )
+    )
+
+    lower_wick = (
+        min(
+            candle["open"],
+            candle["close"]
+        )
+        - candle["low"]
+    )
+
+    body_ratio = (
+        body / candle_range
+    )
+
+    close_position = (
+        candle["close"]
+        - candle["low"]
+    ) / candle_range
+
+    # --------------------------------------------------------
+    # CALL
+    # --------------------------------------------------------
+
+    if direction == "bullish":
+
+        if candle["close"] <= candle["open"]:
+            return False
+
+        # Cierre en la parte superior
+        if close_position < 0.60:
+            return False
+
+        # Rechazo superior
+        if upper_wick > body * 1.25:
+            return False
+
+        # Cuerpo demasiado pequeño
+        if body_ratio < 0.45:
+            return False
+
+        return True
+
+    # --------------------------------------------------------
+    # PUT
+    # --------------------------------------------------------
+
+    if direction == "bearish":
+
+        if candle["close"] >= candle["open"]:
+            return False
+
+        # Cierre en la parte inferior
+        if close_position > 0.40:
+            return False
+
+        # Rechazo inferior
+        if lower_wick > body * 1.25:
+            return False
+
+        # Cuerpo demasiado pequeño
+        if body_ratio < 0.45:
+            return False
+
+        return True
+
+    return False
+
+
+# ============================================================
+# MOVIMIENTO DEMASIADO FUERTE
+# ============================================================
+
+def movement_too_strong(df):
+    """
+    Evita confirmar continuidad cuando la vela acaba
+    de hacer un movimiento exageradamente fuerte.
+    """
+
+    if len(df) < 15:
+        return True
+
+    candle = df.iloc[-1]
+
+    atr = candle["atr"]
+
+    if pd.isna(atr) or atr <= 0:
+        return True
+
+    candle_range = (
+        candle["high"]
+        - candle["low"]
+    )
+
+    body = abs(
+        candle["close"]
+        - candle["open"]
+    )
+
+    # --------------------------------------------------------
+    # RANGO DEMASIADO GRANDE
+    # --------------------------------------------------------
+
+    if (
+        candle_range
+        > atr * MAX_CONFIRMATION_RANGE_ATR
+    ):
+        return True
+
+    # --------------------------------------------------------
+    # CUERPO DEMASIADO GRANDE
+    # --------------------------------------------------------
+
+    if (
+        body
+        > atr * MAX_CONFIRMATION_BODY_ATR
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
 # SCORE DE CONTINUIDAD
 # ============================================================
 
@@ -868,11 +1026,13 @@ def continuity_score(
 
     score = 0
 
+    trend = detect_trend(
+        df
+    )
+
     # --------------------------------------------------------
     # TENDENCIA
     # --------------------------------------------------------
-
-    trend = detect_trend(df)
 
     if (
         direction == "bullish"
@@ -893,7 +1053,9 @@ def continuity_score(
     # ESTRUCTURA
     # --------------------------------------------------------
 
-    structure = detect_structure(df)
+    structure = detect_structure(
+        df
+    )
 
     if structure == direction:
         score += 2
@@ -931,23 +1093,30 @@ def continuity_score(
 # ============================================================
 
 def analyze_market(df):
-
     """
     FUNCIÓN PRINCIPAL.
 
-    Devuelve SIEMPRE:
+    IMPORTANTE:
+
+    La vela utilizada para confirmar continuidad
+    debe ser la vela cerrada.
+
+    Retorna:
 
     {
-        "signal": "call" / "put" / None,
-        "direction": "bullish" / "bearish" / "range",
+        "signal": "call",
+        "direction": "bullish",
         "reason": "...",
-        "score": int
+        "score": 7
+    }
+
+    o:
+
+    {
+        "signal": None,
+        ...
     }
     """
-
-    # --------------------------------------------------------
-    # VALORES POR DEFECTO
-    # --------------------------------------------------------
 
     result = {
         "signal": None,
@@ -956,11 +1125,13 @@ def analyze_market(df):
         "score": 0
     }
 
-    # --------------------------------------------------------
+    # ========================================================
     # NORMALIZAR
-    # --------------------------------------------------------
+    # ========================================================
 
-    data = normalize_dataframe(df)
+    data = normalize_dataframe(
+        df
+    )
 
     if data is None:
 
@@ -970,30 +1141,26 @@ def analyze_market(df):
 
         return result
 
-    # --------------------------------------------------------
-    # NECESITAMOS 50+ PARA EMA50
-    # --------------------------------------------------------
+    # ========================================================
+    # NECESITAMOS EMA50
+    # ========================================================
 
     if len(data) < 50:
 
         result["reason"] = (
-            f"Esperando estructura: "
-            f"{len(data)}/50 velas"
+            f"Velas insuficientes "
+            f"{len(data)}/50"
         )
 
         return result
 
-    # --------------------------------------------------------
+    # ========================================================
     # INDICADORES
-    # --------------------------------------------------------
+    # ========================================================
 
     data = add_indicators(
         data
     )
-
-    # --------------------------------------------------------
-    # ÚLTIMA VELA
-    # --------------------------------------------------------
 
     last = data.iloc[-1]
 
@@ -1008,9 +1175,9 @@ def analyze_market(df):
 
         return result
 
-    # --------------------------------------------------------
+    # ========================================================
     # TENDENCIA
-    # --------------------------------------------------------
+    # ========================================================
 
     trend = detect_trend(
         data
@@ -1027,7 +1194,7 @@ def analyze_market(df):
         return result
 
     # ========================================================
-    # DETERMINAR DIRECCIÓN
+    # DIRECCIÓN
     # ========================================================
 
     if trend == "bullish":
@@ -1049,7 +1216,7 @@ def analyze_market(df):
         return result
 
     # ========================================================
-    # FILTRO 1 — FINAL DE TENDENCIA
+    # 1. FINAL DE TENDENCIA
     # ========================================================
 
     if is_end_of_trend(
@@ -1058,14 +1225,13 @@ def analyze_market(df):
     ):
 
         result["reason"] = (
-            "Final de tendencia / "
-            "movimiento demasiado extendido"
+            "Final de tendencia"
         )
 
         return result
 
     # ========================================================
-    # FILTRO 2 — DEBILIDAD
+    # 2. DEBILIDAD
     # ========================================================
 
     if has_weakness(
@@ -1080,7 +1246,7 @@ def analyze_market(df):
         return result
 
     # ========================================================
-    # FILTRO 3 — RECHAZO
+    # 3. RECHAZO
     # ========================================================
 
     if has_rejection(
@@ -1089,13 +1255,13 @@ def analyze_market(df):
     ):
 
         result["reason"] = (
-            "Zona de rechazo detectada"
+            "Zona de rechazo"
         )
 
         return result
 
     # ========================================================
-    # FILTRO 4 — SOPORTE / RESISTENCIA
+    # 4. SOPORTE / RESISTENCIA
     # ========================================================
 
     if is_near_support_resistance(
@@ -1106,19 +1272,19 @@ def analyze_market(df):
         if direction == "bullish":
 
             result["reason"] = (
-                "Precio cerca de resistencia"
+                "Cerca de resistencia"
             )
 
         else:
 
             result["reason"] = (
-                "Precio cerca de soporte"
+                "Cerca de soporte"
             )
 
         return result
 
     # ========================================================
-    # FILTRO 5 — EXTENSIÓN
+    # 5. SOBREEXTENSIÓN
     # ========================================================
 
     if is_overextended(
@@ -1127,13 +1293,13 @@ def analyze_market(df):
     ):
 
         result["reason"] = (
-            "Precio demasiado extendido"
+            "Movimiento demasiado extendido"
         )
 
         return result
 
     # ========================================================
-    # FILTRO 6 — PULLBACK
+    # 6. PULLBACK
     # ========================================================
 
     if is_pullback(
@@ -1148,7 +1314,7 @@ def analyze_market(df):
         return result
 
     # ========================================================
-    # FILTRO 7 — CONTINUIDAD
+    # 7. CONTINUIDAD ESTRUCTURAL
     # ========================================================
 
     if not is_continuation(
@@ -1163,7 +1329,7 @@ def analyze_market(df):
         return result
 
     # ========================================================
-    # SCORE
+    # 8. SCORE
     # ========================================================
 
     score = continuity_score(
@@ -1173,55 +1339,54 @@ def analyze_market(df):
 
     result["score"] = score
 
-    # ========================================================
-    # SCORE MÍNIMO
-    # ========================================================
-
     if score < 7:
 
         result["reason"] = (
-            f"Continuidad insuficiente "
-            f"(score {score}/8)"
+            f"Score insuficiente: "
+            f"{score}/8"
         )
 
         return result
 
     # ========================================================
-    # CONFIRMACIÓN DE ÚLTIMA VELA
+    # 9. CONFIRMACIÓN DE LA VELA CERRADA
     # ========================================================
 
-    candle = candle_direction(
-        last
-    )
+    if not confirm_closed_candle(
+        data,
+        direction
+    ):
 
-    if direction == "bullish":
+        result["reason"] = (
+            "La vela cerrada "
+            "no confirma continuidad"
+        )
 
-        if candle != "bull":
-
-            result["reason"] = (
-                "Última vela no confirma CALL"
-            )
-
-            return result
-
-    if direction == "bearish":
-
-        if candle != "bear":
-
-            result["reason"] = (
-                "Última vela no confirma PUT"
-            )
-
-            return result
+        return result
 
     # ========================================================
-    # SEÑAL CONFIRMADA
+    # 10. MOVIMIENTO DEMASIADO FUERTE
+    # ========================================================
+
+    if movement_too_strong(
+        data
+    ):
+
+        result["reason"] = (
+            "Movimiento de la vela de "
+            "confirmación demasiado fuerte"
+        )
+
+        return result
+
+    # ========================================================
+    # SEÑAL FINAL
     # ========================================================
 
     result["signal"] = signal
 
     result["reason"] = (
-        "CONTINUIDAD CONFIRMADA | "
+        "CONTINUIDAD CONFIRMADA AL CIERRE | "
         f"tendencia={trend} | "
         f"estructura={detect_structure(data)} | "
         f"score={score}/8"
@@ -1231,26 +1396,23 @@ def analyze_market(df):
 
 
 # ============================================================
-# FUNCIÓN AUXILIAR PARA DEBUG
+# ESTADO COMPLETO DEL MERCADO
 # ============================================================
 
 def get_market_state(df):
-
-    """
-    Devuelve información detallada de la situación
-    actual sin ejecutar ninguna operación.
-    """
 
     data = normalize_dataframe(
         df
     )
 
     if data is None:
+
         return {
             "valid": False
         }
 
     if len(data) < 50:
+
         return {
             "valid": False,
             "candles": len(data)
@@ -1265,36 +1427,63 @@ def get_market_state(df):
     )
 
     if trend == "bullish":
+
         direction = "bullish"
         signal = "call"
 
     elif trend == "bearish":
+
         direction = "bearish"
         signal = "put"
 
     else:
+
         direction = "range"
         signal = None
 
     return {
+
         "valid": True,
+
         "candles": len(data),
+
         "trend": trend,
+
         "direction": direction,
+
         "signal": signal,
-        "structure": detect_structure(data),
-        "strength": trend_strength(
-            data,
-            direction
-        ) if direction != "range" else 0,
-        "weakness": has_weakness(
-            data,
-            direction
-        ) if direction != "range" else True,
-        "rejection": has_rejection(
-            data,
-            direction
-        ) if direction != "range" else True,
+
+        "structure": detect_structure(
+            data
+        ),
+
+        "strength": (
+            trend_strength(
+                data,
+                direction
+            )
+            if direction != "range"
+            else 0
+        ),
+
+        "weakness": (
+            has_weakness(
+                data,
+                direction
+            )
+            if direction != "range"
+            else True
+        ),
+
+        "rejection": (
+            has_rejection(
+                data,
+                direction
+            )
+            if direction != "range"
+            else True
+        ),
+
         "support_resistance": (
             is_near_support_resistance(
                 data,
@@ -1303,6 +1492,7 @@ def get_market_state(df):
             if direction != "range"
             else True
         ),
+
         "overextended": (
             is_overextended(
                 data,
@@ -1311,6 +1501,7 @@ def get_market_state(df):
             if direction != "range"
             else True
         ),
+
         "end_of_trend": (
             is_end_of_trend(
                 data,
@@ -1319,6 +1510,7 @@ def get_market_state(df):
             if direction != "range"
             else True
         ),
+
         "pullback": (
             is_pullback(
                 data,
@@ -1327,6 +1519,7 @@ def get_market_state(df):
             if direction != "range"
             else True
         ),
+
         "continuation": (
             is_continuation(
                 data,
@@ -1334,5 +1527,22 @@ def get_market_state(df):
             )
             if direction != "range"
             else False
+        ),
+
+        "closed_candle_confirmation": (
+            confirm_closed_candle(
+                data,
+                direction
+            )
+            if direction != "range"
+            else False
+        ),
+
+        "movement_too_strong": (
+            movement_too_strong(
+                data
+            )
+            if direction != "range"
+            else True
         )
     }
