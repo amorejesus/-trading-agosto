@@ -3,21 +3,36 @@ import numpy as np
 
 
 # ============================================================
-# CONFIGURACIÓN DE LA ESTRATEGIA
+# CONFIGURACIÓN
 # ============================================================
 
-MIN_CANDLES = 20
-
+# Cantidad de velas utilizadas para determinar la estructura
 TREND_LOOKBACK = 15
 
-MIN_TREND_SCORE = 5
+# Mínimo de puntos necesarios en la estructura
+MIN_STRUCTURE_SCORE = 5
 
+# Mínimo score final para generar señal
+MIN_FINAL_SCORE = 8
+
+# Velas utilizadas para comprobar continuidad reciente
+CONTINUITY_LOOKBACK = 6
+
+# Velas utilizadas para detectar agotamiento
+EXHAUSTION_LOOKBACK = 8
+
+# Velas utilizadas para soporte/resistencia
+SR_LOOKBACK = 20
+
+# ATR
+ATR_PERIOD = 14
+
+# Máximo movimiento permitido de la vela de confirmación
 MAX_CONFIRMATION_RANGE_ATR = 1.60
 
 MAX_CONFIRMATION_BODY_ATR = 1.20
 
-SR_LOOKBACK = 20
-
+# Tolerancia para soporte/resistencia
 SR_TOLERANCE_ATR = 0.35
 
 
@@ -28,6 +43,7 @@ SR_TOLERANCE_ATR = 0.35
 def safe_float(value, default=0.0):
 
     try:
+
         value = float(value)
 
         if np.isnan(value):
@@ -36,6 +52,7 @@ def safe_float(value, default=0.0):
         return value
 
     except Exception:
+
         return default
 
 
@@ -56,14 +73,14 @@ def prepare_dataframe(df):
 
     data = df.copy()
 
-    required = [
+    required_columns = [
         "open",
         "high",
         "low",
         "close"
     ]
 
-    for column in required:
+    for column in required_columns:
 
         if column not in data.columns:
             return None
@@ -74,17 +91,18 @@ def prepare_dataframe(df):
         )
 
     data.dropna(
-        subset=required,
+        subset=required_columns,
         inplace=True
     )
-
-    if len(data) < MIN_CANDLES:
-        return None
 
     data.reset_index(
         drop=True,
         inplace=True
     )
+
+    if len(data) < TREND_LOOKBACK + 1:
+
+        return None
 
     return data
 
@@ -93,7 +111,10 @@ def prepare_dataframe(df):
 # ATR
 # ============================================================
 
-def calculate_atr(df, period=14):
+def calculate_atr(
+    df,
+    period=ATR_PERIOD
+):
 
     high = df["high"]
 
@@ -130,22 +151,10 @@ def calculate_atr(df, period=14):
 
 
 # ============================================================
-# EMA
+# DATOS DE UNA VELA
 # ============================================================
 
-def calculate_ema(df, period):
-
-    return df["close"].ewm(
-        span=period,
-        adjust=False
-    ).mean()
-
-
-# ============================================================
-# DATOS DE VELA
-# ============================================================
-
-def candle_data(candle):
+def get_candle_data(candle):
 
     open_price = safe_float(
         candle["open"]
@@ -173,11 +182,17 @@ def candle_data(candle):
 
     upper_wick = (
         high_price
-        - max(open_price, close_price)
+        - max(
+            open_price,
+            close_price
+        )
     )
 
     lower_wick = (
-        min(open_price, close_price)
+        min(
+            open_price,
+            close_price
+        )
         - low_price
     )
 
@@ -187,21 +202,19 @@ def candle_data(candle):
             body / candle_range
         )
 
-        upper_ratio = (
+        upper_wick_ratio = (
             upper_wick / candle_range
         )
 
-        lower_ratio = (
+        lower_wick_ratio = (
             lower_wick / candle_range
         )
 
     else:
 
-        body_ratio = 0
-
-        upper_ratio = 0
-
-        lower_ratio = 0
+        body_ratio = 0.0
+        upper_wick_ratio = 0.0
+        lower_wick_ratio = 0.0
 
     return {
         "open": open_price,
@@ -213,8 +226,8 @@ def candle_data(candle):
         "upper_wick": upper_wick,
         "lower_wick": lower_wick,
         "body_ratio": body_ratio,
-        "upper_ratio": upper_ratio,
-        "lower_ratio": lower_ratio
+        "upper_wick_ratio": upper_wick_ratio,
+        "lower_wick_ratio": lower_wick_ratio
     }
 
 
@@ -225,16 +238,24 @@ def candle_data(candle):
 def candle_direction(candle):
 
     if candle["close"] > candle["open"]:
-        return "bull"
+        return "bullish"
 
     if candle["close"] < candle["open"]:
-        return "bear"
+        return "bearish"
 
     return "neutral"
 
 
 # ============================================================
-# ESTRUCTURA DE 15 VELAS
+# ANALIZAR ESTRUCTURA
+#
+# MÁXIMO 5 PUNTOS
+#
+# 1. Máximos
+# 2. Mínimos
+# 3. Desplazamiento
+# 4. Continuidad
+# 5. Consistencia
 # ============================================================
 
 def analyze_structure(df):
@@ -266,28 +287,35 @@ def analyze_structure(df):
         "close"
     ].to_numpy()
 
-    higher_highs = 0
-    higher_lows = 0
+    bullish_hh = 0
+    bullish_hl = 0
 
-    lower_highs = 0
-    lower_lows = 0
-
-    for i in range(1, len(candles)):
-
-        if highs[i] > highs[i - 1]:
-            higher_highs += 1
-
-        elif highs[i] < highs[i - 1]:
-            lower_highs += 1
-
-        if lows[i] > lows[i - 1]:
-            higher_lows += 1
-
-        elif lows[i] < lows[i - 1]:
-            lower_lows += 1
+    bearish_lh = 0
+    bearish_ll = 0
 
     # --------------------------------------------------------
-    # PENDIENTE DEL PRECIO
+    # CONTAR ESTRUCTURA
+    # --------------------------------------------------------
+
+    for i in range(
+        1,
+        len(candles)
+    ):
+
+        if highs[i] > highs[i - 1]:
+            bullish_hh += 1
+
+        elif highs[i] < highs[i - 1]:
+            bearish_lh += 1
+
+        if lows[i] > lows[i - 1]:
+            bullish_hl += 1
+
+        elif lows[i] < lows[i - 1]:
+            bearish_ll += 1
+
+    # --------------------------------------------------------
+    # DESPLAZAMIENTO
     # --------------------------------------------------------
 
     first_close = closes[0]
@@ -298,70 +326,144 @@ def analyze_structure(df):
         last_close - first_close
     )
 
-    if first_close != 0:
-
-        percentage_change = (
-            price_change
-            / first_close
-        )
-
-    else:
-
-        percentage_change = 0
-
     # --------------------------------------------------------
-    # SCORE ALCISTA
+    # PUNTAJE ALCISTA
     # --------------------------------------------------------
 
     bullish_score = 0
 
-    if higher_highs >= 7:
-        bullish_score += 2
+    # Punto 1: máximos crecientes
+    if bullish_hh >= 7:
 
-    elif higher_highs >= 5:
         bullish_score += 1
 
-    if higher_lows >= 7:
-        bullish_score += 2
+    # Punto 2: mínimos crecientes
+    if bullish_hl >= 7:
 
-    elif higher_lows >= 5:
         bullish_score += 1
 
+    # Punto 3: desplazamiento
     if price_change > 0:
+
         bullish_score += 1
 
     # --------------------------------------------------------
-    # SCORE BAJISTA
+    # CONTINUIDAD DE LOS ÚLTIMOS MOVIMIENTOS
+    # --------------------------------------------------------
+
+    recent = candles.tail(
+        CONTINUITY_LOOKBACK
+    )
+
+    recent_closes = (
+        recent["close"].to_numpy()
+    )
+
+    bullish_moves = 0
+
+    bearish_moves = 0
+
+    for i in range(
+        1,
+        len(recent_closes)
+    ):
+
+        if (
+            recent_closes[i]
+            > recent_closes[i - 1]
+        ):
+
+            bullish_moves += 1
+
+        elif (
+            recent_closes[i]
+            < recent_closes[i - 1]
+        ):
+
+            bearish_moves += 1
+
+    # Punto 4
+    if bullish_moves >= 3:
+
+        bullish_score += 1
+
+    # Punto 5: consistencia
+    bullish_candles = 0
+
+    for _, candle in candles.iterrows():
+
+        if (
+            candle["close"]
+            > candle["open"]
+        ):
+
+            bullish_candles += 1
+
+    if bullish_candles >= 8:
+
+        bullish_score += 1
+
+    # --------------------------------------------------------
+    # PUNTAJE BAJISTA
     # --------------------------------------------------------
 
     bearish_score = 0
 
-    if lower_highs >= 7:
-        bearish_score += 2
+    # Punto 1
+    if bearish_lh >= 7:
 
-    elif lower_highs >= 5:
         bearish_score += 1
 
-    if lower_lows >= 7:
-        bearish_score += 2
+    # Punto 2
+    if bearish_ll >= 7:
 
-    elif lower_lows >= 5:
         bearish_score += 1
 
+    # Punto 3
     if price_change < 0:
+
+        bearish_score += 1
+
+    # Punto 4
+    if bearish_moves >= 3:
+
+        bearish_score += 1
+
+    # Punto 5
+    bearish_candles = 0
+
+    for _, candle in candles.iterrows():
+
+        if (
+            candle["close"]
+            < candle["open"]
+        ):
+
+            bearish_candles += 1
+
+    if bearish_candles >= 8:
+
         bearish_score += 1
 
     # --------------------------------------------------------
     # DETERMINAR DIRECCIÓN
     # --------------------------------------------------------
 
-    if bullish_score >= MIN_TREND_SCORE:
+    if (
+        bullish_score >= MIN_STRUCTURE_SCORE
+        and
+        bullish_score > bearish_score
+    ):
 
         direction = "bullish"
 
         score = bullish_score
 
-    elif bearish_score >= MIN_TREND_SCORE:
+    elif (
+        bearish_score >= MIN_STRUCTURE_SCORE
+        and
+        bearish_score > bullish_score
+    ):
 
         direction = "bearish"
 
@@ -379,313 +481,229 @@ def analyze_structure(df):
     return {
         "direction": direction,
         "score": score,
-        "higher_highs": higher_highs,
-        "higher_lows": higher_lows,
-        "lower_highs": lower_highs,
-        "lower_lows": lower_lows,
-        "price_change": price_change,
-        "percentage_change": percentage_change
+
+        "bullish_score": bullish_score,
+        "bearish_score": bearish_score,
+
+        "higher_highs": bullish_hh,
+        "higher_lows": bullish_hl,
+
+        "lower_highs": bearish_lh,
+        "lower_lows": bearish_ll,
+
+        "price_change": price_change
     }
 
 
 # ============================================================
-# FUERZA GENERAL DE LA TENDENCIA
+# CONTINUIDAD RECIENTE
 # ============================================================
 
-def trend_strength(df, direction):
+def check_continuity(
+    df,
+    direction
+):
 
-    candles = df.tail(
-        TREND_LOOKBACK
-    )
+    if len(df) < CONTINUITY_LOOKBACK:
 
-    if len(candles) < TREND_LOOKBACK:
-        return 0
-
-    bullish = 0
-
-    bearish = 0
-
-    for _, candle in candles.iterrows():
-
-        if candle["close"] > candle["open"]:
-            bullish += 1
-
-        elif candle["close"] < candle["open"]:
-            bearish += 1
-
-    if direction == "bullish":
-
-        return bullish
-
-    if direction == "bearish":
-
-        return bearish
-
-    return 0
-
-
-# ============================================================
-# CONTINUIDAD DE ESTRUCTURA
-# ============================================================
-
-def continuity_check(df, direction):
-
-    if len(df) < 6:
         return False
 
-    recent = df.tail(6)
+    recent = df.tail(
+        CONTINUITY_LOOKBACK
+    )
 
-    highs = recent["high"].to_numpy()
+    highs = recent[
+        "high"
+    ].to_numpy()
 
-    lows = recent["low"].to_numpy()
+    lows = recent[
+        "low"
+    ].to_numpy()
 
-    closes = recent["close"].to_numpy()
+    closes = recent[
+        "close"
+    ].to_numpy()
 
     if direction == "bullish":
 
-        hh = 0
-        hl = 0
+        higher_highs = 0
+        higher_lows = 0
 
-        for i in range(1, len(recent)):
+        for i in range(
+            1,
+            len(recent)
+        ):
 
             if highs[i] >= highs[i - 1]:
-                hh += 1
+
+                higher_highs += 1
 
             if lows[i] >= lows[i - 1]:
-                hl += 1
 
-        price_up = (
-            closes[-1] > closes[0]
+                higher_lows += 1
+
+        price_continues = (
+            closes[-1]
+            > closes[0]
         )
 
         return (
-            hh >= 3
-            and hl >= 3
-            and price_up
+            higher_highs >= 3
+            and
+            higher_lows >= 3
+            and
+            price_continues
         )
 
     if direction == "bearish":
 
-        lh = 0
-        ll = 0
+        lower_highs = 0
+        lower_lows = 0
 
-        for i in range(1, len(recent)):
+        for i in range(
+            1,
+            len(recent)
+        ):
 
             if highs[i] <= highs[i - 1]:
-                lh += 1
+
+                lower_highs += 1
 
             if lows[i] <= lows[i - 1]:
-                ll += 1
 
-        price_down = (
-            closes[-1] < closes[0]
+                lower_lows += 1
+
+        price_continues = (
+            closes[-1]
+            < closes[0]
         )
 
         return (
-            lh >= 3
-            and ll >= 3
-            and price_down
+            lower_highs >= 3
+            and
+            lower_lows >= 3
+            and
+            price_continues
         )
 
     return False
 
 
 # ============================================================
-# ANALIZAR VELA DE CONFIRMACIÓN CERRADA
+# FINAL DE TENDENCIA / AGOTAMIENTO
 # ============================================================
 
-def analyze_confirmation_candle(
+def detect_end_of_trend(
     df,
     direction
 ):
 
-    # --------------------------------------------------------
-    # IMPORTANTE:
-    #
-    # df contiene velas cerradas entregadas por IQ Option.
-    #
-    # La última vela se utiliza como confirmación.
-    # --------------------------------------------------------
+    if len(df) < EXHAUSTION_LOOKBACK:
 
-    if len(df) < 16:
+        return False
 
-        return {
-            "valid": False,
-            "reason": "No hay suficientes velas"
-        }
-
-    confirmation = df.iloc[-1]
-
-    previous = df.iloc[-2]
-
-    data = candle_data(
-        confirmation
+    recent = df.tail(
+        EXHAUSTION_LOOKBACK
     )
 
-    previous_data = candle_data(
-        previous
+    last = get_candle_data(
+        recent.iloc[-1]
     )
 
-    atr_series = calculate_atr(
-        df
+    previous = get_candle_data(
+        recent.iloc[-2]
     )
 
-    atr = safe_float(
-        atr_series.iloc[-1]
-    )
-
-    if atr <= 0:
-
-        return {
-            "valid": False,
-            "reason": "ATR inválido"
-        }
-
-    # --------------------------------------------------------
-    # MOVIMIENTO DE LA VELA
-    # --------------------------------------------------------
-
-    range_atr = (
-        data["range"] / atr
-    )
-
-    body_atr = (
-        data["body"] / atr
-    )
-
-    # --------------------------------------------------------
-    # CALL
-    # --------------------------------------------------------
+    # ========================================================
+    # ALCISTA
+    # ========================================================
 
     if direction == "bullish":
 
-        correct_direction = (
-            data["close"]
-            > data["open"]
-        )
+        # Rechazo superior
+        if (
+            last["upper_wick_ratio"]
+            >= 0.55
+        ):
 
-        good_body = (
-            data["body_ratio"]
-            >= 0.35
-        )
+            return True
 
-        not_excessive = (
-            range_atr
-            <= MAX_CONFIRMATION_RANGE_ATR
-        )
+        # Vela demasiado pequeña
+        if (
+            last["body_ratio"]
+            < 0.20
+        ):
 
-        body_not_excessive = (
-            body_atr
-            <= MAX_CONFIRMATION_BODY_ATR
-        )
+            return True
 
-        weak_upper_wick = (
-            data["upper_ratio"]
-            <= 0.45
-        )
+        # Dos velas débiles consecutivas
+        if (
+            previous["body_ratio"]
+            < 0.25
+            and
+            last["body_ratio"]
+            < 0.25
+        ):
 
-        previous_support = (
-            previous_data["close"]
-            >= previous_data["open"]
-            or
-            previous_data["close"]
-            >= previous_data["low"]
-        )
+            return True
 
-        valid = (
-            correct_direction
-            and good_body
-            and not_excessive
-            and body_not_excessive
-            and weak_upper_wick
-        )
+        # Último cierre perdiendo estructura
+        if (
+            last["close"]
+            < previous["low"]
+        ):
 
-        if not valid:
+            return True
 
-            return {
-                "valid": False,
-                "reason":
-                    "Confirmación CALL débil o movimiento excesivo",
-                "range_atr": range_atr,
-                "body_atr": body_atr
-            }
-
-        return {
-            "valid": True,
-            "reason":
-                "Vela de confirmación CALL cerrada correctamente",
-            "range_atr": range_atr,
-            "body_atr": body_atr
-        }
-
-    # --------------------------------------------------------
-    # PUT
-    # --------------------------------------------------------
+    # ========================================================
+    # BAJISTA
+    # ========================================================
 
     if direction == "bearish":
 
-        correct_direction = (
-            data["close"]
-            < data["open"]
-        )
+        # Rechazo inferior
+        if (
+            last["lower_wick_ratio"]
+            >= 0.55
+        ):
 
-        good_body = (
-            data["body_ratio"]
-            >= 0.35
-        )
+            return True
 
-        not_excessive = (
-            range_atr
-            <= MAX_CONFIRMATION_RANGE_ATR
-        )
+        # Vela demasiado pequeña
+        if (
+            last["body_ratio"]
+            < 0.20
+        ):
 
-        body_not_excessive = (
-            body_atr
-            <= MAX_CONFIRMATION_BODY_ATR
-        )
+            return True
 
-        weak_lower_wick = (
-            data["lower_ratio"]
-            <= 0.45
-        )
+        # Dos velas débiles
+        if (
+            previous["body_ratio"]
+            < 0.25
+            and
+            last["body_ratio"]
+            < 0.25
+        ):
 
-        valid = (
-            correct_direction
-            and good_body
-            and not_excessive
-            and body_not_excessive
-            and weak_lower_wick
-        )
+            return True
 
-        if not valid:
+        # Pérdida de estructura
+        if (
+            last["close"]
+            > previous["high"]
+        ):
 
-            return {
-                "valid": False,
-                "reason":
-                    "Confirmación PUT débil o movimiento excesivo",
-                "range_atr": range_atr,
-                "body_atr": body_atr
-            }
+            return True
 
-        return {
-            "valid": True,
-            "reason":
-                "Vela de confirmación PUT cerrada correctamente",
-            "range_atr": range_atr,
-            "body_atr": body_atr
-        }
-
-    return {
-        "valid": False,
-        "reason": "Dirección inválida"
-    }
+    return False
 
 
 # ============================================================
 # SOPORTE / RESISTENCIA
 # ============================================================
 
-def support_resistance_check(
+def check_support_resistance(
     df,
     direction
 ):
@@ -694,7 +712,7 @@ def support_resistance_check(
 
         return {
             "blocked": False,
-            "reason": "Sin suficientes datos"
+            "reason": "Datos insuficientes"
         }
 
     atr_series = calculate_atr(
@@ -708,7 +726,7 @@ def support_resistance_check(
     if atr <= 0:
 
         return {
-            "blocked": False,
+            "blocked": True,
             "reason": "ATR inválido"
         }
 
@@ -716,16 +734,31 @@ def support_resistance_check(
         df.iloc[-1]["close"]
     )
 
-    recent = df.tail(
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    # No utilizamos la vela de confirmación para crear
+    # artificialmente un nivel extremo de soporte/resistencia.
+    # --------------------------------------------------------
+
+    historical = df.iloc[
+        :-1
+    ].tail(
         SR_LOOKBACK
     )
 
+    if historical.empty:
+
+        return {
+            "blocked": False,
+            "reason": "Sin niveles suficientes"
+        }
+
     resistance = safe_float(
-        recent["high"].max()
+        historical["high"].max()
     )
 
     support = safe_float(
-        recent["low"].min()
+        historical["low"].min()
     )
 
     tolerance = (
@@ -748,9 +781,9 @@ def support_resistance_check(
         <= tolerance
     )
 
-    # --------------------------------------------------------
-    # CALL NO ENTRA EN RESISTENCIA
-    # --------------------------------------------------------
+    # ========================================================
+    # CALL
+    # ========================================================
 
     if direction == "bullish":
 
@@ -759,12 +792,12 @@ def support_resistance_check(
             return {
                 "blocked": True,
                 "reason":
-                    "Precio demasiado cerca de resistencia"
+                    "CALL bloqueado: zona de resistencia"
             }
 
-    # --------------------------------------------------------
-    # PUT NO ENTRA EN SOPORTE
-    # --------------------------------------------------------
+    # ========================================================
+    # PUT
+    # ========================================================
 
     if direction == "bearish":
 
@@ -773,7 +806,7 @@ def support_resistance_check(
             return {
                 "blocked": True,
                 "reason":
-                    "Precio demasiado cerca de soporte"
+                    "PUT bloqueado: zona de soporte"
             }
 
     return {
@@ -783,100 +816,423 @@ def support_resistance_check(
 
 
 # ============================================================
-# DETECTAR FINAL DE TENDENCIA
+# SCORE DE VELA DE CONFIRMACIÓN
+#
+# MÁXIMO 5 PUNTOS
+#
+# 1. Dirección
+# 2. Cuerpo
+# 3. Cierre
+# 4. Mecha
+# 5. Movimiento
 # ============================================================
 
-def end_of_trend_check(
+def confirmation_score(
     df,
     direction
 ):
 
-    if len(df) < 8:
+    if len(df) < 2:
 
-        return True
+        return {
+            "score": 0,
+            "valid": False,
+            "reason": "Sin vela de confirmación"
+        }
 
-    recent = df.tail(8)
+    confirmation = df.iloc[-1]
+
+    candle = get_candle_data(
+        confirmation
+    )
 
     # --------------------------------------------------------
+    # ATR
+    # --------------------------------------------------------
+
+    atr_series = calculate_atr(
+        df
+    )
+
+    atr = safe_float(
+        atr_series.iloc[-1]
+    )
+
+    if atr <= 0:
+
+        return {
+            "score": 0,
+            "valid": False,
+            "reason": "ATR inválido"
+        }
+
+    range_atr = (
+        candle["range"]
+        / atr
+    )
+
+    body_atr = (
+        candle["body"]
+        / atr
+    )
+
+    score = 0
+
+    reasons = []
+
+    # ========================================================
     # CALL
+    # ========================================================
+
+    if direction == "bullish":
+
+        # ----------------------------------------------------
+        # 1. Cierre alcista
+        # ----------------------------------------------------
+
+        if (
+            candle["close"]
+            > candle["open"]
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "La vela no cerró alcista"
+            )
+
+        # ----------------------------------------------------
+        # 2. Cuerpo adecuado
+        # ----------------------------------------------------
+
+        if (
+            candle["body_ratio"]
+            >= 0.35
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Cuerpo insuficiente"
+            )
+
+        # ----------------------------------------------------
+        # 3. Cierre cerca de máximos
+        # ----------------------------------------------------
+
+        close_position = 0
+
+        if candle["range"] > 0:
+
+            close_position = (
+                (
+                    candle["close"]
+                    - candle["low"]
+                )
+                / candle["range"]
+            )
+
+        if close_position >= 0.65:
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Cierre no suficientemente alto"
+            )
+
+        # ----------------------------------------------------
+        # 4. Mecha superior controlada
+        # ----------------------------------------------------
+
+        if (
+            candle["upper_wick_ratio"]
+            <= 0.45
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Rechazo superior"
+            )
+
+        # ----------------------------------------------------
+        # 5. Movimiento controlado
+        # ----------------------------------------------------
+
+        if (
+            range_atr
+            <= MAX_CONFIRMATION_RANGE_ATR
+            and
+            body_atr
+            <= MAX_CONFIRMATION_BODY_ATR
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Movimiento excesivamente fuerte"
+            )
+
+    # ========================================================
+    # PUT
+    # ========================================================
+
+    elif direction == "bearish":
+
+        # ----------------------------------------------------
+        # 1. Cierre bajista
+        # ----------------------------------------------------
+
+        if (
+            candle["close"]
+            < candle["open"]
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "La vela no cerró bajista"
+            )
+
+        # ----------------------------------------------------
+        # 2. Cuerpo adecuado
+        # ----------------------------------------------------
+
+        if (
+            candle["body_ratio"]
+            >= 0.35
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Cuerpo insuficiente"
+            )
+
+        # ----------------------------------------------------
+        # 3. Cierre cerca de mínimos
+        # ----------------------------------------------------
+
+        close_position = 0
+
+        if candle["range"] > 0:
+
+            close_position = (
+                (
+                    candle["high"]
+                    - candle["close"]
+                )
+                / candle["range"]
+            )
+
+        if close_position >= 0.65:
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Cierre no suficientemente bajo"
+            )
+
+        # ----------------------------------------------------
+        # 4. Mecha inferior controlada
+        # ----------------------------------------------------
+
+        if (
+            candle["lower_wick_ratio"]
+            <= 0.45
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Rechazo inferior"
+            )
+
+        # ----------------------------------------------------
+        # 5. Movimiento controlado
+        # ----------------------------------------------------
+
+        if (
+            range_atr
+            <= MAX_CONFIRMATION_RANGE_ATR
+            and
+            body_atr
+            <= MAX_CONFIRMATION_BODY_ATR
+        ):
+
+            score += 1
+
+        else:
+
+            reasons.append(
+                "Movimiento excesivamente fuerte"
+            )
+
+    else:
+
+        return {
+            "score": 0,
+            "valid": False,
+            "reason": "Dirección inválida"
+        }
+
+    # --------------------------------------------------------
+    # VALIDACIÓN
+    # --------------------------------------------------------
+
+    valid = (
+        score >= 4
+    )
+
+    if reasons:
+
+        reason = " | ".join(
+            reasons
+        )
+
+    else:
+
+        reason = (
+            "Confirmación completa"
+        )
+
+    return {
+        "score": score,
+        "valid": valid,
+        "reason": reason,
+        "range_atr": range_atr,
+        "body_atr": body_atr
+    }
+
+
+# ============================================================
+# ANALIZAR MOVIMIENTO COMPLETO DE LA VELA
+# ============================================================
+
+def analyze_confirmation_movement(
+    df,
+    direction
+):
+
+    if len(df) < 2:
+
+        return {
+            "valid": False,
+            "reason": "Sin datos"
+        }
+
+    candle = df.iloc[-1]
+
+    data = get_candle_data(
+        candle
+    )
+
+    atr_series = calculate_atr(
+        df
+    )
+
+    atr = safe_float(
+        atr_series.iloc[-1]
+    )
+
+    if atr <= 0:
+
+        return {
+            "valid": False,
+            "reason": "ATR inválido"
+        }
+
+    range_atr = (
+        data["range"]
+        / atr
+    )
+
+    body_atr = (
+        data["body"]
+        / atr
+    )
+
+    # --------------------------------------------------------
+    # Movimiento excesivo
+    # --------------------------------------------------------
+
+    if (
+        range_atr
+        > MAX_CONFIRMATION_RANGE_ATR
+    ):
+
+        return {
+            "valid": False,
+            "reason":
+                "La vela tuvo un movimiento excesivamente fuerte"
+        }
+
+    if (
+        body_atr
+        > MAX_CONFIRMATION_BODY_ATR
+    ):
+
+        return {
+            "valid": False,
+            "reason":
+                "El cuerpo de la vela fue excesivamente fuerte"
+        }
+
+    # --------------------------------------------------------
+    # Rechazo
     # --------------------------------------------------------
 
     if direction == "bullish":
 
-        last = candle_data(
-            recent.iloc[-1]
-        )
-
-        previous = candle_data(
-            recent.iloc[-2]
-        )
-
-        # Mecha superior excesiva
         if (
-            last["upper_ratio"]
-            > 0.55
+            data["upper_wick_ratio"]
+            > 0.45
         ):
 
-            return True
-
-        # Cuerpo demasiado pequeño
-        if (
-            last["body_ratio"]
-            < 0.20
-        ):
-
-            return True
-
-        # Dos velas con pérdida de fuerza
-        if (
-            previous["body_ratio"]
-            < 0.25
-            and
-            last["body_ratio"]
-            < 0.25
-        ):
-
-            return True
-
-    # --------------------------------------------------------
-    # PUT
-    # --------------------------------------------------------
+            return {
+                "valid": False,
+                "reason":
+                    "La vela terminó con rechazo superior"
+            }
 
     if direction == "bearish":
 
-        last = candle_data(
-            recent.iloc[-1]
-        )
-
-        previous = candle_data(
-            recent.iloc[-2]
-        )
-
         if (
-            last["lower_ratio"]
-            > 0.55
+            data["lower_wick_ratio"]
+            > 0.45
         ):
 
-            return True
+            return {
+                "valid": False,
+                "reason":
+                    "La vela terminó con rechazo inferior"
+            }
 
-        if (
-            last["body_ratio"]
-            < 0.20
-        ):
-
-            return True
-
-        if (
-            previous["body_ratio"]
-            < 0.25
-            and
-            last["body_ratio"]
-            < 0.25
-        ):
-
-            return True
-
-    return False
+    return {
+        "valid": True,
+        "reason":
+            "Movimiento de confirmación controlado",
+        "range_atr": range_atr,
+        "body_atr": body_atr
+    }
 
 
 # ============================================================
@@ -885,20 +1241,29 @@ def end_of_trend_check(
 
 def analyze_market(df):
 
-    # --------------------------------------------------------
+    # ========================================================
     # RESPUESTA ESTÁNDAR
-    # --------------------------------------------------------
+    # ========================================================
 
     result = {
         "signal": None,
+
         "direction": "range",
+
         "reason": "Sin señal",
-        "score": 0
+
+        "score": 0,
+
+        "structure_score": 0,
+
+        "confirmation_score": 0,
+
+        "final_score": 0
     }
 
-    # --------------------------------------------------------
-    # PREPARAR
-    # --------------------------------------------------------
+    # ========================================================
+    # PREPARAR DATOS
+    # ========================================================
 
     data = prepare_dataframe(
         df
@@ -912,9 +1277,9 @@ def analyze_market(df):
 
         return result
 
-    # --------------------------------------------------------
+    # ========================================================
     # ESTRUCTURA
-    # --------------------------------------------------------
+    # ========================================================
 
     structure = analyze_structure(
         data
@@ -924,17 +1289,23 @@ def analyze_market(df):
         "direction"
     ]
 
-    score = structure[
+    structure_score = structure[
         "score"
     ]
 
     result["direction"] = direction
 
-    result["score"] = score
+    result["structure_score"] = (
+        structure_score
+    )
 
-    # --------------------------------------------------------
+    result["score"] = (
+        structure_score
+    )
+
+    # ========================================================
     # SIN TENDENCIA CLARA
-    # --------------------------------------------------------
+    # ========================================================
 
     if direction == "range":
 
@@ -944,55 +1315,56 @@ def analyze_market(df):
 
         return result
 
-    # --------------------------------------------------------
-    # SCORE MÍNIMO
-    # --------------------------------------------------------
+    # ========================================================
+    # ESTRUCTURA INSUFICIENTE
+    # ========================================================
 
-    if score < MIN_TREND_SCORE:
+    if (
+        structure_score
+        < MIN_STRUCTURE_SCORE
+    ):
 
         result["reason"] = (
-            "Tendencia insuficiente"
+            "Estructura insuficiente"
         )
 
         return result
 
-    # --------------------------------------------------------
+    # ========================================================
     # CONTINUIDAD
-    # --------------------------------------------------------
+    # ========================================================
 
-    continuity = continuity_check(
-        data,
-        direction
-    )
-
-    if not continuity:
-
-        result["reason"] = (
-            "No existe continuidad estructural"
-        )
-
-        return result
-
-    # --------------------------------------------------------
-    # FINAL DE TENDENCIA
-    # --------------------------------------------------------
-
-    if end_of_trend_check(
+    if not check_continuity(
         data,
         direction
     ):
 
         result["reason"] = (
-            "Final de tendencia / pérdida de fuerza"
+            "No existe continuidad"
         )
 
         return result
 
-    # --------------------------------------------------------
-    # SOPORTE / RESISTENCIA
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL DE TENDENCIA
+    # ========================================================
 
-    sr = support_resistance_check(
+    if detect_end_of_trend(
+        data,
+        direction
+    ):
+
+        result["reason"] = (
+            "Posible final de tendencia o agotamiento"
+        )
+
+        return result
+
+    # ========================================================
+    # SOPORTE / RESISTENCIA
+    # ========================================================
+
+    sr = check_support_resistance(
         data,
         direction
     )
@@ -1005,28 +1377,91 @@ def analyze_market(df):
 
         return result
 
-    # --------------------------------------------------------
-    # VELA DE CONFIRMACIÓN CERRADA
-    # --------------------------------------------------------
+    # ========================================================
+    # MOVIMIENTO DE LA VELA
+    # ========================================================
 
-    confirmation = (
-        analyze_confirmation_candle(
+    movement = (
+        analyze_confirmation_movement(
             data,
             direction
         )
     )
 
-    if not confirmation["valid"]:
+    if not movement["valid"]:
 
         result["reason"] = (
-            confirmation["reason"]
+            movement["reason"]
         )
 
         return result
 
-    # --------------------------------------------------------
-    # SEÑAL FINAL
-    # --------------------------------------------------------
+    # ========================================================
+    # SCORE DE CONFIRMACIÓN
+    # ========================================================
+
+    confirmation = (
+        confirmation_score(
+            data,
+            direction
+        )
+    )
+
+    confirmation_score_value = (
+        confirmation["score"]
+    )
+
+    result["confirmation_score"] = (
+        confirmation_score_value
+    )
+
+    # ========================================================
+    # SCORE FINAL
+    # ========================================================
+
+    final_score = (
+        structure_score
+        + confirmation_score_value
+    )
+
+    result["final_score"] = (
+        final_score
+    )
+
+    result["score"] = (
+        final_score
+    )
+
+    # ========================================================
+    # CONFIRMACIÓN INSUFICIENTE
+    # ========================================================
+
+    if not confirmation["valid"]:
+
+        result["reason"] = (
+            "Vela de confirmación insuficiente | "
+            + confirmation["reason"]
+        )
+
+        return result
+
+    # ========================================================
+    # SCORE FINAL INSUFICIENTE
+    # ========================================================
+
+    if final_score < MIN_FINAL_SCORE:
+
+        result["reason"] = (
+            "Score final insuficiente: "
+            + str(final_score)
+            + "/10"
+        )
+
+        return result
+
+    # ========================================================
+    # SEÑAL CALL
+    # ========================================================
 
     if direction == "bullish":
 
@@ -1034,13 +1469,26 @@ def analyze_market(df):
 
         result["reason"] = (
             "CONTINUIDAD CALL CONFIRMADA | "
-            "15 velas con estructura alcista | "
-            "vela de confirmación cerrada | "
-            "movimiento no excesivo | "
-            "ubicación válida"
+            "Estructura "
+            + str(structure_score)
+            + "/5 | "
+            "Confirmación "
+            + str(confirmation_score_value)
+            + "/5 | "
+            "FINAL "
+            + str(final_score)
+            + "/10 | "
+            "Sin rechazo | "
+            "Sin soporte/resistencia | "
+            "Sin agotamiento | "
+            "Movimiento controlado"
         )
 
         return result
+
+    # ========================================================
+    # SEÑAL PUT
+    # ========================================================
 
     if direction == "bearish":
 
@@ -1048,12 +1496,36 @@ def analyze_market(df):
 
         result["reason"] = (
             "CONTINUIDAD PUT CONFIRMADA | "
-            "15 velas con estructura bajista | "
-            "vela de confirmación cerrada | "
-            "movimiento no excesivo | "
-            "ubicación válida"
+            "Estructura "
+            + str(structure_score)
+            + "/5 | "
+            "Confirmación "
+            + str(confirmation_score_value)
+            + "/5 | "
+            "FINAL "
+            + str(final_score)
+            + "/10 | "
+            "Sin rechazo | "
+            "Sin soporte/resistencia | "
+            "Sin agotamiento | "
+            "Movimiento controlado"
         )
 
         return result
 
+    # ========================================================
+    # SEGURIDAD
+    # ========================================================
+
+    result["signal"] = None
+
+    result["reason"] = (
+        "Sin señal válida"
+    )
+
     return result
+
+
+# ============================================================
+# FIN DE strategy.py
+# ============================================================
