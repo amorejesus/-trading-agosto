@@ -38,9 +38,17 @@ CANDLE_COUNT = 60
 # ============================================================
 
 PAIRS = [
-    "EURUSD-OTC",
-    "GBPUSD-OTC",
-    "EURJPY-OTC",
+    "USDCLP-OTC",
+    "USDCOP-OTC",
+    "USDDOP-OTC",
+    "USDHKD-OTC",
+    "USDIDR-OTC",
+    "USDINR-OTC",
+    "USDMXN-OTC",
+    "USDMYR-OTC",
+    "USDNGN-OTC",
+    "USDPLN-OTC",
+    "USDZAR-OTC",
 ]
 
 
