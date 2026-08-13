@@ -38,8 +38,8 @@ CANDLE_COUNT = 60
 # ============================================================
 
 PAIRS = [
-    "USDCLP-OTC",
-    "USDPLN-OTC",
+    "AUDUSD-OTC",
+    "EURCHF-OTC",
     "USDZAR-OTC",
 ]
 
