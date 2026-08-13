@@ -39,14 +39,6 @@ CANDLE_COUNT = 60
 
 PAIRS = [
     "USDCLP-OTC",
-    "USDCOP-OTC",
-    "USDDOP-OTC",
-    "USDHKD-OTC",
-    "USDIDR-OTC",
-    "USDINR-OTC",
-    "USDMXN-OTC",
-    "USDMYR-OTC",
-    "USDNGN-OTC",
     "USDPLN-OTC",
     "USDZAR-OTC",
 ]
