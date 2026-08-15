@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
+
 import pandas as pd
 import requests
 from iqoptionapi.stable_api import IQ_Option
