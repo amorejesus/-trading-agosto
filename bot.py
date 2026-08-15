@@ -45,7 +45,7 @@ PAIRS = [
 
 
 # ============================================================
-# CONTROL
+# CONTROL DEL BOT
 # ============================================================
 
 BOT_RUNNING = False
@@ -74,35 +74,10 @@ PENDING_SIGNALS = {}
 
 
 # ============================================================
-# ESTADO INTRAVELA
-# ============================================================
-
-INTRABAR_STATE = {}
-
-
-# ============================================================
 # COOLDOWN
 # ============================================================
 
 TRADE_COOLDOWN = 60
-
-
-# ============================================================
-# VENTANA DE EJECUCIÓN
-# ============================================================
-
-EXECUTION_SECOND_START = 1
-
-EXECUTION_SECOND_END = 3
-
-
-# ============================================================
-# FILTRO DE MOVIMIENTO INICIAL
-# ============================================================
-
-MAX_OPENING_RANGE_ATR = 0.60
-
-MAX_OPENING_BODY_ATR = 0.45
 
 
 # ============================================================
@@ -122,21 +97,20 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def telegram_send(message):
+    """
+    Envía mensajes a Telegram.
+    """
 
     if not TELEGRAM_TOKEN:
-
         logger.warning(
             "TELEGRAM_TOKEN no configurado"
         )
-
         return False
 
     if not TELEGRAM_CHAT_ID:
-
         logger.warning(
             "TELEGRAM_CHAT_ID no configurado"
         )
-
         return False
 
     url = (
@@ -255,10 +229,13 @@ def check_commands():
                 )
             )
 
+            # ------------------------------------------------
+            # SEGURIDAD
+            # ------------------------------------------------
+
             if chat_id != str(
                 TELEGRAM_CHAT_ID
             ):
-
                 continue
 
             # ------------------------------------------------
@@ -274,13 +251,13 @@ def check_commands():
                     "Estrategia: CONTINUIDAD\n"
                     "Temporalidad: 1 minuto\n"
                     "Expiración: 1 minuto\n"
-                    "Importe: $10\n\n"
-                    "La vela de confirmación "
-                    "se observa durante todo su recorrido.\n\n"
-                    "La decisión se toma al cierre.\n\n"
-                    "La ejecución se realiza "
-                    "únicamente en los segundos "
-                    "01–03 de la siguiente vela."
+                    f"Importe: ${AMOUNT}\n\n"
+                    "La vela completa se analiza "
+                    "desde apertura hasta cierre.\n\n"
+                    "La decisión se toma al cierre "
+                    "de la vela de confirmación.\n\n"
+                    "La operación se intenta ejecutar "
+                    "en la apertura de la siguiente vela."
                 )
 
                 logger.info(
@@ -310,19 +287,13 @@ def check_commands():
 
             elif text == "/status":
 
-                status = (
-                    "🟢 ACTIVO"
-                    if BOT_RUNNING
-                    else
-                    "🔴 DETENIDO"
-                )
+                if BOT_RUNNING:
+                    status = "🟢 ACTIVO"
+                else:
+                    status = "🔴 DETENIDO"
 
                 pending = len(
                     PENDING_SIGNALS
-                )
-
-                intrabar = len(
-                    INTRABAR_STATE
                 )
 
                 telegram_send(
@@ -330,10 +301,10 @@ def check_commands():
                     f"Estado: {status}\n"
                     "Temporalidad: 1 minuto\n"
                     "Expiración: 1 minuto\n"
-                    "Importe: $10\n"
+                    f"Importe: ${AMOUNT}\n"
                     f"Pares: {len(PAIRS)}\n"
-                    f"Señales pendientes: {pending}\n"
-                    f"Velas observadas: {intrabar}"
+                    f"Señales pendientes: {pending}\n\n"
+                    "Entrada: apertura de nueva vela"
                 )
 
     except Exception as e:
@@ -482,6 +453,10 @@ def get_candles(pair):
         if df.empty:
             return None
 
+        # ----------------------------------------------------
+        # NORMALIZAR COLUMNAS
+        # ----------------------------------------------------
+
         df.rename(
             columns={
                 "max": "high",
@@ -509,6 +484,10 @@ def get_candles(pair):
 
                 return None
 
+        # ----------------------------------------------------
+        # CONVERTIR A NUMÉRICOS
+        # ----------------------------------------------------
+
         for column in required:
 
             df[column] = pd.to_numeric(
@@ -521,11 +500,14 @@ def get_candles(pair):
             inplace=True
         )
 
+        # ----------------------------------------------------
+        # TIMESTAMP
+        # ----------------------------------------------------
+
         if "from" not in df.columns:
 
             logger.error(
-                "IQ Option no devolvió timestamp "
-                "para %s",
+                "IQ Option no devolvió timestamp para %s",
                 pair
             )
 
@@ -544,6 +526,10 @@ def get_candles(pair):
         df["from"] = df["from"].astype(
             int
         )
+
+        # ----------------------------------------------------
+        # ORDEN CRONOLÓGICO
+        # ----------------------------------------------------
 
         df.sort_values(
             "from",
@@ -569,7 +555,7 @@ def get_candles(pair):
 
 
 # ============================================================
-# TIMESTAMP DE VELA ACTUAL
+# TIMESTAMP DE LA VELA ACTUAL
 # ============================================================
 
 def get_current_candle_timestamp():
@@ -585,230 +571,7 @@ def get_current_candle_timestamp():
 
 
 # ============================================================
-# SEGUNDO ACTUAL
-# ============================================================
-
-def get_current_second():
-
-    return int(
-        time.time() % TIMEFRAME
-    )
-
-
-# ============================================================
-# ACTUALIZAR RECORRIDO INTRAVELA
-# ============================================================
-
-def update_intrabar_state(
-    pair,
-    df
-):
-    """
-    Registra el recorrido de la vela actual.
-
-    Se ejecuta repetidamente mientras la vela
-    está en formación.
-
-    Guarda:
-
-    - apertura
-    - máximo
-    - mínimo
-    - precio actual
-    - segundo
-    - desplazamiento
-    """
-
-    if df is None or df.empty:
-        return
-
-    current_timestamp = (
-        get_current_candle_timestamp()
-    )
-
-    current = df[
-        df["from"]
-        == current_timestamp
-    ]
-
-    if current.empty:
-        return
-
-    candle = current.iloc[-1]
-
-    open_price = float(
-        candle["open"]
-    )
-
-    high_price = float(
-        candle["high"]
-    )
-
-    low_price = float(
-        candle["low"]
-    )
-
-    close_price = float(
-        candle["close"]
-    )
-
-    current_second = (
-        get_current_second()
-    )
-
-    state = INTRABAR_STATE.get(
-        pair
-    )
-
-    # ========================================================
-    # NUEVA VELA
-    # ========================================================
-
-    if (
-        state is None
-        or
-        state["timestamp"]
-        != current_timestamp
-    ):
-
-        state = {
-
-            "timestamp":
-                current_timestamp,
-
-            "open":
-                open_price,
-
-            "high":
-                high_price,
-
-            "low":
-                low_price,
-
-            "last_price":
-                close_price,
-
-            "snapshots": []
-        }
-
-        INTRABAR_STATE[pair] = state
-
-        logger.info(
-            "%s | NUEVA VELA | "
-            "open=%s",
-            pair,
-            open_price
-        )
-
-    # ========================================================
-    # ACTUALIZAR EXTREMOS
-    # ========================================================
-
-    state["high"] = max(
-        state["high"],
-        high_price
-    )
-
-    state["low"] = min(
-        state["low"],
-        low_price
-    )
-
-    state["last_price"] = (
-        close_price
-    )
-
-    # ========================================================
-    # GUARDAR SNAPSHOT
-    # ========================================================
-
-    snapshot = {
-
-        "second":
-            current_second,
-
-        "price":
-            close_price,
-
-        "open":
-            open_price,
-
-        "high":
-            high_price,
-
-        "low":
-            low_price
-    }
-
-    # --------------------------------------------------------
-    # Evitar duplicar exactamente la misma lectura
-    # --------------------------------------------------------
-
-    snapshots = state[
-        "snapshots"
-    ]
-
-    if snapshots:
-
-        previous = snapshots[-1]
-
-        if (
-            previous["second"]
-            == snapshot["second"]
-            and
-            previous["price"]
-            == snapshot["price"]
-            and
-            previous["high"]
-            == snapshot["high"]
-            and
-            previous["low"]
-            == snapshot["low"]
-        ):
-
-            return
-
-    snapshots.append(
-        snapshot
-    )
-
-    # --------------------------------------------------------
-    # Mantener tamaño razonable
-    # --------------------------------------------------------
-
-    if len(snapshots) > 70:
-
-        state["snapshots"] = (
-            snapshots[-70:]
-        )
-
-    # ========================================================
-    # LOG PERIÓDICO
-    # ========================================================
-
-    if current_second in (
-        0,
-        10,
-        20,
-        30,
-        40,
-        50
-    ):
-
-        logger.info(
-            "%s | INTRABAR %02d | "
-            "open=%s high=%s low=%s price=%s",
-            pair,
-            current_second,
-            open_price,
-            high_price,
-            low_price,
-            close_price
-        )
-
-
-# ============================================================
-# OBTENER VELAS CERRADAS
+# OBTENER VELA CERRADA
 # ============================================================
 
 def get_closed_candle_dataframe(df):
@@ -823,8 +586,14 @@ def get_closed_candle_dataframe(df):
         get_current_candle_timestamp()
     )
 
-    data = df[
-        df["from"]
+    data = df.copy()
+
+    # --------------------------------------------------------
+    # EXCLUIR VELA ACTUAL
+    # --------------------------------------------------------
+
+    data = data[
+        data["from"]
         < current_timestamp
     ].copy()
 
@@ -949,101 +718,7 @@ def calculate_atr(df):
 
 
 # ============================================================
-# MOVIMIENTO INICIAL
-# ============================================================
-
-def opening_movement_too_strong(
-    current_candle,
-    previous_df,
-    signal
-):
-
-    if current_candle is None:
-        return True
-
-    if previous_df is None:
-        return True
-
-    atr = calculate_atr(
-        previous_df
-    )
-
-    if atr is None:
-        return True
-
-    candle_open = float(
-        current_candle["open"]
-    )
-
-    candle_high = float(
-        current_candle["high"]
-    )
-
-    candle_low = float(
-        current_candle["low"]
-    )
-
-    candle_close = float(
-        current_candle["close"]
-    )
-
-    candle_range = (
-        candle_high
-        - candle_low
-    )
-
-    body = abs(
-        candle_close
-        - candle_open
-    )
-
-    if (
-        candle_range
-        > atr * MAX_OPENING_RANGE_ATR
-    ):
-
-        return True
-
-    if (
-        body
-        > atr * MAX_OPENING_BODY_ATR
-    ):
-
-        return True
-
-    if signal == "call":
-
-        movement_against = (
-            candle_open
-            - candle_low
-        )
-
-        if (
-            movement_against
-            > atr * 0.40
-        ):
-
-            return True
-
-    elif signal == "put":
-
-        movement_against = (
-            candle_high
-            - candle_open
-        )
-
-        if (
-            movement_against
-            > atr * 0.40
-        ):
-
-            return True
-
-    return False
-
-
-# ============================================================
-# GUARDAR SEÑAL
+# GUARDAR SEÑAL PENDIENTE
 # ============================================================
 
 def save_pending_signal(
@@ -1052,19 +727,39 @@ def save_pending_signal(
     confirmation_timestamp,
     confirmation_candle,
     score,
-    reason,
-    intrabar_snapshots
+    reason
 ):
+    """
+    La señal pertenece EXCLUSIVAMENTE a la siguiente vela.
+
+    confirmation_timestamp:
+        timestamp de la vela que acaba de cerrar.
+
+    execution_timestamp:
+        timestamp de la siguiente vela.
+    """
 
     execution_timestamp = (
         confirmation_timestamp
         + TIMEFRAME
     )
 
+    # --------------------------------------------------------
+    # SEGURIDAD
+    # --------------------------------------------------------
+
+    if execution_timestamp <= confirmation_timestamp:
+
+        logger.error(
+            "%s | ERROR: timestamp de ejecución inválido",
+            pair
+        )
+
+        return False
+
     PENDING_SIGNALS[pair] = {
 
-        "signal":
-            signal,
+        "signal": signal,
 
         "confirmation_timestamp":
             confirmation_timestamp,
@@ -1096,46 +791,46 @@ def save_pending_signal(
             score,
 
         "reason":
-            reason,
-
-        "intrabar_snapshots":
-            intrabar_snapshots
+            reason
     }
 
     direction_text = (
         "CALL 🟢"
         if signal == "call"
-        else
-        "PUT 🔴"
+        else "PUT 🔴"
     )
 
     telegram_send(
-        "📌 CONTINUIDAD CONFIRMADA\n\n"
+        "📌 SEÑAL CONFIRMADA\n\n"
         f"Par: {pair}\n"
         f"Dirección: {direction_text}\n\n"
+
         "VELA DE CONFIRMACIÓN\n"
         f"Apertura: {confirmation_candle['open']}\n"
         f"Máximo: {confirmation_candle['high']}\n"
         f"Mínimo: {confirmation_candle['low']}\n"
         f"Cierre: {confirmation_candle['close']}\n\n"
+
         f"Score: {score}/10\n\n"
-        f"Lectura:\n{reason}\n\n"
+
+        "✅ Vela completamente cerrada\n"
         "✅ Señal guardada\n"
-        "❌ No se ejecuta en esta vela\n\n"
+        "⛔ No se ejecuta en esta vela\n\n"
+
         "PRÓXIMA VELA\n"
-        "⏱️ Ejecución permitida: segundo 01–03"
+        "⚡ Entrada en la apertura"
     )
 
     logger.info(
         "%s | SEÑAL GUARDADA | %s | "
-        "confirmación=%s | ejecución=%s | "
-        "score=%s",
+        "confirmación=%s | ejecución=%s",
         pair,
         signal.upper(),
         confirmation_timestamp,
-        execution_timestamp,
-        score
+        execution_timestamp
     )
+
+    return True
 
 
 # ============================================================
@@ -1146,6 +841,11 @@ def analyze_closed_candle(
     pair,
     df
 ):
+    """
+    Analiza ÚNICAMENTE la última vela completamente cerrada.
+
+    La vela actual nunca se entrega a strategy.py.
+    """
 
     closed_df = (
         get_closed_candle_dataframe(
@@ -1176,66 +876,34 @@ def analyze_closed_candle(
     if closed_timestamp is None:
         return
 
-    previous_timestamp = (
+    # --------------------------------------------------------
+    # EVITAR ANALIZAR DOS VECES LA MISMA VELA
+    # --------------------------------------------------------
+
+    previous = (
         LAST_ANALYZED_CLOSED_CANDLE.get(
             pair
         )
     )
 
-    if previous_timestamp == closed_timestamp:
-        return
-
-    # ========================================================
-    # OBTENER ESTADO DE LA VELA QUE ACABA DE CERRAR
-    # ========================================================
-
-    state = INTRABAR_STATE.get(
-        pair
-    )
-
-    if (
-        state is None
-        or
-        state["timestamp"]
-        != closed_timestamp
-    ):
-
-        logger.warning(
-            "%s | No existe recorrido intravela "
-            "completo para %s",
-            pair,
-            closed_timestamp
-        )
-
-        # Marcamos como analizada para no repetir
-        LAST_ANALYZED_CLOSED_CANDLE[pair] = (
-            closed_timestamp
-        )
+    if previous == closed_timestamp:
 
         return
 
-    snapshots = list(
-        state.get(
-            "snapshots",
-            []
-        )
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # MARCAR VELA COMO ANALIZADA
-    # ========================================================
+    # --------------------------------------------------------
 
     LAST_ANALYZED_CLOSED_CANDLE[pair] = (
         closed_timestamp
     )
 
-    # ========================================================
-    # ANALIZAR
-    # ========================================================
+    # --------------------------------------------------------
+    # ANALIZAR STRATEGY.PY
+    # --------------------------------------------------------
 
     result = analyze_market(
-        closed_df,
-        snapshots
+        closed_df
     )
 
     signal = result.get(
@@ -1257,8 +925,9 @@ def analyze_closed_candle(
     )
 
     logger.info(
-        "%s | CIERRE %s | tendencia=%s | "
-        "señal=%s | score=%s | %s",
+        "%s | CIERRE=%s | "
+        "dirección=%s | señal=%s | "
+        "score=%s | %s",
         pair,
         closed_timestamp,
         direction,
@@ -1267,9 +936,9 @@ def analyze_closed_candle(
         reason
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # SIN SEÑAL
-    # ========================================================
+    # --------------------------------------------------------
 
     if signal not in (
         "call",
@@ -1278,17 +947,32 @@ def analyze_closed_candle(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
+    # SI YA EXISTE UNA SEÑAL PARA ESTE PAR
+    # --------------------------------------------------------
+
+    if pair in PENDING_SIGNALS:
+
+        pending = PENDING_SIGNALS[pair]
+
+        if (
+            pending["confirmation_timestamp"]
+            == closed_timestamp
+        ):
+
+            return
+
+    # --------------------------------------------------------
     # VELA DE CONFIRMACIÓN
-    # ========================================================
+    # --------------------------------------------------------
 
     confirmation_candle = (
         closed_df.iloc[-1]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # GUARDAR
-    # ========================================================
+    # --------------------------------------------------------
 
     save_pending_signal(
         pair=pair,
@@ -1296,9 +980,408 @@ def analyze_closed_candle(
         confirmation_timestamp=closed_timestamp,
         confirmation_candle=confirmation_candle,
         score=score,
-        reason=reason,
-        intrabar_snapshots=snapshots
+        reason=reason
     )
+
+
+# ============================================================
+# EJECUTAR SEÑAL EN APERTURA
+# ============================================================
+
+def execute_pending_signal(
+    pair,
+    df
+):
+    """
+    EJECUCIÓN EN LA APERTURA DE LA NUEVA VELA.
+
+    La señal fue generada por la vela anterior.
+
+    Ejemplo:
+
+        Vela 18:24
+        timestamp = 123456
+
+        ↓ cierre
+
+        señal PUT
+
+        ↓
+
+        Vela 18:25
+        timestamp = 123516
+
+        ↓
+
+        ejecutar PUT
+    """
+
+    pending = PENDING_SIGNALS.get(
+        pair
+    )
+
+    if pending is None:
+        return False
+
+    # ========================================================
+    # HORA ACTUAL
+    # ========================================================
+
+    now = time.time()
+
+    current_timestamp = int(
+        now - (
+            now % TIMEFRAME
+        )
+    )
+
+    # ========================================================
+    # TIMESTAMP DE EJECUCIÓN
+    # ========================================================
+
+    execution_timestamp = int(
+        pending["execution_timestamp"]
+    )
+
+    confirmation_timestamp = int(
+        pending["confirmation_timestamp"]
+    )
+
+    # ========================================================
+    # PROTECCIÓN ABSOLUTA
+    # ========================================================
+
+    if execution_timestamp <= confirmation_timestamp:
+
+        logger.error(
+            "%s | SEÑAL INVALIDADA | "
+            "La vela de ejecución no es posterior.",
+            pair
+        )
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        return False
+
+    # ========================================================
+    # TODAVÍA NO LLEGÓ LA NUEVA VELA
+    # ========================================================
+
+    if current_timestamp < execution_timestamp:
+
+        return False
+
+    # ========================================================
+    # SE PERDIÓ LA APERTURA
+    # ========================================================
+
+    if current_timestamp > execution_timestamp:
+
+        logger.warning(
+            "%s | SEÑAL CANCELADA | "
+            "Se perdió la apertura de la vela.",
+            pair
+        )
+
+        telegram_send(
+            "⌛ SEÑAL CANCELADA\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {pending['signal'].upper()}\n\n"
+            "No se pudo ejecutar en la "
+            "apertura de la nueva vela."
+        )
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        return False
+
+    # ========================================================
+    # ESTAMOS EXACTAMENTE EN LA VELA DE EJECUCIÓN
+    # ========================================================
+
+    signal = pending["signal"]
+
+    # ========================================================
+    # EVITAR DUPLICAR OPERACIÓN
+    # ========================================================
+
+    previous_trade_candle = (
+        LAST_TRADE_CANDLE.get(
+            pair
+        )
+    )
+
+    if (
+        previous_trade_candle
+        == execution_timestamp
+    ):
+
+        logger.warning(
+            "%s | Operación duplicada bloqueada",
+            pair
+        )
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        return False
+
+    # ========================================================
+    # COOLDOWN
+    # ========================================================
+
+    if cooldown_active(pair):
+
+        logger.info(
+            "%s | Cooldown activo",
+            pair
+        )
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        telegram_send(
+            "⚠️ SEÑAL CANCELADA\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {signal.upper()}\n\n"
+            "Cooldown activo."
+        )
+
+        return False
+
+    # ========================================================
+    # BUSCAR LA NUEVA VELA
+    # ========================================================
+
+    if df is None:
+
+        logger.warning(
+            "%s | No hay dataframe para ejecución",
+            pair
+        )
+
+        return False
+
+    current_candle = df[
+        df["from"]
+        == execution_timestamp
+    ]
+
+    # --------------------------------------------------------
+    # SI IQ OPTION TODAVÍA NO DEVOLVIÓ LA VELA
+    # --------------------------------------------------------
+
+    if current_candle.empty:
+
+        logger.info(
+            "%s | Nueva vela todavía no disponible "
+            "en get_candles().",
+            pair
+        )
+
+        return False
+
+    current_candle = (
+        current_candle.iloc[-1]
+    )
+
+    # ========================================================
+    # IMPORTANTE:
+    #
+    # NO analizamos el movimiento de la nueva vela.
+    #
+    # No existe:
+    # opening_movement_too_strong()
+    #
+    # porque queremos entrar en apertura.
+    # ========================================================
+
+    execution_open = float(
+        current_candle["open"]
+    )
+
+    current_second = int(
+        now % TIMEFRAME
+    )
+
+    direction_text = (
+        "CALL 🟢"
+        if signal == "call"
+        else "PUT 🔴"
+    )
+
+    # ========================================================
+    # LOG DE PRECISIÓN
+    # ========================================================
+
+    logger.info(
+        "%s | APERTURA NUEVA VELA | "
+        "timestamp=%s | segundo=%s.%03d | "
+        "señal=%s | open=%s",
+        pair,
+        execution_timestamp,
+        current_second,
+        int(
+            (now % 1) * 1000
+        ),
+        signal.upper(),
+        execution_open
+    )
+
+    # ========================================================
+    # TELEGRAM
+    # ========================================================
+
+    telegram_send(
+        "⚡ ENTRADA EN APERTURA\n\n"
+        f"Par: {pair}\n"
+        f"Dirección: {direction_text}\n\n"
+
+        "VELA DE CONFIRMACIÓN\n"
+        f"Apertura: {pending['confirmation_open']}\n"
+        f"Máximo: {pending['confirmation_high']}\n"
+        f"Mínimo: {pending['confirmation_low']}\n"
+        f"Cierre: {pending['confirmation_close']}\n\n"
+
+        "VELA NUEVA\n"
+        f"Apertura: {execution_open}\n\n"
+
+        f"Timestamp ejecución: {execution_timestamp}\n"
+        f"Segundo detectado: {current_second:02d}\n\n"
+
+        f"💵 Importe: ${AMOUNT}\n"
+        "⏱️ Expiración: 1 minuto"
+    )
+
+    # ========================================================
+    # EJECUTAR IQ OPTION
+    # ========================================================
+
+    try:
+
+        status, order_id = IQ.buy(
+            AMOUNT,
+            pair,
+            signal,
+            EXPIRATION
+        )
+
+        # ====================================================
+        # IQ OPTION RECHAZÓ
+        # ====================================================
+
+        if not status:
+
+            logger.error(
+                "%s | OPERACIÓN RECHAZADA | "
+                "signal=%s | timestamp=%s | "
+                "segundo=%s | order_id=%s",
+                pair,
+                signal.upper(),
+                execution_timestamp,
+                current_second,
+                order_id
+            )
+
+            telegram_send(
+                "❌ OPERACIÓN RECHAZADA\n\n"
+                f"Par: {pair}\n"
+                f"Dirección: {signal.upper()}\n\n"
+                f"Timestamp: {execution_timestamp}\n"
+                f"Segundo: {current_second:02d}\n\n"
+                "IQ Option rechazó la operación.\n\n"
+                f"Respuesta: {order_id}"
+            )
+
+            PENDING_SIGNALS.pop(
+                pair,
+                None
+            )
+
+            return False
+
+        # ====================================================
+        # GUARDAR OPERACIÓN
+        # ====================================================
+
+        LAST_TRADE_TIME[pair] = (
+            time.time()
+        )
+
+        LAST_TRADE_CANDLE[pair] = (
+            execution_timestamp
+        )
+
+        # ====================================================
+        # ELIMINAR SEÑAL
+        # ====================================================
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        # ====================================================
+        # CONFIRMACIÓN
+        # ====================================================
+
+        telegram_send(
+            "✅ OPERACIÓN ABIERTA\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {signal.upper()}\n\n"
+            f"Entrada: {execution_open}\n"
+            f"Importe: ${AMOUNT}\n"
+            "Expiración: 1 minuto\n"
+            f"Segundo detectado: {current_second:02d}\n"
+            f"Timestamp: {execution_timestamp}\n"
+            f"ID: {order_id}"
+        )
+
+        logger.info(
+            "%s | OPERACIÓN ABIERTA | "
+            "%s | $%s | entrada=%s | "
+            "segundo=%s | timestamp=%s | ID=%s",
+            pair,
+            signal.upper(),
+            AMOUNT,
+            execution_open,
+            current_second,
+            execution_timestamp,
+            order_id
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            "%s | ERROR EJECUTANDO OPERACIÓN",
+            pair
+        )
+
+        telegram_send(
+            "❌ ERROR AL OPERAR\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {signal.upper()}\n\n"
+            f"Error: {str(e)}"
+        )
+
+        PENDING_SIGNALS.pop(
+            pair,
+            None
+        )
+
+        return False
 
 
 # ============================================================
@@ -1310,8 +1393,8 @@ def clean_expired_signals():
     if not PENDING_SIGNALS:
         return
 
-    now = int(
-        time.time()
+    current_timestamp = (
+        get_current_candle_timestamp()
     )
 
     expired = []
@@ -1320,14 +1403,15 @@ def clean_expired_signals():
         PENDING_SIGNALS.items()
     ):
 
-        execution_timestamp = (
+        execution_timestamp = int(
             pending["execution_timestamp"]
         )
 
-        if now >= (
-            execution_timestamp
-            + TIMEFRAME
-        ):
+        # ----------------------------------------------------
+        # SI YA PASÓ COMPLETAMENTE LA VELA
+        # ----------------------------------------------------
+
+        if current_timestamp > execution_timestamp:
 
             expired.append(
                 pair
@@ -1345,8 +1429,9 @@ def clean_expired_signals():
             telegram_send(
                 "⌛ SEÑAL CANCELADA\n\n"
                 f"Par: {pair}\n"
-                "No se ejecutó dentro de "
-                "la ventana permitida 01–03."
+                f"Dirección: {pending['signal'].upper()}\n\n"
+                "No se ejecutó en la apertura "
+                "de la nueva vela."
             )
 
             logger.info(
@@ -1356,390 +1441,14 @@ def clean_expired_signals():
 
 
 # ============================================================
-# EJECUTAR SEÑAL
-# ============================================================
-
-def execute_pending_signal(
-    pair
-):
-
-    pending = PENDING_SIGNALS.get(
-        pair
-    )
-
-    if pending is None:
-        return False
-
-    now = time.time()
-
-    current_timestamp = int(
-        now - (
-            now % TIMEFRAME
-        )
-    )
-
-    current_second = int(
-        now % TIMEFRAME
-    )
-
-    execution_timestamp = (
-        pending["execution_timestamp"]
-    )
-
-    # ========================================================
-    # TODAVÍA NO
-    # ========================================================
-
-    if current_timestamp < execution_timestamp:
-
-        return False
-
-    # ========================================================
-    # VELA VENCIDA
-    # ========================================================
-
-    if current_timestamp > execution_timestamp:
-
-        PENDING_SIGNALS.pop(
-            pair,
-            None
-        )
-
-        logger.info(
-            "%s | Señal vencida antes de ejecutar",
-            pair
-        )
-
-        return False
-
-    # ========================================================
-    # VENTANA 01–03
-    # ========================================================
-
-    if (
-        current_second
-        < EXECUTION_SECOND_START
-        or
-        current_second
-        > EXECUTION_SECOND_END
-    ):
-
-        if (
-            current_second
-            > EXECUTION_SECOND_END
-        ):
-
-            PENDING_SIGNALS.pop(
-                pair,
-                None
-            )
-
-            telegram_send(
-                "⌛ SEÑAL CANCELADA\n\n"
-                f"Par: {pair}\n"
-                "Se perdió la ventana "
-                "de ejecución 01–03."
-            )
-
-        return False
-
-    # ========================================================
-    # COOLDOWN
-    # ========================================================
-
-    if cooldown_active(pair):
-
-        logger.info(
-            "%s | Cooldown activo",
-            pair
-        )
-
-        return False
-
-    # ========================================================
-    # EVITAR MISMA VELA
-    # ========================================================
-
-    previous_trade_candle = (
-        LAST_TRADE_CANDLE.get(
-            pair
-        )
-    )
-
-    if (
-        previous_trade_candle
-        == execution_timestamp
-    ):
-
-        PENDING_SIGNALS.pop(
-            pair,
-            None
-        )
-
-        return False
-
-    # ========================================================
-    # OBTENER VELA ACTUAL
-    # ========================================================
-
-    current_df = get_candles(
-        pair
-    )
-
-    if current_df is None:
-        return False
-
-    current_candle = (
-        current_df[
-            current_df["from"]
-            == execution_timestamp
-        ]
-    )
-
-    if current_candle.empty:
-
-        logger.warning(
-            "%s | No se encontró vela de ejecución",
-            pair
-        )
-
-        return False
-
-    current_candle = (
-        current_candle.iloc[-1]
-    )
-
-    # ========================================================
-    # VELAS ANTERIORES
-    # ========================================================
-
-    previous_df = (
-        current_df[
-            current_df["from"]
-            < execution_timestamp
-        ].copy()
-    )
-
-    previous_df = previous_df.tail(
-        CANDLE_COUNT
-    )
-
-    # ========================================================
-    # MOVIMIENTO INICIAL
-    # ========================================================
-
-    signal = pending["signal"]
-
-    too_strong = (
-        opening_movement_too_strong(
-            current_candle,
-            previous_df,
-            signal
-        )
-    )
-
-    if too_strong:
-
-        telegram_send(
-            "⚠️ ENTRADA CANCELADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {signal.upper()}\n\n"
-            "La nueva vela comenzó con "
-            "un movimiento demasiado fuerte.\n\n"
-            "❌ No se ejecuta."
-        )
-
-        logger.info(
-            "%s | Movimiento inicial demasiado fuerte",
-            pair
-        )
-
-        PENDING_SIGNALS.pop(
-            pair,
-            None
-        )
-
-        return False
-
-    # ========================================================
-    # APERTURA
-    # ========================================================
-
-    execution_open = float(
-        current_candle["open"]
-    )
-
-    direction_text = (
-        "CALL 🟢"
-        if signal == "call"
-        else
-        "PUT 🔴"
-    )
-
-    telegram_send(
-        "🚀 EJECUTANDO CONTINUIDAD\n\n"
-        f"Par: {pair}\n"
-        f"Dirección: {direction_text}\n"
-        f"Segundo: {current_second:02d}\n\n"
-        "VELA DE CONFIRMACIÓN\n"
-        f"Apertura: {pending['confirmation_open']}\n"
-        f"Máximo: {pending['confirmation_high']}\n"
-        f"Mínimo: {pending['confirmation_low']}\n"
-        f"Cierre: {pending['confirmation_close']}\n\n"
-        "VELA DE EJECUCIÓN\n"
-        f"Apertura: {execution_open}\n\n"
-        "⏱️ Expiración: 1 minuto\n"
-        "💵 Importe: $10"
-    )
-
-    # ========================================================
-    # EJECUTAR
-    # ========================================================
-
-    try:
-
-        status, order_id = IQ.buy(
-            AMOUNT,
-            pair,
-            signal,
-            EXPIRATION
-        )
-
-        if not status:
-
-            telegram_send(
-                "❌ OPERACIÓN RECHAZADA\n\n"
-                f"Par: {pair}\n"
-                f"Dirección: {signal.upper()}\n"
-                "IQ Option rechazó la operación."
-            )
-
-            logger.error(
-                "%s | Operación rechazada",
-                pair
-            )
-
-            PENDING_SIGNALS.pop(
-                pair,
-                None
-            )
-
-            return False
-
-        # ====================================================
-        # REGISTRAR OPERACIÓN
-        # ====================================================
-
-        LAST_TRADE_TIME[pair] = (
-            time.time()
-        )
-
-        LAST_TRADE_CANDLE[pair] = (
-            execution_timestamp
-        )
-
-        PENDING_SIGNALS.pop(
-            pair,
-            None
-        )
-
-        telegram_send(
-            "✅ OPERACIÓN ABIERTA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {signal.upper()}\n"
-            f"Entrada: {execution_open}\n"
-            "Importe: $10\n"
-            "Expiración: 1 minuto\n"
-            f"Segundo de entrada: {current_second:02d}\n"
-            f"ID: {order_id}"
-        )
-
-        logger.info(
-            "%s | %s | $%s | "
-            "entrada=%s | segundo=%s | ID=%s",
-            pair,
-            signal.upper(),
-            AMOUNT,
-            execution_open,
-            current_second,
-            order_id
-        )
-
-        return True
-
-    except Exception as e:
-
-        logger.error(
-            "Error ejecutando %s: %s",
-            pair,
-            e
-        )
-
-        telegram_send(
-            "❌ ERROR AL OPERAR\n\n"
-            f"Par: {pair}\n"
-            f"Error: {str(e)}"
-        )
-
-        PENDING_SIGNALS.pop(
-            pair,
-            None
-        )
-
-        return False
-
-
-# ============================================================
-# LIMPIAR ESTADO INTRAVELA
-# ============================================================
-
-def clean_old_intrabar_state():
-
-    current_timestamp = (
-        get_current_candle_timestamp()
-    )
-
-    for pair in list(
-        INTRABAR_STATE.keys()
-    ):
-
-        state = INTRABAR_STATE.get(
-            pair
-        )
-
-        if state is None:
-            continue
-
-        if (
-            state["timestamp"]
-            < current_timestamp
-        ):
-
-            # ------------------------------------------------
-            # No borramos antes de que
-            # analyze_closed_candle() lo utilice.
-            # Solo se elimina si ya fue procesado.
-            # ------------------------------------------------
-
-            analyzed = (
-                LAST_ANALYZED_CLOSED_CANDLE.get(
-                    pair
-                )
-            )
-
-            if analyzed == state["timestamp"]:
-
-                INTRABAR_STATE.pop(
-                    pair,
-                    None
-                )
-
-
-# ============================================================
 # PROCESAR PAR
 # ============================================================
 
 def process_pair(pair):
+
+    # ========================================================
+    # OBTENER DATOS
+    # ========================================================
 
     df = get_candles(
         pair
@@ -1749,16 +1458,27 @@ def process_pair(pair):
         return
 
     # ========================================================
-    # 1. ACTUALIZAR VELA VIVA
+    # PRIORIDAD #1
+    #
+    # PRIMERO intentar ejecutar una señal pendiente.
+    #
+    # Esto es importante porque al comenzar una nueva vela
+    # NO queremos gastar tiempo analizando antes de ejecutar.
     # ========================================================
 
-    update_intrabar_state(
-        pair,
-        df
-    )
+    if pair in PENDING_SIGNALS:
+
+        execute_pending_signal(
+            pair,
+            df
+        )
 
     # ========================================================
-    # 2. DETECTAR CIERRE DE VELA
+    # PRIORIDAD #2
+    #
+    # DESPUÉS analizar la vela que acaba de cerrar.
+    #
+    # Esta señal quedará preparada para la PRÓXIMA vela.
     # ========================================================
 
     analyze_closed_candle(
@@ -1766,17 +1486,9 @@ def process_pair(pair):
         df
     )
 
-    # ========================================================
-    # 3. EJECUTAR SEÑAL PENDIENTE
-    # ========================================================
-
-    execute_pending_signal(
-        pair
-    )
-
 
 # ============================================================
-# PROCESAR TODOS
+# PROCESAR TODOS LOS PARES
 # ============================================================
 
 def process_all_pairs():
@@ -1797,15 +1509,16 @@ def process_all_pairs():
 
         except Exception as e:
 
-            logger.error(
-                "Error procesando %s: %s",
-                pair,
-                e
+            logger.exception(
+                "Error procesando %s",
+                pair
             )
 
-        time.sleep(
-            0.15
-        )
+        # ----------------------------------------------------
+        # PAUSA MUY PEQUEÑA
+        # ----------------------------------------------------
+
+        time.sleep(0.03)
 
 
 # ============================================================
@@ -1829,10 +1542,6 @@ def main():
     )
 
     logger.info(
-        "LECTURA: RECORRIDO COMPLETO DE VELA"
-    )
-
-    logger.info(
         "TEMPORALIDAD: 1 MINUTO"
     )
 
@@ -1841,11 +1550,16 @@ def main():
     )
 
     logger.info(
-        "IMPORTE: $10"
+        "IMPORTE: $%s",
+        AMOUNT
     )
 
     logger.info(
-        "EJECUCIÓN: SEGUNDO 01–03"
+        "CONFIRMACIÓN: VELA COMPLETA"
+    )
+
+    logger.info(
+        "ENTRADA: APERTURA DE NUEVA VELA"
     )
 
     logger.info(
@@ -1919,61 +1633,81 @@ def main():
         return
 
     # ========================================================
-    # LISTO
+    # BOT LISTO
     # ========================================================
 
     telegram_send(
         "🤖 BOT LISTO\n\n"
         "Conectado a IQ Option.\n\n"
         "Estrategia: CONTINUIDAD\n"
-        "Lectura: recorrido completo de vela\n"
         "Velas: 1 minuto\n"
-        "Importe: $10\n"
+        f"Importe: ${AMOUNT}\n"
         "Expiración: 1 minuto\n\n"
-        "La vela se observa durante todo "
-        "su recorrido.\n\n"
+
+        "📖 LÓGICA\n"
+        "La vela se analiza completa:\n"
+        "Apertura → Máximo → Mínimo → Cierre\n\n"
+
         "La decisión se toma al cierre.\n\n"
-        "La entrada solo puede ocurrir "
-        "en los segundos 01–03 "
-        "de la siguiente vela.\n\n"
+
+        "⚡ ENTRADA\n"
+        "La señal se ejecuta en la "
+        "apertura de la siguiente vela.\n\n"
+
         "Escribe /start para comenzar."
     )
 
     # ========================================================
-    # LOOP
+    # LOOP PRINCIPAL
     # ========================================================
 
     while True:
 
         try:
 
+            # ------------------------------------------------
+            # TELEGRAM
+            # ------------------------------------------------
+
             check_commands()
+
+            # ------------------------------------------------
+            # LIMPIAR SEÑALES
+            # ------------------------------------------------
 
             clean_expired_signals()
 
-            clean_old_intrabar_state()
+            # ------------------------------------------------
+            # BOT DETENIDO
+            # ------------------------------------------------
 
             if not BOT_RUNNING:
 
-                time.sleep(
-                    0.5
-                )
+                time.sleep(0.5)
 
                 continue
+
+            # ------------------------------------------------
+            # CONEXIÓN
+            # ------------------------------------------------
 
             if not ensure_connection():
 
-                time.sleep(
-                    3
-                )
+                time.sleep(3)
 
                 continue
 
+            # ------------------------------------------------
+            # PROCESAR MERCADO
+            # ------------------------------------------------
+
             process_all_pairs()
 
-            time.sleep(
-                0.10
-            )
+            # ------------------------------------------------
+            # LOOP RÁPIDO
+            # ------------------------------------------------
+
+            time.sleep(0.03)
 
         except KeyboardInterrupt:
 
@@ -2000,9 +1734,7 @@ def main():
                 + str(e)
             )
 
-            time.sleep(
-                3
-            )
+            time.sleep(3)
 
 
 # ============================================================
