@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
-
 import pandas as pd
 import requests
 from iqoptionapi.stable_api import IQ_Option
@@ -29,7 +27,7 @@ PAIRS = [
 
 TIMEFRAME = 60
 EXPIRATION = 1
-AMOUNT = 10
+AMOUNT = 12
 CANDLE_COUNT = 60
 
 # Poll pequeño para detectar el cambio de vela rápido.
