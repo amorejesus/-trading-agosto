@@ -1,1214 +1,842 @@
-from __future__ import annotations
-
-from typing import Any, Dict, Optional
-
-import pandas as pd
-
-
 # ============================================================
-# ESTRATEGIA 1M + 12 MICROVELAS DE 5 SEGUNDOS
+# strategy.py
 # ============================================================
 #
-# OBJETIVO:
+# ESTRATEGIA DE 12 VELAS DE 5 SEGUNDOS
 #
-# Analizar cada vela de 1 minuto utilizando exactamente
-# sus 12 velas de 5 segundos.
+# 1 M1 = 12 velas de 5s
 #
-# La primera vela de 5s NO determina la dirección.
+# REGLAS:
+#   1. Se analizan las 12 velas completas.
+#   2. La primera vela NO determina la dirección.
+#   3. Se calcula fuerza alcista y bajista.
+#   4. Se determina un dominante matemático.
+#   5. Se exige margen mínimo del dominante.
+#   6. Se exige desplazamiento suficiente.
+#   7. Se exige que el cierre confirme la dirección.
+#   8. Se comprueba la fuerza de las últimas 3 velas.
+#   9. Si cualquier filtro falla -> NO OPERAR.
 #
-# La dirección se determina mediante:
-#
-#   1. DOMINANTE GLOBAL
-#   2. CONTROL FINAL
-#   3. COLOR FINAL DE LA M1
-#
-#
-# ============================================================
-# DOMINANTE GLOBAL
-# ============================================================
-#
-# BUY_SCORE:
-#
-#   suma de todos los cuerpos alcistas de las 12 velas.
-#
-#   max(close - open, 0)
-#
-#
-# SELL_SCORE:
-#
-#   suma de todos los cuerpos bajistas de las 12 velas.
-#
-#   max(open - close, 0)
-#
-#
-# DOMINANCE:
-#
-#   abs(BUY_SCORE - SELL_SCORE)
-#   ---------------------------
-#       BUY_SCORE + SELL_SCORE
-#
-#
-# Se requiere una dominancia mínima de 20%.
-#
-#
-# ============================================================
-# CONTROL FINAL
-# ============================================================
-#
-# Se utilizan exclusivamente las últimas 3 microvelas:
-#
-#   #10
-#   #11
-#   #12
-#
-# BUY_FINAL:
-#
-#   suma(close - open) de #10,#11,#12 > 0
-#
-#
-# SELL_FINAL:
-#
-#   suma(close - open) de #10,#11,#12 < 0
-#
-#
-# Además:
-#
-# CALL:
-#   cierre #12 > apertura M1
-#
-# PUT:
-#   cierre #12 < apertura M1
-#
-#
-# ============================================================
-# CALL
-# ============================================================
-#
-# 1. BUY_SCORE > SELL_SCORE
-# 2. Dominance >= 20%
-# 3. Movimiento neto de las últimas 3 velas > 0
-# 4. Último cierre 5s > apertura M1
-# 5. Cierre M1 > apertura M1
-#
-#
-# ============================================================
-# PUT
-# ============================================================
-#
-# 1. SELL_SCORE > BUY_SCORE
-# 2. Dominance >= 20%
-# 3. Movimiento neto de las últimas 3 velas < 0
-# 4. Último cierre 5s < apertura M1
-# 5. Cierre M1 < apertura M1
-#
-#
-# ============================================================
-# SIN SEÑAL
-# ============================================================
-#
-# Si el dominante global y el control final se contradicen,
-# no se genera señal.
+# RESULTADOS:
+#   "call"
+#   "put"
+#   None
 #
 # ============================================================
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN PRINCIPAL
 # ============================================================
 
-MICRO_CANDLES_REQUIRED = 12
+M1_CANDLES = 12
 
-FINAL_CONTROL_CANDLES = 3
-
-DOMINANCE_THRESHOLD = 0.20
+FINAL_CANDLES = 3
 
 
 # ============================================================
-# UTILIDADES
+# FILTRO DE DOMINANCIA
+# ============================================================
+#
+# Diferencia mínima entre la fuerza dominante y la contraria.
+#
+# Ejemplo:
+#
+# CALL = 0.60
+# PUT  = 0.40
+#
+# margen = 0.20
+#
+# Si margen < 0.10 -> NO OPERAR
+#
 # ============================================================
 
-def _to_float(value: Any) -> Optional[float]:
-    """
-    Convierte un valor a float de forma segura.
-    """
+MIN_DOMINANCE_MARGIN = 0.10
+
+
+# ============================================================
+# FILTRO DE DESPLAZAMIENTO
+# ============================================================
+#
+# Se calcula:
+#
+# abs(cierre_final - apertura_inicial)
+# ------------------------------------
+#          rango_total
+#
+# ============================================================
+
+MIN_DISPLACEMENT_RATIO = 0.20
+
+
+# ============================================================
+# FILTRO DE POSICIÓN DEL CIERRE
+# ============================================================
+#
+# Posición del cierre dentro del rango total.
+#
+# 1.00 = máximo
+# 0.50 = mitad
+# 0.00 = mínimo
+#
+# ============================================================
+
+CALL_MIN_CLOSE_POSITION = 0.65
+
+PUT_MAX_CLOSE_POSITION = 0.35
+
+
+# ============================================================
+# FILTRO DE FUERZA FINAL
+# ============================================================
+#
+# Se analizan las últimas 3 velas.
+#
+# El dominante debe conservar al menos este porcentaje
+# de la fuerza de esas últimas velas.
+#
+# ============================================================
+
+MIN_FINAL_DOMINANT_RATIO = 0.34
+
+
+# ============================================================
+# FUNCIONES BÁSICAS
+# ============================================================
+
+def _get_value(candle, key, default=None):
+
+    if not isinstance(candle, dict):
+        return default
+
+    value = candle.get(key, default)
 
     try:
         return float(value)
-
     except (TypeError, ValueError):
+        return default
+
+
+def _get_ohlc(candle):
+
+    if not isinstance(candle, dict):
         return None
 
+    open_price = _get_value(candle, "open")
 
-# ============================================================
-# NORMALIZAR MICROVELAS
-# ============================================================
+    close_price = _get_value(candle, "close")
 
-def _normalize_5s(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Normaliza los datos de las velas de 5 segundos.
+    high_price = _get_value(candle, "max")
 
-    Columnas obligatorias:
+    if high_price is None:
+        high_price = _get_value(candle, "high")
 
-        open
-        close
+    low_price = _get_value(candle, "min")
 
-    Opcional:
+    if low_price is None:
+        low_price = _get_value(candle, "low")
 
-        from
-        high
-        low
+    if (
+        open_price is None
+        or close_price is None
+        or high_price is None
+        or low_price is None
+    ):
+        return None
 
-    Compatible con nombres utilizados por IQ Option.
-    """
-
-    if df is None:
-        return pd.DataFrame()
-
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    out = df.copy()
-
-    rename = {}
-
-    # --------------------------------------------------------
-    # IQ Option
-    # --------------------------------------------------------
-
-    if "max" in out.columns and "high" not in out.columns:
-        rename["max"] = "high"
-
-    if "min" in out.columns and "low" not in out.columns:
-        rename["min"] = "low"
-
-    # --------------------------------------------------------
-    # Open
-    # --------------------------------------------------------
-
-    if "Open" in out.columns and "open" not in out.columns:
-        rename["Open"] = "open"
-
-    # --------------------------------------------------------
-    # High
-    # --------------------------------------------------------
-
-    if "High" in out.columns and "high" not in out.columns:
-        rename["High"] = "high"
-
-    # --------------------------------------------------------
-    # Low
-    # --------------------------------------------------------
-
-    if "Low" in out.columns and "low" not in out.columns:
-        rename["Low"] = "low"
-
-    # --------------------------------------------------------
-    # Close
-    # --------------------------------------------------------
-
-    if "Close" in out.columns and "close" not in out.columns:
-        rename["Close"] = "close"
-
-    if rename:
-        out.rename(
-            columns=rename,
-            inplace=True,
-        )
-
-    # --------------------------------------------------------
-    # Columnas obligatorias
-    # --------------------------------------------------------
-
-    if "open" not in out.columns:
-        return pd.DataFrame()
-
-    if "close" not in out.columns:
-        return pd.DataFrame()
-
-    # --------------------------------------------------------
-    # Conversión numérica
-    # --------------------------------------------------------
-
-    out["open"] = pd.to_numeric(
-        out["open"],
-        errors="coerce",
+    return (
+        open_price,
+        close_price,
+        high_price,
+        low_price
     )
 
-    out["close"] = pd.to_numeric(
-        out["close"],
-        errors="coerce",
-    )
 
-    # --------------------------------------------------------
-    # High / Low
-    # --------------------------------------------------------
+def _valid_candle(candle):
 
-    if "high" in out.columns:
+    ohlc = _get_ohlc(candle)
 
-        out["high"] = pd.to_numeric(
-            out["high"],
-            errors="coerce",
-        )
-
-    if "low" in out.columns:
-
-        out["low"] = pd.to_numeric(
-            out["low"],
-            errors="coerce",
-        )
-
-    # --------------------------------------------------------
-    # Timestamp
-    # --------------------------------------------------------
-
-    if "from" in out.columns:
-
-        out["from"] = pd.to_numeric(
-            out["from"],
-            errors="coerce",
-        )
-
-        out.dropna(
-            subset=["from"],
-            inplace=True,
-        )
-
-        out.sort_values(
-            "from",
-            inplace=True,
-        )
-
-    # --------------------------------------------------------
-    # Eliminar datos inválidos
-    # --------------------------------------------------------
-
-    out.dropna(
-        subset=[
-            "open",
-            "close",
-        ],
-        inplace=True,
-    )
-
-    out.reset_index(
-        drop=True,
-        inplace=True,
-    )
-
-    return out
-
-
-# ============================================================
-# VALIDAR SECUENCIA 5S
-# ============================================================
-
-def _validate_5s_sequence(
-    micro: pd.DataFrame,
-) -> bool:
-    """
-    Verifica que las velas sean consecutivas cada 5 segundos.
-
-    Si existe timestamp:
-
-        diferencia = 5
-
-    para todas las velas consecutivas.
-    """
-
-    if micro.empty:
+    if ohlc is None:
         return False
 
-    if "from" not in micro.columns:
-        return True
+    open_price, close_price, high_price, low_price = ohlc
 
-    if len(micro) < 2:
+    if high_price < low_price:
         return False
 
-    timestamps = (
-        micro["from"]
-        .astype(float)
-        .tolist()
-    )
+    if high_price < open_price:
+        return False
 
-    for i in range(1, len(timestamps)):
+    if high_price < close_price:
+        return False
 
-        difference = (
-            timestamps[i]
-            - timestamps[i - 1]
-        )
+    if low_price > open_price:
+        return False
 
-        if difference != 5:
-            return False
+    if low_price > close_price:
+        return False
 
     return True
 
 
 # ============================================================
-# OBTENER LAS 12 MICROVELAS DE LA M1
+# COLOR DE VELA
 # ============================================================
 
-def _get_minute_micro_candles(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Obtiene exclusivamente las microvelas pertenecientes
-    al minuto de candle_1m.
-    """
+def get_candle_color(candle):
 
-    micro = _normalize_5s(
+    if not _valid_candle(candle):
+        return None
+
+    open_price, close_price, _, _ = _get_ohlc(candle)
+
+    if close_price > open_price:
+        return "verde"
+
+    if close_price < open_price:
+        return "rojo"
+
+    return "doji"
+
+
+# ============================================================
+# FUERZA DE UNA VELA
+# ============================================================
+#
+# Fuerza =
+#
+# cuerpo × presión del cierre
+#
+# La presión mide qué tan cerca termina el cierre
+# del extremo favorable de la vela.
+#
+# ============================================================
+
+def _candle_force(candle):
+
+    if not _valid_candle(candle):
+        return None
+
+    open_price, close_price, high_price, low_price = _get_ohlc(candle)
+
+    candle_range = high_price - low_price
+
+    body = abs(close_price - open_price)
+
+    if candle_range <= 0:
+
+        return {
+            "green": 0.0,
+            "red": 0.0
+        }
+
+    # --------------------------------------------------------
+    # ALCISTA
+    # --------------------------------------------------------
+
+    if close_price > open_price:
+
+        pressure = (
+            (close_price - low_price)
+            / candle_range
+        )
+
+        force = body * pressure
+
+        return {
+            "green": force,
+            "red": 0.0
+        }
+
+    # --------------------------------------------------------
+    # BAJISTA
+    # --------------------------------------------------------
+
+    if close_price < open_price:
+
+        pressure = (
+            (high_price - close_price)
+            / candle_range
+        )
+
+        force = body * pressure
+
+        return {
+            "green": 0.0,
+            "red": force
+        }
+
+    # --------------------------------------------------------
+    # DOJI
+    # --------------------------------------------------------
+
+    return {
+        "green": 0.0,
+        "red": 0.0
+    }
+
+
+# ============================================================
+# ANALIZAR LAS 12 VELAS
+# ============================================================
+
+def analyze_dominance(candles_5s):
+
+    # --------------------------------------------------------
+    # VALIDACIÓN
+    # --------------------------------------------------------
+
+    if candles_5s is None:
+        return None
+
+    if len(candles_5s) < M1_CANDLES:
+        return None
+
+    # ========================================================
+    # IMPORTANTE:
+    #
+    # SOLO LAS 12 VELAS DE ESTA M1
+    # ========================================================
+
+    candles = list(
+        candles_5s[:M1_CANDLES]
+    )
+
+    # Todas deben estar cerradas y ser válidas.
+
+    for candle in candles:
+
+        if not _valid_candle(candle):
+            return None
+
+    # ========================================================
+    # FUERZA TOTAL
+    # ========================================================
+
+    green_force = 0.0
+
+    red_force = 0.0
+
+    candle_forces = []
+
+    for candle in candles:
+
+        force = _candle_force(candle)
+
+        if force is None:
+            return None
+
+        green_force += force["green"]
+
+        red_force += force["red"]
+
+        candle_forces.append(force)
+
+    total_force = (
+        green_force +
+        red_force
+    )
+
+    # ========================================================
+    # SIN FUERZA
+    # ========================================================
+
+    if total_force <= 0:
+
+        return {
+            "dominant": None,
+
+            "green_force": 0.0,
+            "red_force": 0.0,
+
+            "green_ratio": 0.0,
+            "red_ratio": 0.0,
+
+            "dominance_margin": 0.0,
+
+            "displacement_ratio": 0.0,
+
+            "close_position": 0.5,
+
+            "final_green_force": 0.0,
+            "final_red_force": 0.0,
+
+            "final_dominant_ratio": 0.0,
+
+            "dominance_ok": False,
+            "displacement_ok": False,
+            "close_ok": False,
+            "final_strength_ok": False,
+
+            "market_ok": False,
+
+            "reason": "SIN_FUERZA"
+        }
+
+    # ========================================================
+    # RATIOS
+    # ========================================================
+
+    green_ratio = (
+        green_force /
+        total_force
+    )
+
+    red_ratio = (
+        red_force /
+        total_force
+    )
+
+    # ========================================================
+    # MARGEN
+    # ========================================================
+
+    dominance_margin = abs(
+        green_ratio -
+        red_ratio
+    )
+
+    # ========================================================
+    # DOMINANTE
+    # ========================================================
+
+    if green_force > red_force:
+
+        dominant = "call"
+
+    elif red_force > green_force:
+
+        dominant = "put"
+
+    else:
+
+        dominant = None
+
+    # ========================================================
+    # DATOS DE PRECIO
+    # ========================================================
+
+    opens = []
+    closes = []
+    highs = []
+    lows = []
+
+    for candle in candles:
+
+        o, c, h, l = _get_ohlc(candle)
+
+        opens.append(o)
+        closes.append(c)
+        highs.append(h)
+        lows.append(l)
+
+    first_open = opens[0]
+
+    final_close = closes[-1]
+
+    total_high = max(highs)
+
+    total_low = min(lows)
+
+    total_range = (
+        total_high -
+        total_low
+    )
+
+    # ========================================================
+    # RANGO CERO
+    # ========================================================
+
+    if total_range <= 0:
+
+        return {
+            "dominant": dominant,
+
+            "green_force": green_force,
+            "red_force": red_force,
+
+            "green_ratio": green_ratio,
+            "red_ratio": red_ratio,
+
+            "dominance_margin": dominance_margin,
+
+            "displacement_ratio": 0.0,
+
+            "close_position": 0.5,
+
+            "final_green_force": 0.0,
+            "final_red_force": 0.0,
+
+            "final_dominant_ratio": 0.0,
+
+            "dominance_ok": False,
+            "displacement_ok": False,
+            "close_ok": False,
+            "final_strength_ok": False,
+
+            "market_ok": False,
+
+            "reason": "RANGO_CERO"
+        }
+
+    # ========================================================
+    # FILTRO DE DESPLAZAMIENTO
+    # ========================================================
+
+    net_displacement = abs(
+        final_close -
+        first_open
+    )
+
+    displacement_ratio = (
+        net_displacement /
+        total_range
+    )
+
+    displacement_ok = (
+        displacement_ratio >=
+        MIN_DISPLACEMENT_RATIO
+    )
+
+    # ========================================================
+    # POSICIÓN DEL CIERRE
+    # ========================================================
+
+    close_position = (
+        final_close -
+        total_low
+    ) / total_range
+
+    if dominant == "call":
+
+        close_ok = (
+            close_position >=
+            CALL_MIN_CLOSE_POSITION
+        )
+
+    elif dominant == "put":
+
+        close_ok = (
+            close_position <=
+            PUT_MAX_CLOSE_POSITION
+        )
+
+    else:
+
+        close_ok = False
+
+    # ========================================================
+    # FUERZA DE LAS ÚLTIMAS 3 VELAS
+    # ========================================================
+
+    final_forces = candle_forces[
+        -FINAL_CANDLES:
+    ]
+
+    final_green_force = sum(
+        item["green"]
+        for item in final_forces
+    )
+
+    final_red_force = sum(
+        item["red"]
+        for item in final_forces
+    )
+
+    final_total_force = (
+        final_green_force +
+        final_red_force
+    )
+
+    if final_total_force > 0:
+
+        if dominant == "call":
+
+            final_dominant_ratio = (
+                final_green_force /
+                final_total_force
+            )
+
+        elif dominant == "put":
+
+            final_dominant_ratio = (
+                final_red_force /
+                final_total_force
+            )
+
+        else:
+
+            final_dominant_ratio = 0.0
+
+    else:
+
+        final_dominant_ratio = 0.0
+
+    final_strength_ok = (
+        final_dominant_ratio >=
+        MIN_FINAL_DOMINANT_RATIO
+    )
+
+    # ========================================================
+    # MARGEN DEL DOMINANTE
+    # ========================================================
+
+    dominance_ok = (
+        dominance_margin >=
+        MIN_DOMINANCE_MARGIN
+    )
+
+    # ========================================================
+    # DECISIÓN FINAL
+    # ========================================================
+
+    market_ok = (
+        dominant is not None
+        and dominance_ok
+        and displacement_ok
+        and close_ok
+        and final_strength_ok
+    )
+
+    # ========================================================
+    # MOTIVO
+    # ========================================================
+
+    if dominant is None:
+
+        reason = "SIN_DOMINANTE"
+
+    elif not dominance_ok:
+
+        reason = "DOMINANTE_DEBIL"
+
+    elif not displacement_ok:
+
+        reason = "POCO_DESPLAZAMIENTO"
+
+    elif not close_ok:
+
+        reason = "CIERRE_NO_CONFIRMA"
+
+    elif not final_strength_ok:
+
+        reason = "PERDIDA_DE_FUERZA_FINAL"
+
+    else:
+
+        reason = "OK"
+
+    # ========================================================
+    # RESULTADO COMPLETO
+    # ========================================================
+
+    return {
+
+        # Dirección
+        "dominant": dominant,
+
+        # Fuerzas
+        "green_force": green_force,
+        "red_force": red_force,
+
+        # Ratios
+        "green_ratio": green_ratio,
+        "red_ratio": red_ratio,
+
+        # Margen
+        "dominance_margin": dominance_margin,
+
+        # Precios
+        "first_open": first_open,
+        "final_close": final_close,
+
+        "total_high": total_high,
+        "total_low": total_low,
+        "total_range": total_range,
+
+        # Movimiento
+        "net_displacement": net_displacement,
+        "displacement_ratio": displacement_ratio,
+
+        # Posición cierre
+        "close_position": close_position,
+
+        # Fuerza final
+        "final_green_force": final_green_force,
+        "final_red_force": final_red_force,
+
+        "final_dominant_ratio":
+            final_dominant_ratio,
+
+        # Filtros
+        "dominance_ok": dominance_ok,
+        "displacement_ok": displacement_ok,
+        "close_ok": close_ok,
+        "final_strength_ok":
+            final_strength_ok,
+
+        # Resultado
+        "market_ok": market_ok,
+
+        "reason": reason
+    }
+
+
+# ============================================================
+# DIRECCIÓN DE LA M1
+# ============================================================
+
+def get_m1_direction(candles_5s):
+
+    analysis = analyze_dominance(
         candles_5s
     )
 
-    if micro.empty:
-        return pd.DataFrame()
+    if analysis is None:
+        return None
 
-    minute_timestamp = None
+    if not analysis["market_ok"]:
+        return None
 
-    # --------------------------------------------------------
-    # Obtener timestamp de la M1
-    # --------------------------------------------------------
-
-    if candle_1m is not None:
-
-        try:
-
-            if "from" in candle_1m.index:
-
-                minute_timestamp = int(
-                    float(
-                        candle_1m["from"]
-                    )
-                )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            minute_timestamp = None
-
-    # --------------------------------------------------------
-    # Filtrar exactamente el minuto
-    # --------------------------------------------------------
-
-    if (
-        minute_timestamp is not None
-        and "from" in micro.columns
-    ):
-
-        start_time = minute_timestamp
-
-        end_time = (
-            minute_timestamp + 60
-        )
-
-        micro = micro[
-            (micro["from"] >= start_time)
-            &
-            (micro["from"] < end_time)
-        ].copy()
-
-        micro.sort_values(
-            "from",
-            inplace=True,
-        )
-
-        # Eliminar duplicados de timestamp.
-
-        micro.drop_duplicates(
-            subset=["from"],
-            keep="last",
-            inplace=True,
-        )
-
-        micro.reset_index(
-            drop=True,
-            inplace=True,
-        )
-
-    return micro
+    return analysis["dominant"]
 
 
 # ============================================================
-# CALCULAR DOMINANTE GLOBAL
+# CHECK_PATTERN
+# ============================================================
+#
+# Mantengo esta función para que tu bot.py actual
+# pueda continuar utilizando:
+#
+# from strategy import check_pattern
+#
 # ============================================================
 
-def _calculate_global_dominance(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-    """
-    Calcula el dominio global de las 12 microvelas.
+def check_pattern(candles_5s):
 
-    BUY_SCORE:
-        suma de los cuerpos alcistas.
-
-    SELL_SCORE:
-        suma de los cuerpos bajistas.
-
-    No utiliza mayoría de velas.
-    """
-
-    result: Dict[str, Any] = {
-
-        "dominant": "neutral",
-
-        "buy_score": 0.0,
-
-        "sell_score": 0.0,
-
-        "dominance_ratio": 0.0,
-
-        "total_movement": 0.0,
-    }
-
-    if micro.empty:
-        return result
-
-    buy_score = 0.0
-    sell_score = 0.0
-
-    # --------------------------------------------------------
-    # Las 12 velas
-    # --------------------------------------------------------
-
-    for _, candle in micro.iterrows():
-
-        opening = _to_float(
-            candle["open"]
-        )
-
-        closing = _to_float(
-            candle["close"]
-        )
-
-        if (
-            opening is None
-            or closing is None
-        ):
-            continue
-
-        movement = (
-            closing - opening
-        )
-
-        # ----------------------------------------------------
-        # Compradores
-        # ----------------------------------------------------
-
-        if movement > 0:
-
-            buy_score += movement
-
-        # ----------------------------------------------------
-        # Vendedores
-        # ----------------------------------------------------
-
-        elif movement < 0:
-
-            sell_score += abs(
-                movement
-            )
-
-    total_movement = (
-        buy_score + sell_score
-    )
-
-    result["buy_score"] = buy_score
-
-    result["sell_score"] = sell_score
-
-    result["total_movement"] = (
-        total_movement
-    )
-
-    # --------------------------------------------------------
-    # Sin movimiento
-    # --------------------------------------------------------
-
-    if total_movement <= 0:
-
-        return result
-
-    # --------------------------------------------------------
-    # Ratio de dominancia
-    # --------------------------------------------------------
-
-    dominance_ratio = (
-        abs(
-            buy_score - sell_score
-        )
-        / total_movement
-    )
-
-    result["dominance_ratio"] = (
-        dominance_ratio
-    )
-
-    # --------------------------------------------------------
-    # Comprador dominante
-    # --------------------------------------------------------
-
-    if (
-        buy_score > sell_score
-        and dominance_ratio
-        >= DOMINANCE_THRESHOLD
-    ):
-
-        result["dominant"] = (
-            "buyer"
-        )
-
-        return result
-
-    # --------------------------------------------------------
-    # Vendedor dominante
-    # --------------------------------------------------------
-
-    if (
-        sell_score > buy_score
-        and dominance_ratio
-        >= DOMINANCE_THRESHOLD
-    ):
-
-        result["dominant"] = (
-            "seller"
-        )
-
-        return result
-
-    return result
-
-
-# ============================================================
-# CALCULAR CONTROL FINAL
-# ============================================================
-
-def _calculate_final_control(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-    """
-    Determina quién controla el final de la M1.
-
-    Se utilizan exactamente las últimas 3 velas:
-
-        #10
-        #11
-        #12
-
-    Se calcula:
-
-        final_net =
-            suma(close - open)
-
-    Resultado:
-
-        > 0  comprador
-        < 0  vendedor
-        = 0  neutral
-    """
-
-    result: Dict[str, Any] = {
-
-        "final_control": "neutral",
-
-        "final_net": 0.0,
-
-        "final_buy_movement": 0.0,
-
-        "final_sell_movement": 0.0,
-    }
-
-    if len(micro) < FINAL_CONTROL_CANDLES:
-        return result
-
-    final_micro = micro.iloc[
-        -FINAL_CONTROL_CANDLES:
-    ].copy()
-
-    final_net = 0.0
-
-    final_buy = 0.0
-
-    final_sell = 0.0
-
-    # --------------------------------------------------------
-    # Últimas 3 velas
-    # --------------------------------------------------------
-
-    for _, candle in final_micro.iterrows():
-
-        opening = _to_float(
-            candle["open"]
-        )
-
-        closing = _to_float(
-            candle["close"]
-        )
-
-        if (
-            opening is None
-            or closing is None
-        ):
-            return result
-
-        movement = (
-            closing - opening
-        )
-
-        final_net += movement
-
-        if movement > 0:
-
-            final_buy += movement
-
-        elif movement < 0:
-
-            final_sell += abs(
-                movement
-            )
-
-    result["final_net"] = final_net
-
-    result[
-        "final_buy_movement"
-    ] = final_buy
-
-    result[
-        "final_sell_movement"
-    ] = final_sell
-
-    # --------------------------------------------------------
-    # Comprador controla el final
-    # --------------------------------------------------------
-
-    if final_net > 0:
-
-        result[
-            "final_control"
-        ] = "buyer"
-
-        return result
-
-    # --------------------------------------------------------
-    # Vendedor controla el final
-    # --------------------------------------------------------
-
-    if final_net < 0:
-
-        result[
-            "final_control"
-        ] = "seller"
-
-        return result
-
-    return result
-
-
-# ============================================================
-# ANALIZAR UNA M1
-# ============================================================
-
-def analyze_minute(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Dict[str, Any]:
-    """
-    Analiza una vela completa de 1 minuto.
-
-    Requiere exactamente 12 velas de 5 segundos.
-    """
-
-    result: Dict[str, Any] = {
-
-        "signal": None,
-
-        "valid": False,
-
-        "reason": "sin señal",
-
-        "minute_timestamp": None,
-
-        "minute_open": None,
-
-        "minute_close": None,
-
-        "micro_candles_count": 0,
-
-        "buy_score": 0.0,
-
-        "sell_score": 0.0,
-
-        "dominance_ratio": 0.0,
-
-        "dominant": None,
-
-        "final_control": None,
-
-        "final_net": 0.0,
-
-        "final_buy_movement": 0.0,
-
-        "final_sell_movement": 0.0,
-
-        "last_5s_close": None,
-    }
-
-    # ========================================================
-    # VALIDAR M1
-    # ========================================================
-
-    if candle_1m is None:
-
-        result["reason"] = (
-            "vela 1M no disponible"
-        )
-
-        return result
-
-    opening = _to_float(
-        candle_1m.get("open")
-    )
-
-    closing = _to_float(
-        candle_1m.get("close")
-    )
-
-    if opening is None:
-
-        result["reason"] = (
-            "apertura 1M inválida"
-        )
-
-        return result
-
-    if closing is None:
-
-        result["reason"] = (
-            "cierre 1M inválido"
-        )
-
-        return result
-
-    result["minute_open"] = opening
-
-    result["minute_close"] = closing
-
-    # ========================================================
-    # TIMESTAMP M1
-    # ========================================================
-
-    if "from" in candle_1m.index:
-
-        try:
-
-            result[
-                "minute_timestamp"
-            ] = int(
-                float(
-                    candle_1m["from"]
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            result[
-                "minute_timestamp"
-            ] = None
-
-    # ========================================================
-    # OBTENER MICROVELAS
-    # ========================================================
-
-    micro = _get_minute_micro_candles(
-        candle_1m,
-        candles_5s,
-    )
-
-    if micro.empty:
-
-        result["reason"] = (
-            "no hay microvelas 5s"
-        )
-
-        return result
-
-    # ========================================================
-    # VALIDAR SECUENCIA
-    # ========================================================
-
-    if not _validate_5s_sequence(
-        micro
-    ):
-
-        result["micro_candles_count"] = (
-            len(micro)
-        )
-
-        result["reason"] = (
-            "secuencia 5s inválida"
-        )
-
-        return result
-
-    # ========================================================
-    # EXACTAMENTE 12
-    # ========================================================
-
-    if len(micro) != MICRO_CANDLES_REQUIRED:
-
-        result["micro_candles_count"] = (
-            len(micro)
-        )
-
-        result["reason"] = (
-            "M1 inválida: "
-            f"se requieren "
-            f"{MICRO_CANDLES_REQUIRED} "
-            f"velas de 5s y se recibieron "
-            f"{len(micro)}"
-        )
-
-        return result
-
-    result["micro_candles_count"] = (
-        len(micro)
-    )
-
-    # ========================================================
-    # ÚLTIMO CIERRE 5S
-    # ========================================================
-
-    last_close = _to_float(
-        micro.iloc[-1]["close"]
-    )
-
-    if last_close is None:
-
-        result["reason"] = (
-            "cierre de la vela 5s #12 inválido"
-        )
-
-        return result
-
-    result["last_5s_close"] = last_close
-
-    # ========================================================
-    # DOMINANTE GLOBAL
-    # ========================================================
-
-    global_dominance = (
-        _calculate_global_dominance(
-            micro
-        )
-    )
-
-    result["buy_score"] = (
-        global_dominance[
-            "buy_score"
-        ]
-    )
-
-    result["sell_score"] = (
-        global_dominance[
-            "sell_score"
-        ]
-    )
-
-    result["dominance_ratio"] = (
-        global_dominance[
-            "dominance_ratio"
-        ]
-    )
-
-    result["dominant"] = (
-        global_dominance[
-            "dominant"
-        ]
-    )
-
-    # ========================================================
-    # CONTROL FINAL
-    # ========================================================
-
-    final_control = (
-        _calculate_final_control(
-            micro
-        )
-    )
-
-    result["final_control"] = (
-        final_control[
-            "final_control"
-        ]
-    )
-
-    result["final_net"] = (
-        final_control[
-            "final_net"
-        ]
-    )
-
-    result[
-        "final_buy_movement"
-    ] = (
-        final_control[
-            "final_buy_movement"
-        ]
-    )
-
-    result[
-        "final_sell_movement"
-    ] = (
-        final_control[
-            "final_sell_movement"
-        ]
-    )
-
-    # ========================================================
-    # COMPRADOR
-    # ========================================================
-
-    if global_dominance[
-        "dominant"
-    ] == "buyer":
-
-        # ----------------------------------------------------
-        # El control final también debe ser comprador
-        # ----------------------------------------------------
-
-        if final_control[
-            "final_control"
-        ] != "buyer":
-
-            result["reason"] = (
-                "CALL bloqueada: "
-                "dominante global comprador "
-                "pero control final vendedor "
-                "o neutral"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # Último cierre 5s sobre apertura M1
-        # ----------------------------------------------------
-
-        if last_close <= opening:
-
-            result["reason"] = (
-                "CALL bloqueada: "
-                "cierre 5s #12 no está "
-                "por encima de apertura M1"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # M1 verde
-        # ----------------------------------------------------
-
-        if closing <= opening:
-
-            result["reason"] = (
-                "CALL bloqueada: "
-                "M1 no terminó verde"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # CALL CONFIRMADA
-        # ----------------------------------------------------
-
-        result["signal"] = "call"
-
-        result["valid"] = True
-
-        result["reason"] = (
-            "CALL confirmada: "
-            "dominante comprador + "
-            "control final comprador + "
-            "M1 verde"
-        )
-
-        return result
-
-    # ========================================================
-    # VENDEDOR
-    # ========================================================
-
-    if global_dominance[
-        "dominant"
-    ] == "seller":
-
-        # ----------------------------------------------------
-        # Control final vendedor
-        # ----------------------------------------------------
-
-        if final_control[
-            "final_control"
-        ] != "seller":
-
-            result["reason"] = (
-                "PUT bloqueada: "
-                "dominante global vendedor "
-                "pero control final comprador "
-                "o neutral"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # Último cierre 5s debajo apertura M1
-        # ----------------------------------------------------
-
-        if last_close >= opening:
-
-            result["reason"] = (
-                "PUT bloqueada: "
-                "cierre 5s #12 no está "
-                "por debajo de apertura M1"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # M1 roja
-        # ----------------------------------------------------
-
-        if closing >= opening:
-
-            result["reason"] = (
-                "PUT bloqueada: "
-                "M1 no terminó roja"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # PUT CONFIRMADA
-        # ----------------------------------------------------
-
-        result["signal"] = "put"
-
-        result["valid"] = True
-
-        result["reason"] = (
-            "PUT confirmada: "
-            "dominante vendedor + "
-            "control final vendedor + "
-            "M1 roja"
-        )
-
-        return result
-
-    # ========================================================
-    # DOMINANTE NEUTRAL
-    # ========================================================
-
-    result["reason"] = (
-        "sin señal: "
-        "no existe dominante suficiente"
-    )
-
-    return result
-
-
-# ============================================================
-# API PRINCIPAL
-# ============================================================
-
-def analyze_market(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    return analyze_minute(
-        candle_1m,
-        candles_5s,
+    return get_m1_direction(
+        candles_5s
     )
 
 
 # ============================================================
-# API SIMPLE
+# ANÁLISIS COMPLETO PARA EL BOT
 # ============================================================
 
-def get_signal(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Optional[str]:
+def get_strategy_analysis(candles_5s):
 
-    result = analyze_market(
-        candle_1m,
-        candles_5s,
-    )
-
-    return result.get(
-        "signal"
+    return analyze_dominance(
+        candles_5s
     )
 
 
 # ============================================================
-# COMPATIBILIDAD
+# FORMATO PARA TELEGRAM / CONSOLA
 # ============================================================
 
-def signal(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Optional[str]:
+def format_analysis(candles_5s):
 
-    return get_signal(
-        candle_1m,
-        candles_5s,
+    analysis = analyze_dominance(
+        candles_5s
+    )
+
+    if analysis is None:
+
+        return (
+            "\n"
+            "================================\n"
+            "ERROR ANALIZANDO M1\n"
+            "Se necesitan 12 velas válidas "
+            "de 5s.\n"
+            "================================"
+        )
+
+    dominant = analysis["dominant"]
+
+    if dominant == "call":
+
+        dominant_text = "CALL / ALCISTA"
+
+    elif dominant == "put":
+
+        dominant_text = "PUT / BAJISTA"
+
+    else:
+
+        dominant_text = "SIN DOMINANTE"
+
+    result = (
+        "OPERAR"
+        if analysis["market_ok"]
+        else
+        "NO OPERAR"
+    )
+
+    return (
+        "\n"
+        "========================================\n"
+        "       ANALISIS MATEMATICO M1\n"
+        "========================================\n"
+        f"Velas analizadas       : "
+        f"{M1_CANDLES}\n"
+        f"Dominante              : "
+        f"{dominant_text}\n"
+        "\n"
+        f"Fuerza verde           : "
+        f"{analysis['green_force']:.8f}\n"
+        f"Fuerza roja            : "
+        f"{analysis['red_force']:.8f}\n"
+        "\n"
+        f"Ratio verde            : "
+        f"{analysis['green_ratio']:.4f}\n"
+        f"Ratio rojo             : "
+        f"{analysis['red_ratio']:.4f}\n"
+        f"Margen dominante       : "
+        f"{analysis['dominance_margin']:.4f}\n"
+        "\n"
+        f"Desplazamiento         : "
+        f"{analysis['displacement_ratio']:.4f}\n"
+        f"Posicion cierre        : "
+        f"{analysis['close_position']:.4f}\n"
+        f"Fuerza final dominante : "
+        f"{analysis['final_dominant_ratio']:.4f}\n"
+        "\n"
+        "----------------------------------------\n"
+        f"Dominante OK           : "
+        f"{analysis['dominance_ok']}\n"
+        f"Desplazamiento OK      : "
+        f"{analysis['displacement_ok']}\n"
+        f"Cierre OK              : "
+        f"{analysis['close_ok']}\n"
+        f"Fuerza final OK        : "
+        f"{analysis['final_strength_ok']}\n"
+        "----------------------------------------\n"
+        f"RESULTADO              : "
+        f"{result}\n"
+        f"MOTIVO                 : "
+        f"{analysis['reason']}\n"
+        "========================================\n"
     )
 
 
 # ============================================================
-# PRUEBA
+# PRUEBA DIRECTA
 # ============================================================
 
 if __name__ == "__main__":
 
     print(
-        "strategy.py cargado correctamente."
+        "strategy.py cargada correctamente."
     )
 
     print(
-        "Estrategia: 1M + 12 microvelas de 5S"
+        f"M1 = {M1_CANDLES} velas de 5 segundos"
     )
 
     print(
-        "Dirección: dominante matemático."
+        "Primera vela: SIN PRIORIDAD"
     )
 
     print(
-        "Control final: últimas 3 velas."
-    )
-
-    print(
-        "Dominancia mínima: "
-        f"{DOMINANCE_THRESHOLD:.0%}"
-    )
-
-    print(
-        "CALL = comprador global + "
-        "comprador final + M1 verde"
-    )
-
-    print(
-        "PUT = vendedor global + "
-        "vendedor final + M1 roja"
-    )
-
-    print(
-        "Si existe contradicción: SIN SEÑAL."
+        "Decision: dominante + filtros matematicos"
     )
