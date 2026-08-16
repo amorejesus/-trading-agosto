@@ -5,18 +5,141 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 
+# ============================================================
+# STRATEGY.PY
+# ESTRATEGIA: 1 M1 + EXACTAMENTE 12 MICROVELAS DE 5 SEGUNDOS
+# ============================================================
+#
+# PRINCIPIO:
+#
+# La primera vela de 5s NO determina la dirección.
+#
+# Las 12 velas de 5s de la M1 se analizan completas.
+#
+# DIRECCIÓN:
+#     dominante matemático por SUMA DE CUERPOS.
+#
+# CALIDAD:
+#     1) dominancia mínima
+#     2) eficiencia del movimiento
+#     3) control de las últimas 3 velas
+#     4) posición del cierre dentro del rango
+#     5) rango mínimo respecto a M1 anteriores, si se proporciona
+#
+# IMPORTANTE:
+# Los filtros de calidad SOLO pueden bloquear una operación.
+# Nunca convierten CALL en PUT ni PUT en CALL.
+#
+# ============================================================
+# REGLAS MATEMÁTICAS
+# ============================================================
+#
+# BUY_SCORE  = suma(max(close-open, 0))
+# SELL_SCORE = suma(max(open-close, 0))
+#
+# DOMINANCE =
+#     abs(BUY_SCORE - SELL_SCORE)
+#     --------------------------
+#       BUY_SCORE + SELL_SCORE
+#
+# Se exige:
+#     DOMINANCE >= 25%
+#
+# EFICIENCIA =
+#     abs(close_12 - open_1)
+#     --------------------
+#     suma(abs(close-open)) de las 12 velas
+#
+# Se exige:
+#     EFICIENCIA >= 45%
+#
+# CONTROL FINAL:
+#     últimas 3 velas de 5s
+#
+#     final_net = suma(close-open)
+#
+#     > 0  comprador
+#     < 0  vendedor
+#     = 0  neutral
+#
+# POSICIÓN DEL CIERRE:
+#
+#     position =
+#       (close_12 - low_M1) / (high_M1 - low_M1)
+#
+# CALL:
+#     position >= 0.65
+#
+# PUT:
+#     position <= 0.35
+#
+# RANGO CONTEXTUAL:
+#
+# Si se proporcionan M1 anteriores:
+#
+#     current_range / promedio_range_anteriores
+#
+# Se exige:
+#     ratio >= 0.60
+#
+# Si NO se proporciona historial M1, este filtro queda
+# desactivado para mantener compatibilidad con el bot actual.
+#
+# ============================================================
+# CONDICIÓN FINAL CALL
+# ============================================================
+#
+# 1. 12 microvelas exactas
+# 2. comprador dominante
+# 3. dominancia >= 25%
+# 4. eficiencia >= 45%
+# 5. control final comprador
+# 6. último cierre 5s > apertura M1
+# 7. M1 verde
+# 8. posición de cierre >= 65%
+# 9. rango suficiente si existe historial
+#
+# ============================================================
+# CONDICIÓN FINAL PUT
+# ============================================================
+#
+# 1. 12 microvelas exactas
+# 2. vendedor dominante
+# 3. dominancia >= 25%
+# 4. eficiencia >= 45%
+# 5. control final vendedor
+# 6. último cierre 5s < apertura M1
+# 7. M1 roja
+# 8. posición de cierre <= 35%
+# 9. rango suficiente si existe historial
+#
+# ============================================================
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
 MICRO_CANDLES_REQUIRED = 12
+
 FINAL_CONTROL_CANDLES = 3
 
 DOMINANCE_THRESHOLD = 0.25
+
 EFFICIENCY_THRESHOLD = 0.45
+
 MIN_RANGE_RATIO = 0.60
 
 CLOSE_POSITION_CALL = 0.65
+
 CLOSE_POSITION_PUT = 0.35
 
 PREVIOUS_M1_COUNT = 5
 
+
+# ============================================================
+# UTILIDAD
+# ============================================================
 
 def _to_float(value: Any) -> Optional[float]:
     try:
@@ -25,71 +148,95 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
-def _normalize_5s(candles: Any) -> pd.DataFrame:
-    if candles is None:
+# ============================================================
+# NORMALIZAR 5S
+# ============================================================
+
+def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
+
+    if df is None:
         return pd.DataFrame()
 
-    if isinstance(candles, list):
-        candles = pd.DataFrame(candles)
-
-    if not isinstance(candles, pd.DataFrame):
+    if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
 
-    if candles.empty:
+    if df.empty:
         return pd.DataFrame()
 
-    out = candles.copy()
+    out = df.copy()
 
-    rename = {
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "OpenPrice": "open",
-        "ClosePrice": "close",
-        "max": "high",
-        "min": "low",
-    }
+    rename = {}
 
-    for old, new in rename.items():
-        if old in out.columns and new not in out.columns:
-            out.rename(columns={old: new}, inplace=True)
+    if "max" in out.columns and "high" not in out.columns:
+        rename["max"] = "high"
 
-    required = ["open", "close"]
+    if "min" in out.columns and "low" not in out.columns:
+        rename["min"] = "low"
 
-    if any(column not in out.columns for column in required):
+    if "Open" in out.columns and "open" not in out.columns:
+        rename["Open"] = "open"
+
+    if "High" in out.columns and "high" not in out.columns:
+        rename["High"] = "high"
+
+    if "Low" in out.columns and "low" not in out.columns:
+        rename["Low"] = "low"
+
+    if "Close" in out.columns and "close" not in out.columns:
+        rename["Close"] = "close"
+
+    if rename:
+        out.rename(columns=rename, inplace=True)
+
+    if "open" not in out.columns:
         return pd.DataFrame()
 
-    for column in ("open", "high", "low", "close", "from", "to"):
-        if column in out.columns:
-            out[column] = pd.to_numeric(
-                out[column],
-                errors="coerce",
-            )
+    if "close" not in out.columns:
+        return pd.DataFrame()
 
-    out.dropna(
-        subset=["open", "close"],
-        inplace=True,
+    out["open"] = pd.to_numeric(
+        out["open"],
+        errors="coerce",
     )
 
+    out["close"] = pd.to_numeric(
+        out["close"],
+        errors="coerce",
+    )
+
+    if "high" in out.columns:
+        out["high"] = pd.to_numeric(
+            out["high"],
+            errors="coerce",
+        )
+
+    if "low" in out.columns:
+        out["low"] = pd.to_numeric(
+            out["low"],
+            errors="coerce",
+        )
+
     if "from" in out.columns:
+
+        out["from"] = pd.to_numeric(
+            out["from"],
+            errors="coerce",
+        )
+
         out.dropna(
             subset=["from"],
             inplace=True,
         )
-
-        out["from"] = out["from"].astype(float)
 
         out.sort_values(
             "from",
             inplace=True,
         )
 
-        out.drop_duplicates(
-            subset=["from"],
-            keep="last",
-            inplace=True,
-        )
+    out.dropna(
+        subset=["open", "close"],
+        inplace=True,
+    )
 
     out.reset_index(
         drop=True,
@@ -99,32 +246,48 @@ def _normalize_5s(candles: Any) -> pd.DataFrame:
     return out
 
 
+# ============================================================
+# VALIDAR SECUENCIA 5S
+# ============================================================
+
 def _validate_5s_sequence(
     micro: pd.DataFrame,
 ) -> bool:
+
     if micro.empty:
         return False
 
     if "from" not in micro.columns:
         return True
 
-    timestamps = micro["from"].astype(float).tolist()
+    if len(micro) < 2:
+        return False
 
-    if len(timestamps) < 2:
-        return True
+    timestamps = (
+        micro["from"]
+        .astype(float)
+        .tolist()
+    )
 
-    for index in range(1, len(timestamps)):
-        difference = timestamps[index] - timestamps[index - 1]
+    for i in range(1, len(timestamps)):
 
-        if difference != 5:
+        if (
+            timestamps[i]
+            - timestamps[i - 1]
+            != 5
+        ):
             return False
 
     return True
 
 
+# ============================================================
+# OBTENER MICROVELAS DE LA M1
+# ============================================================
+
 def _get_minute_micro_candles(
     candle_1m: pd.Series,
-    candles_5s: Any,
+    candles_5s: pd.DataFrame,
 ) -> pd.DataFrame:
 
     micro = _normalize_5s(candles_5s)
@@ -134,18 +297,24 @@ def _get_minute_micro_candles(
 
     minute_timestamp = None
 
-    try:
-        if candle_1m is not None and "from" in candle_1m.index:
-            minute_timestamp = int(
-                float(candle_1m["from"])
-            )
-    except (TypeError, ValueError):
-        minute_timestamp = None
+    if candle_1m is not None:
+
+        try:
+
+            if "from" in candle_1m.index:
+
+                minute_timestamp = int(
+                    float(candle_1m["from"])
+                )
+
+        except (TypeError, ValueError):
+            minute_timestamp = None
 
     if (
         minute_timestamp is not None
         and "from" in micro.columns
     ):
+
         start_time = minute_timestamp
         end_time = minute_timestamp + 60
 
@@ -172,6 +341,10 @@ def _get_minute_micro_candles(
 
     return micro
 
+
+# ============================================================
+# DOMINANTE GLOBAL
+# ============================================================
 
 def _calculate_global_dominance(
     micro: pd.DataFrame,
@@ -237,6 +410,10 @@ def _calculate_global_dominance(
     return result
 
 
+# ============================================================
+# EFICIENCIA
+# ============================================================
+
 def _calculate_efficiency(
     micro: pd.DataFrame,
 ) -> Dict[str, Any]:
@@ -258,7 +435,10 @@ def _calculate_efficiency(
         micro.iloc[-1]["close"]
     )
 
-    if first_open is None or last_close is None:
+    if (
+        first_open is None
+        or last_close is None
+    ):
         return result
 
     total_abs_body = 0.0
@@ -275,7 +455,9 @@ def _calculate_efficiency(
             closing - opening
         )
 
-    net_movement = last_close - first_open
+    net_movement = (
+        last_close - first_open
+    )
 
     result["net_movement"] = net_movement
     result["total_abs_body"] = total_abs_body
@@ -290,6 +472,10 @@ def _calculate_efficiency(
 
     return result
 
+
+# ============================================================
+# CONTROL FINAL
+# ============================================================
 
 def _calculate_final_control(
     micro: pd.DataFrame,
@@ -344,6 +530,10 @@ def _calculate_final_control(
     return result
 
 
+# ============================================================
+# RANGO DE LAS 12 MICROVELAS
+# ============================================================
+
 def _calculate_micro_range(
     micro: pd.DataFrame,
 ) -> Optional[float]:
@@ -351,10 +541,8 @@ def _calculate_micro_range(
     if micro.empty:
         return None
 
-    if (
-        "high" in micro.columns
-        and "low" in micro.columns
-    ):
+    if "high" in micro.columns and "low" in micro.columns:
+
         highs = pd.to_numeric(
             micro["high"],
             errors="coerce",
@@ -369,33 +557,41 @@ def _calculate_micro_range(
             highs.notna().all()
             and lows.notna().all()
         ):
-            return float(highs.max()) - float(lows.min())
 
-    opens = pd.to_numeric(
-        micro["open"],
-        errors="coerce",
-    )
+            high_value = float(highs.max())
+            low_value = float(lows.min())
+
+            return high_value - low_value
 
     closes = pd.to_numeric(
         micro["close"],
         errors="coerce",
     )
 
-    if opens.isna().any() or closes.isna().any():
+    opens = pd.to_numeric(
+        micro["open"],
+        errors="coerce",
+    )
+
+    if closes.isna().any() or opens.isna().any():
         return None
 
     high_value = max(
-        float(opens.max()),
         float(closes.max()),
+        float(opens.max()),
     )
 
     low_value = min(
-        float(opens.min()),
         float(closes.min()),
+        float(opens.min()),
     )
 
     return high_value - low_value
 
+
+# ============================================================
+# RANGO CONTEXTUAL DE M1
+# ============================================================
 
 def _calculate_range_context(
     candle_1m: pd.Series,
@@ -410,6 +606,10 @@ def _calculate_range_context(
         "range_ratio": None,
         "range_ok": True,
     }
+
+    # --------------------------------------------------------
+    # Rango actual
+    # --------------------------------------------------------
 
     current_range = None
 
@@ -437,6 +637,10 @@ def _calculate_range_context(
 
     result["current_range"] = current_range
 
+    # --------------------------------------------------------
+    # Sin historial: compatibilidad
+    # --------------------------------------------------------
+
     if (
         previous_m1 is None
         or not isinstance(previous_m1, pd.DataFrame)
@@ -444,29 +648,25 @@ def _calculate_range_context(
     ):
         return result
 
-    previous = previous_m1.copy()
+    if "high" not in previous_m1.columns:
+        if "High" in previous_m1.columns:
+            previous_m1 = previous_m1.rename(
+                columns={"High": "high"}
+            )
 
-    rename = {}
-
-    if "High" in previous.columns and "high" not in previous.columns:
-        rename["High"] = "high"
-
-    if "Low" in previous.columns and "low" not in previous.columns:
-        rename["Low"] = "low"
-
-    if rename:
-        previous.rename(
-            columns=rename,
-            inplace=True,
-        )
+    if "low" not in previous_m1.columns:
+        if "Low" in previous_m1.columns:
+            previous_m1 = previous_m1.rename(
+                columns={"Low": "low"}
+            )
 
     if (
-        "high" not in previous.columns
-        or "low" not in previous.columns
+        "high" not in previous_m1.columns
+        or "low" not in previous_m1.columns
     ):
         return result
 
-    previous = previous.tail(
+    previous = previous_m1.tail(
         PREVIOUS_M1_COUNT
     ).copy()
 
@@ -493,7 +693,9 @@ def _calculate_range_context(
         - previous["low"]
     )
 
-    ranges = ranges[ranges > 0]
+    ranges = ranges[
+        ranges > 0
+    ]
 
     if ranges.empty:
         return result
@@ -502,21 +704,34 @@ def _calculate_range_context(
         ranges.mean()
     )
 
-    result["average_previous_range"] = average_range
+    result[
+        "average_previous_range"
+    ] = average_range
 
-    if current_range is None or average_range <= 0:
+    if (
+        current_range is None
+        or average_range <= 0
+    ):
         return result
 
-    ratio = current_range / average_range
+    ratio = (
+        current_range
+        / average_range
+    )
 
     result["range_context_available"] = True
     result["range_ratio"] = ratio
+
     result["range_ok"] = (
         ratio >= MIN_RANGE_RATIO
     )
 
     return result
 
+
+# ============================================================
+# POSICIÓN DEL CIERRE
+# ============================================================
 
 def _calculate_close_position(
     micro: pd.DataFrame,
@@ -532,6 +747,7 @@ def _calculate_close_position(
         "high" in micro.columns
         and "low" in micro.columns
     ):
+
         highs = pd.to_numeric(
             micro["high"],
             errors="coerce",
@@ -546,6 +762,7 @@ def _calculate_close_position(
             highs.notna().all()
             and lows.notna().all()
         ):
+
             high = float(highs.max())
             low = float(lows.min())
 
@@ -581,7 +798,10 @@ def _calculate_close_position(
         micro.iloc[-1]["close"]
     )
 
-    if last_close is None or high <= low:
+    if last_close is None:
+        return None
+
+    if high <= low:
         return None
 
     return (
@@ -591,18 +811,25 @@ def _calculate_close_position(
     )
 
 
+# ============================================================
+# ANALIZAR UNA M1
+# ============================================================
+
 def analyze_minute(
     candle_1m: pd.Series,
-    candles_5s: Any,
+    candles_5s: pd.DataFrame,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
 
-    result = {
+    result: Dict[str, Any] = {
+
         "signal": None,
         "valid": False,
+
         "reason": "sin señal",
 
         "minute_timestamp": None,
+
         "minute_open": None,
         "minute_close": None,
 
@@ -610,6 +837,7 @@ def analyze_minute(
 
         "buy_score": 0.0,
         "sell_score": 0.0,
+
         "dominance_ratio": 0.0,
         "dominant": None,
 
@@ -618,10 +846,12 @@ def analyze_minute(
 
         "final_control": None,
         "final_net": 0.0,
+
         "final_buy_movement": 0.0,
         "final_sell_movement": 0.0,
 
         "last_5s_close": None,
+
         "close_position": None,
 
         "current_range": None,
@@ -641,34 +871,47 @@ def analyze_minute(
         },
     }
 
+    # ========================================================
+    # M1
+    # ========================================================
+
     if candle_1m is None:
-        result["reason"] = "vela 1M no disponible"
-        return result
 
-    try:
-        opening = _to_float(
-            candle_1m.get("open")
+        result["reason"] = (
+            "vela 1M no disponible"
         )
 
-        closing = _to_float(
-            candle_1m.get("close")
-        )
-    except AttributeError:
-        result["reason"] = "vela 1M inválida"
         return result
+
+    opening = _to_float(
+        candle_1m.get("open")
+    )
+
+    closing = _to_float(
+        candle_1m.get("close")
+    )
 
     if opening is None:
-        result["reason"] = "apertura 1M inválida"
+
+        result["reason"] = (
+            "apertura 1M inválida"
+        )
+
         return result
 
     if closing is None:
-        result["reason"] = "cierre 1M inválido"
+
+        result["reason"] = (
+            "cierre 1M inválido"
+        )
+
         return result
 
     result["minute_open"] = opening
     result["minute_close"] = closing
 
     if "from" in candle_1m.index:
+
         try:
             result["minute_timestamp"] = int(
                 float(candle_1m["from"])
@@ -676,80 +919,171 @@ def analyze_minute(
         except (TypeError, ValueError):
             pass
 
+    # ========================================================
+    # MICROVELAS
+    # ========================================================
+
     micro = _get_minute_micro_candles(
         candle_1m,
         candles_5s,
     )
 
     if micro.empty:
-        result["reason"] = "no hay microvelas 5s"
-        return result
 
-    result["micro_candles_count"] = len(micro)
-
-    if len(micro) != MICRO_CANDLES_REQUIRED:
         result["reason"] = (
-            "M1 inválida: se requieren "
-            f"{MICRO_CANDLES_REQUIRED} velas de 5s "
-            f"y se recibieron {len(micro)}"
+            "no hay microvelas 5s"
         )
+
         return result
+
+    result["micro_candles_count"] = len(
+        micro
+    )
 
     if not _validate_5s_sequence(micro):
-        result["reason"] = "secuencia 5s inválida"
+
+        result["reason"] = (
+            "secuencia 5s inválida"
+        )
+
         return result
+
+    # ========================================================
+    # EXACTAMENTE 12
+    # ========================================================
+
+    if len(micro) != MICRO_CANDLES_REQUIRED:
+
+        result["reason"] = (
+            "M1 inválida: se requieren "
+            f"{MICRO_CANDLES_REQUIRED} velas "
+            f"de 5s y se recibieron "
+            f"{len(micro)}"
+        )
+
+        return result
+
+    # ========================================================
+    # ÚLTIMO CIERRE
+    # ========================================================
 
     last_close = _to_float(
         micro.iloc[-1]["close"]
     )
 
     if last_close is None:
-        result["reason"] = "cierre 5s #12 inválido"
+
+        result["reason"] = (
+            "cierre 5s #12 inválido"
+        )
+
         return result
 
     result["last_5s_close"] = last_close
 
-    dominance = _calculate_global_dominance(micro)
+    # ========================================================
+    # DOMINANTE
+    # ========================================================
 
-    result["buy_score"] = dominance["buy_score"]
-    result["sell_score"] = dominance["sell_score"]
-    result["dominance_ratio"] = dominance["dominance_ratio"]
-    result["dominant"] = dominance["dominant"]
+    dominance = _calculate_global_dominance(
+        micro
+    )
+
+    result["buy_score"] = dominance[
+        "buy_score"
+    ]
+
+    result["sell_score"] = dominance[
+        "sell_score"
+    ]
+
+    result["dominance_ratio"] = dominance[
+        "dominance_ratio"
+    ]
+
+    result["dominant"] = dominance[
+        "dominant"
+    ]
 
     dominance_ok = (
-        result["dominant"] in ("buyer", "seller")
+        result["dominant"] in (
+            "buyer",
+            "seller",
+        )
         and result["dominance_ratio"]
         >= DOMINANCE_THRESHOLD
     )
 
-    result["quality_checks"]["dominance_ok"] = dominance_ok
+    result[
+        "quality_checks"
+    ]["dominance_ok"] = dominance_ok
 
-    efficiency = _calculate_efficiency(micro)
+    # ========================================================
+    # EFICIENCIA
+    # ========================================================
 
-    result["efficiency"] = efficiency["efficiency"]
-    result["net_movement"] = efficiency["net_movement"]
+    efficiency = _calculate_efficiency(
+        micro
+    )
+
+    result["efficiency"] = efficiency[
+        "efficiency"
+    ]
+
+    result["net_movement"] = efficiency[
+        "net_movement"
+    ]
 
     efficiency_ok = (
         result["efficiency"]
         >= EFFICIENCY_THRESHOLD
     )
 
-    result["quality_checks"]["efficiency_ok"] = efficiency_ok
+    result[
+        "quality_checks"
+    ]["efficiency_ok"] = efficiency_ok
 
-    final_control = _calculate_final_control(micro)
+    # ========================================================
+    # CONTROL FINAL
+    # ========================================================
 
-    result["final_control"] = final_control["final_control"]
-    result["final_net"] = final_control["final_net"]
-    result["final_buy_movement"] = final_control[
-        "final_buy_movement"
-    ]
-    result["final_sell_movement"] = final_control[
-        "final_sell_movement"
-    ]
+    final_control = _calculate_final_control(
+        micro
+    )
 
-    close_position = _calculate_close_position(micro)
+    result["final_control"] = (
+        final_control["final_control"]
+    )
+
+    result["final_net"] = (
+        final_control["final_net"]
+    )
+
+    result["final_buy_movement"] = (
+        final_control[
+            "final_buy_movement"
+        ]
+    )
+
+    result["final_sell_movement"] = (
+        final_control[
+            "final_sell_movement"
+        ]
+    )
+
+    # ========================================================
+    # POSICIÓN DEL CIERRE
+    # ========================================================
+
+    close_position = _calculate_close_position(
+        micro
+    )
 
     result["close_position"] = close_position
+
+    # ========================================================
+    # RANGO CONTEXTUAL
+    # ========================================================
 
     range_context = _calculate_range_context(
         candle_1m,
@@ -757,32 +1091,45 @@ def analyze_minute(
         micro,
     )
 
-    result["current_range"] = range_context[
-        "current_range"
-    ]
+    result["current_range"] = (
+        range_context["current_range"]
+    )
 
-    result["average_previous_range"] = range_context[
-        "average_previous_range"
-    ]
+    result["average_previous_range"] = (
+        range_context[
+            "average_previous_range"
+        ]
+    )
 
-    result["range_ratio"] = range_context[
-        "range_ratio"
-    ]
+    result["range_ratio"] = (
+        range_context["range_ratio"]
+    )
 
-    result["range_context_available"] = range_context[
-        "range_context_available"
-    ]
+    result["range_context_available"] = (
+        range_context[
+            "range_context_available"
+        ]
+    )
 
-    result["range_ok"] = range_context["range_ok"]
+    result["range_ok"] = (
+        range_context["range_ok"]
+    )
 
-    result["quality_checks"]["range_ok"] = (
+    result[
+        "quality_checks"
+    ]["range_ok"] = (
         result["range_ok"]
     )
+
+    # ========================================================
+    # CALL
+    # ========================================================
 
     if result["dominant"] == "buyer":
 
         final_control_ok = (
-            result["final_control"] == "buyer"
+            result["final_control"]
+            == "buyer"
         )
 
         last_close_ok = (
@@ -795,78 +1142,123 @@ def analyze_minute(
 
         close_position_ok = (
             close_position is not None
-            and close_position >= CLOSE_POSITION_CALL
+            and close_position
+            >= CLOSE_POSITION_CALL
         )
 
-        result["quality_checks"]["final_control_ok"] = (
+        result[
+            "quality_checks"
+        ]["final_control_ok"] = (
             final_control_ok
         )
 
-        result["quality_checks"]["last_close_ok"] = (
+        result[
+            "quality_checks"
+        ]["last_close_ok"] = (
             last_close_ok
         )
 
-        result["quality_checks"]["m1_color_ok"] = (
+        result[
+            "quality_checks"
+        ]["m1_color_ok"] = (
             m1_color_ok
         )
 
-        result["quality_checks"]["close_position_ok"] = (
+        result[
+            "quality_checks"
+        ]["close_position_ok"] = (
             close_position_ok
         )
 
         if not dominance_ok:
+
             result["reason"] = (
-                "CALL bloqueada: dominancia insuficiente"
+                "CALL bloqueada: "
+                "dominancia insuficiente"
             )
+
             return result
 
         if not efficiency_ok:
+
             result["reason"] = (
-                "CALL bloqueada: eficiencia insuficiente"
+                "CALL bloqueada: "
+                "eficiencia insuficiente"
             )
+
             return result
 
         if not final_control_ok:
+
             result["reason"] = (
-                "CALL bloqueada: control final no comprador"
+                "CALL bloqueada: "
+                "control final no comprador"
             )
+
             return result
 
         if not last_close_ok:
+
             result["reason"] = (
-                "CALL bloqueada: último cierre 5s "
-                "no supera apertura M1"
+                "CALL bloqueada: "
+                "último cierre 5s no supera "
+                "la apertura M1"
             )
+
             return result
 
         if not m1_color_ok:
+
             result["reason"] = (
-                "CALL bloqueada: M1 no terminó verde"
+                "CALL bloqueada: "
+                "M1 no terminó verde"
             )
+
             return result
 
         if not close_position_ok:
+
             result["reason"] = (
-                "CALL bloqueada: posición de cierre inválida"
+                "CALL bloqueada: "
+                "cierre demasiado alejado "
+                "del extremo superior"
             )
+
             return result
 
         if not result["range_ok"]:
+
             result["reason"] = (
-                "CALL bloqueada: rango M1 insuficiente"
+                "CALL bloqueada: "
+                "rango M1 insuficiente "
+                "respecto al contexto"
             )
+
             return result
 
         result["signal"] = "call"
         result["valid"] = True
-        result["reason"] = "CALL confirmada"
+
+        result["reason"] = (
+            "CALL confirmada: "
+            "dominante comprador + "
+            "eficiencia + "
+            "control final + "
+            "M1 verde + "
+            "posición de cierre válida"
+        )
 
         return result
+
+    # ========================================================
+    # PUT
+    # ========================================================
 
     if result["dominant"] == "seller":
 
         final_control_ok = (
-            result["final_control"] == "seller"
+            result["final_control"]
+            == "seller"
         )
 
         last_close_ok = (
@@ -879,84 +1271,134 @@ def analyze_minute(
 
         close_position_ok = (
             close_position is not None
-            and close_position <= CLOSE_POSITION_PUT
+            and close_position
+            <= CLOSE_POSITION_PUT
         )
 
-        result["quality_checks"]["final_control_ok"] = (
+        result[
+            "quality_checks"
+        ]["final_control_ok"] = (
             final_control_ok
         )
 
-        result["quality_checks"]["last_close_ok"] = (
+        result[
+            "quality_checks"
+        ]["last_close_ok"] = (
             last_close_ok
         )
 
-        result["quality_checks"]["m1_color_ok"] = (
+        result[
+            "quality_checks"
+        ]["m1_color_ok"] = (
             m1_color_ok
         )
 
-        result["quality_checks"]["close_position_ok"] = (
+        result[
+            "quality_checks"
+        ]["close_position_ok"] = (
             close_position_ok
         )
 
         if not dominance_ok:
+
             result["reason"] = (
-                "PUT bloqueada: dominancia insuficiente"
+                "PUT bloqueada: "
+                "dominancia insuficiente"
             )
+
             return result
 
         if not efficiency_ok:
+
             result["reason"] = (
-                "PUT bloqueada: eficiencia insuficiente"
+                "PUT bloqueada: "
+                "eficiencia insuficiente"
             )
+
             return result
 
         if not final_control_ok:
+
             result["reason"] = (
-                "PUT bloqueada: control final no vendedor"
+                "PUT bloqueada: "
+                "control final no vendedor"
             )
+
             return result
 
         if not last_close_ok:
+
             result["reason"] = (
-                "PUT bloqueada: último cierre 5s "
-                "no está debajo de apertura M1"
+                "PUT bloqueada: "
+                "último cierre 5s no está "
+                "debajo de la apertura M1"
             )
+
             return result
 
         if not m1_color_ok:
+
             result["reason"] = (
-                "PUT bloqueada: M1 no terminó roja"
+                "PUT bloqueada: "
+                "M1 no terminó roja"
             )
+
             return result
 
         if not close_position_ok:
+
             result["reason"] = (
-                "PUT bloqueada: posición de cierre inválida"
+                "PUT bloqueada: "
+                "cierre demasiado alejado "
+                "del extremo inferior"
             )
+
             return result
 
         if not result["range_ok"]:
+
             result["reason"] = (
-                "PUT bloqueada: rango M1 insuficiente"
+                "PUT bloqueada: "
+                "rango M1 insuficiente "
+                "respecto al contexto"
             )
+
             return result
 
         result["signal"] = "put"
         result["valid"] = True
-        result["reason"] = "PUT confirmada"
+
+        result["reason"] = (
+            "PUT confirmada: "
+            "dominante vendedor + "
+            "eficiencia + "
+            "control final + "
+            "M1 roja + "
+            "posición de cierre válida"
+        )
 
         return result
 
+    # ========================================================
+    # SIN DOMINANTE
+    # ========================================================
+
     result["reason"] = (
-        "sin señal: no existe dominante matemático"
+        "sin señal: "
+        "no existe dominante matemático "
+        "suficiente"
     )
 
     return result
 
 
+# ============================================================
+# API PRINCIPAL
+# ============================================================
+
 def analyze_market(
     candle_1m: pd.Series,
-    candles_5s: Any,
+    candles_5s: pd.DataFrame,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
 
@@ -967,26 +1409,17 @@ def analyze_market(
     )
 
 
-def get_strategy_analysis(
-    candle_1m: pd.Series,
-    candles_5s: Any,
-    previous_m1: Optional[pd.DataFrame] = None,
-) -> Dict[str, Any]:
-
-    return analyze_minute(
-        candle_1m,
-        candles_5s,
-        previous_m1,
-    )
-
+# ============================================================
+# API SIMPLE
+# ============================================================
 
 def get_signal(
     candle_1m: pd.Series,
-    candles_5s: Any,
+    candles_5s: pd.DataFrame,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
 
-    result = analyze_minute(
+    result = analyze_market(
         candle_1m,
         candles_5s,
         previous_m1,
@@ -995,9 +1428,13 @@ def get_signal(
     return result.get("signal")
 
 
+# ============================================================
+# COMPATIBILIDAD
+# ============================================================
+
 def signal(
     candle_1m: pd.Series,
-    candles_5s: Any,
+    candles_5s: pd.DataFrame,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
 
@@ -1008,62 +1445,49 @@ def signal(
     )
 
 
-def get_m1_direction(
-    candle_1m: Any,
-) -> Optional[str]:
-
-    if candle_1m is None:
-        return None
-
-    try:
-        opening = _to_float(
-            candle_1m.get("open")
-        )
-
-        closing = _to_float(
-            candle_1m.get("close")
-        )
-    except AttributeError:
-        return None
-
-    if opening is None or closing is None:
-        return None
-
-    if closing > opening:
-        return "call"
-
-    if closing < opening:
-        return "put"
-
-    return None
-
-
-def check_pattern(
-    candles_5s: Any,
-) -> Optional[str]:
-
-    micro = _normalize_5s(candles_5s)
-
-    if len(micro) != MICRO_CANDLES_REQUIRED:
-        return None
-
-    if not _validate_5s_sequence(micro):
-        return None
-
-    dominance = _calculate_global_dominance(micro)
-
-    if dominance["dominant"] == "buyer":
-        return "call"
-
-    if dominance["dominant"] == "seller":
-        return "put"
-
-    return None
-
+# ============================================================
+# PRUEBA
+# ============================================================
 
 if __name__ == "__main__":
-    print("strategy.py cargado correctamente")
-    print("12 velas de 5 segundos")
-    print("check_pattern() disponible")
-    print("get_m1_direction() disponible")
-    print("get_strategy_analysis() disponible")
+
+    print(
+        "strategy.py cargado correctamente."
+    )
+
+    print(
+        "1 M1 = exactamente 12 velas de 5S"
+    )
+
+    print(
+        "La primera 5S NO determina la dirección."
+    )
+
+    print(
+        "Dirección = dominante matemático."
+    )
+
+    print(
+        f"Dominancia mínima = "
+        f"{DOMINANCE_THRESHOLD:.0%}"
+    )
+
+    print(
+        f"Eficiencia mínima = "
+        f"{EFFICIENCY_THRESHOLD:.0%}"
+    )
+
+    print(
+        f"Control final = "
+        f"últimas {FINAL_CONTROL_CANDLES} velas"
+    )
+
+    print(
+        f"Rango mínimo contextual = "
+        f"{MIN_RANGE_RATIO:.0%}"
+    )
+
+    print(
+        "CALL y PUT solamente se bloquean; "
+        "los filtros no cambian la dirección."
+    )
