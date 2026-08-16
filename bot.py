@@ -15,7 +15,7 @@ from strategy import analyze_market
 
 
 # ============================================================
-# CONFIGURACIÃ“N
+# CONFIGURACIÓN
 # ============================================================
 
 IQ_EMAIL = os.getenv("IQ_EMAIL")
@@ -44,7 +44,7 @@ MICRO_CANDLE_COUNT = 12
 
 
 # ============================================================
-# OPERACIÃ“N
+# OPERACIÓN
 # ============================================================
 
 AMOUNT = 70
@@ -55,10 +55,10 @@ EXPIRATION = 1
 # LOOP SNIPER
 # ============================================================
 
-# Poll muy rÃ¡pido para detectar el cambio de vela.
+# Poll muy rápido para detectar el cambio de vela.
 POLL_INTERVAL = 0.03
 
-# No se permite ejecutar una seÃ±al atrasada.
+# No se permite ejecutar una señal atrasada.
 MAX_ENTRY_DELAY = 5.0
 
 
@@ -84,15 +84,15 @@ LAST_UPDATE_ID: Optional[int] = None
 LAST_TELEGRAM_CHECK = 0.0
 
 
-# Ãšltima vela N cerrada analizada.
+# Última vela N cerrada analizada.
 LAST_PROCESSED_MINUTE: Dict[str, int] = {}
 
 
-# SeÃ±al pendiente para N+1.
+# Señal pendiente para N+1.
 PENDING_ENTRY: Dict[str, Dict[str, Any]] = {}
 
 
-# Ãšltima vela donde realmente se abriÃ³ operaciÃ³n.
+# Última vela donde realmente se abrió operación.
 LAST_TRADE_CANDLE: Dict[str, int] = {}
 
 
@@ -265,17 +265,17 @@ def telegram_worker() -> None:
                     BOT_RUNNING = True
 
                     telegram_send(
-                        "ðŸŸ¢ BOT ACTIVADO\n\n"
+                        "🟢 BOT ACTIVADO\n\n"
                         "ESTRATEGIA 1M + 5S\n\n"
                         "CALL:\n"
-                        "ðŸŸ¢ Primera 5S > apertura 1M\n"
-                        "ðŸ”´ Retroceso 5S < apertura 1M\n"
-                        "ðŸŸ¢ Cierre 1M verde\n\n"
+                        "🟢 Primera 5S > apertura 1M\n"
+                        "🔴 Retroceso 5S < apertura 1M\n"
+                        "🟢 Cierre 1M verde\n\n"
                         "PUT:\n"
-                        "ðŸ”´ Primera 5S < apertura 1M\n"
-                        "ðŸŸ¢ Retroceso 5S > apertura 1M\n"
-                        "ðŸ”´ Cierre 1M rojo\n\n"
-                        "ðŸŽ¯ SNIPER N+1\n"
+                        "🔴 Primera 5S < apertura 1M\n"
+                        "🟢 Retroceso 5S > apertura 1M\n"
+                        "🔴 Cierre 1M rojo\n\n"
+                        "🎯 SNIPER N+1\n"
                         "Entrada inmediatamente al comenzar N+1."
                     )
 
@@ -292,8 +292,8 @@ def telegram_worker() -> None:
                     BOT_RUNNING = False
 
                     telegram_send(
-                        "ðŸ”´ BOT DETENIDO\n\n"
-                        "No se abrirÃ¡n nuevas operaciones."
+                        "🔴 BOT DETENIDO\n\n"
+                        "No se abrirán nuevas operaciones."
                     )
 
                     logger.info(
@@ -307,14 +307,14 @@ def telegram_worker() -> None:
                 elif text == "/status":
 
                     status = (
-                        "ðŸŸ¢ ACTIVO"
+                        "🟢 ACTIVO"
                         if BOT_RUNNING
                         else
-                        "ðŸ”´ DETENIDO"
+                        "🔴 DETENIDO"
                     )
 
                     telegram_send(
-                        "ðŸ“Š ESTADO\n\n"
+                        "📊 ESTADO\n\n"
                         f"Estado: {status}\n"
                         "Modo: SNIPER\n"
                         "Principal: 1M\n"
@@ -368,7 +368,7 @@ def get_server_timestamp() -> Optional[int]:
 
 
 # ============================================================
-# CONEXIÃ“N IQ OPTION
+# CONEXIÓN IQ OPTION
 # ============================================================
 
 def connect_iq() -> bool:
@@ -419,7 +419,7 @@ def connect_iq() -> bool:
     )
 
     telegram_send(
-        "ðŸŸ¢ IQ OPTION CONECTADO\n\n"
+        "🟢 IQ OPTION CONECTADO\n\n"
         "Modo SNIPER\n"
         "Binarias OTC\n"
         "Entrada inmediata en N+1."
@@ -448,7 +448,7 @@ def ensure_connection() -> bool:
             return True
 
         logger.warning(
-            "ConexiÃ³n IQ perdida. Reconectando..."
+            "Conexión IQ perdida. Reconectando..."
         )
 
         connected, reason = IQ.connect()
@@ -456,7 +456,7 @@ def ensure_connection() -> bool:
         if not connected:
 
             logger.error(
-                "ReconexiÃ³n fallida: %s",
+                "Reconexión fallida: %s",
                 reason,
             )
 
@@ -467,7 +467,7 @@ def ensure_connection() -> bool:
         start_realtime_streams()
 
         telegram_send(
-            "ðŸŸ¢ IQ OPTION RECONectado"
+            "🟢 IQ OPTION RECONectado"
         )
 
         return True
@@ -475,7 +475,7 @@ def ensure_connection() -> bool:
     except Exception as exc:
 
         logger.error(
-            "Error conexiÃ³n IQ: %s",
+            "Error conexión IQ: %s",
             exc,
         )
 
@@ -736,7 +736,7 @@ def get_closed_1m(
 
 
 # ============================================================
-# CREAR SEÃ‘AL PENDIENTE
+# CREAR SEÑAL PENDIENTE
 # ============================================================
 
 def create_pending_signal(
@@ -831,16 +831,16 @@ def create_pending_signal(
     }
 
     direction = (
-        "CALL ðŸŸ¢"
+        "CALL 🟢"
         if signal == "call"
         else
-        "PUT ðŸ”´"
+        "PUT 🔴"
     )
 
     telegram_send(
-        "ðŸŽ¯ SEÃ‘AL CONFIRMADA\n\n"
+        "🎯 SEÑAL CONFIRMADA\n\n"
         f"Par: {pair}\n"
-        f"DirecciÃ³n: {direction}\n\n"
+        f"Dirección: {direction}\n\n"
         "VELA N CERRADA\n"
         f"Timestamp: {minute_ts}\n"
         f"Apertura: {opening}\n"
@@ -849,14 +849,14 @@ def create_pending_signal(
         f"Cierre: {first_5s_close}\n\n"
         "RETROCESOS 5S\n"
         f"Cantidad: {pullback_count}\n\n"
-        "âœ… PATRÃ“N CONFIRMADO\n"
-        "ðŸš« N NO SE OPERA\n"
-        "âž¡ï¸ ENTRADA EXCLUSIVA EN N+1\n"
+        "✅ PATRÓN CONFIRMADO\n"
+        "🚫 N NO SE OPERA\n"
+        "➡️ ENTRADA EXCLUSIVA EN N+1\n"
         f"N+1: {next_timestamp}"
     )
 
     logger.info(
-        "%s | SEÃ‘AL %s | N=%s | N+1=%s",
+        "%s | SEÑAL %s | N=%s | N+1=%s",
         pair,
         signal.upper(),
         minute_ts,
@@ -959,7 +959,7 @@ def buy_binary(
 
 
 # ============================================================
-# EJECUCIÃ“N SNIPER N+1
+# EJECUCIÓN SNIPER N+1
 # ============================================================
 
 def execute_pending(
@@ -1000,7 +1000,7 @@ def execute_pending(
     )
 
     # ========================================================
-    # N TODAVÃA VIVA
+    # N TODAVÍA VIVA
     # ========================================================
 
     if current_minute < n1_timestamp:
@@ -1016,7 +1016,7 @@ def execute_pending(
         pass
 
     # ========================================================
-    # N+2 O MÃS
+    # N+2 O MÁS
     #
     # SE CANCELA.
     #
@@ -1026,7 +1026,7 @@ def execute_pending(
     elif current_minute > n1_timestamp:
 
         logger.warning(
-            "%s | seÃ±al perdida | "
+            "%s | señal perdida | "
             "N=%s | N+1=%s | actual=%s",
             pair,
             n_timestamp,
@@ -1035,13 +1035,13 @@ def execute_pending(
         )
 
         telegram_send(
-            "â³ ENTRADA CANCELADA\n\n"
+            "⏳ ENTRADA CANCELADA\n\n"
             f"Par: {pair}\n"
             f"N: {n_timestamp}\n"
             f"N+1: {n1_timestamp}\n"
             f"Minuto actual: {current_minute}\n\n"
-            "La ventana N+1 terminÃ³.\n"
-            "ðŸš« No se ejecuta en N+2."
+            "La ventana N+1 terminó.\n"
+            "🚫 No se ejecuta en N+2."
         )
 
         PENDING_ENTRY.pop(
@@ -1095,8 +1095,8 @@ def execute_pending(
     if live_timestamp != n1_timestamp:
 
         logger.debug(
-            "%s | servidor estÃ¡ en N+1 "
-            "pero stream aÃºn no muestra N+1 | "
+            "%s | servidor está en N+1 "
+            "pero stream aún no muestra N+1 | "
             "server=%s | stream=%s | esperado=%s",
             pair,
             server_ts,
@@ -1127,10 +1127,10 @@ def execute_pending(
     ]
 
     direction = (
-        "CALL ðŸŸ¢"
+        "CALL 🟢"
         if signal == "call"
         else
-        "PUT ðŸ”´"
+        "PUT 🔴"
     )
 
     # ========================================================
@@ -1143,7 +1143,7 @@ def execute_pending(
     )
 
     logger.info(
-        "%s | âš¡ SNIPER N+1 | "
+        "%s | ⚡ SNIPER N+1 | "
         "server=%s | segundo=%s | "
         "N=%s | N+1=%s | OPEN=%s",
         pair,
@@ -1155,15 +1155,15 @@ def execute_pending(
     )
 
     telegram_send(
-        "âš¡ N+1 DETECTADA\n\n"
+        "⚡ N+1 DETECTADA\n\n"
         f"Par: {pair}\n"
-        f"DirecciÃ³n: {direction}\n\n"
+        f"Dirección: {direction}\n\n"
         f"Servidor IQ: {server_ts}\n"
         f"Segundo: {server_second}\n\n"
         f"Timestamp N: {n_timestamp}\n"
         f"Timestamp N+1: {n1_timestamp}\n\n"
         f"Apertura REAL N+1: {execution_open}\n\n"
-        "ðŸŽ¯ EJECUTANDO BINARIA"
+        "🎯 EJECUTANDO BINARIA"
     )
 
     # ========================================================
@@ -1178,7 +1178,7 @@ def execute_pending(
     if not ok:
 
         logger.error(
-            "%s | âŒ BINARIA RECHAZADA | "
+            "%s | ❌ BINARIA RECHAZADA | "
             "signal=%s | N=%s | N+1=%s | "
             "server=%s | result=%s",
             pair,
@@ -1190,9 +1190,9 @@ def execute_pending(
         )
 
         telegram_send(
-            "âŒ BINARIA RECHAZADA\n\n"
+            "❌ BINARIA RECHAZADA\n\n"
             f"Par: {pair}\n"
-            f"DirecciÃ³n: {signal.upper()}\n\n"
+            f"Dirección: {signal.upper()}\n\n"
             f"N: {n_timestamp}\n"
             f"N+1: {n1_timestamp}\n"
             f"Servidor: {server_ts}\n"
@@ -1212,7 +1212,7 @@ def execute_pending(
         return False
 
     # ========================================================
-    # OPERACIÃ“N ACEPTADA
+    # OPERACIÓN ACEPTADA
     # ========================================================
 
     LAST_TRADE_CANDLE[
@@ -1225,9 +1225,9 @@ def execute_pending(
     )
 
     telegram_send(
-        "âœ… OPERACIÃ“N ABIERTA\n\n"
+        "✅ OPERACIÓN ABIERTA\n\n"
         f"Par: {pair}\n"
-        f"DirecciÃ³n: {signal.upper()}\n\n"
+        f"Dirección: {signal.upper()}\n\n"
         "VELA N\n"
         f"Timestamp: {n_timestamp}\n"
         f"Apertura: "
@@ -1237,13 +1237,13 @@ def execute_pending(
         "VELA N+1\n"
         f"Timestamp: {n1_timestamp}\n"
         f"Apertura REAL: {execution_open}\n\n"
-        f"ðŸ’µ Importe: ${AMOUNT}\n"
-        "â± ExpiraciÃ³n: 1 minuto\n"
-        f"ðŸ†” ID: {order_id}"
+        f"💵 Importe: ${AMOUNT}\n"
+        "⏱ Expiración: 1 minuto\n"
+        f"🆔 ID: {order_id}"
     )
 
     logger.info(
-        "%s | âœ… BINARIA ABIERTA | "
+        "%s | ✅ BINARIA ABIERTA | "
         "%s | N=%s | N+1=%s | "
         "OPEN=%s | ID=%s",
         pair,
@@ -1267,9 +1267,9 @@ def process_pair(
 
     # ========================================================
     # 1. PRIMERO:
-    #    intentar ejecutar una seÃ±al pendiente.
+    #    intentar ejecutar una señal pendiente.
     #
-    # Esto va ANTES del anÃ¡lisis nuevo.
+    # Esto va ANTES del análisis nuevo.
     # ========================================================
 
     if pair in PENDING_ENTRY:
@@ -1339,7 +1339,7 @@ def process_pair(
         return
 
     # ========================================================
-    # 5. EVITAR REPETICIÃ“N
+    # 5. EVITAR REPETICIÓN
     # ========================================================
 
     if (
@@ -1438,7 +1438,7 @@ def process_pair(
     )
 
     # ========================================================
-    # 8. GUARDAR SEÃ‘AL PARA N+1
+    # 8. GUARDAR SEÑAL PARA N+1
     # ========================================================
 
     if signal in (
@@ -1454,7 +1454,7 @@ def process_pair(
     else:
 
         logger.info(
-            "%s | N=%s | SIN SEÃ‘AL | %s",
+            "%s | N=%s | SIN SEÑAL | %s",
             pair,
             closed_ts,
             reason,
@@ -1568,7 +1568,7 @@ def main() -> None:
         return
 
     # ========================================================
-    # CONEXIÃ“N
+    # CONEXIÓN
     # ========================================================
 
     try:
@@ -1582,7 +1582,7 @@ def main() -> None:
         )
 
         telegram_send(
-            "âŒ ERROR IQ OPTION\n\n"
+            "❌ ERROR IQ OPTION\n\n"
             f"{exc}"
         )
 
@@ -1604,24 +1604,24 @@ def main() -> None:
     # ========================================================
 
     telegram_send(
-        "ðŸ¤– BOT LISTO\n\n"
+        "🤖 BOT LISTO\n\n"
         "BINARIAS OTC\n"
         "MODO SNIPER\n\n"
         "ESTRATEGIA:\n"
         "1M + 5S\n\n"
         "CALL:\n"
-        "ðŸŸ¢ Primera 5S > apertura 1M\n"
-        "ðŸ”´ Retroceso 5S < apertura 1M\n"
-        "ðŸŸ¢ Cierre 1M verde\n\n"
+        "🟢 Primera 5S > apertura 1M\n"
+        "🔴 Retroceso 5S < apertura 1M\n"
+        "🟢 Cierre 1M verde\n\n"
         "PUT:\n"
-        "ðŸ”´ Primera 5S < apertura 1M\n"
-        "ðŸŸ¢ Retroceso 5S > apertura 1M\n"
-        "ðŸ”´ Cierre 1M rojo\n\n"
-        "ðŸŽ¯ Entrada SOLO en N+1\n"
-        "âš¡ Sin espera artificial\n"
-        "ðŸ• Reloj sincronizado con IQ Option\n"
-        "ðŸ’µ $10\n"
-        "â± 1 minuto"
+        "🔴 Primera 5S < apertura 1M\n"
+        "🟢 Retroceso 5S > apertura 1M\n"
+        "🔴 Cierre 1M rojo\n\n"
+        "🎯 Entrada SOLO en N+1\n"
+        "⚡ Sin espera artificial\n"
+        "🕐 Reloj sincronizado con IQ Option\n"
+        "💵 $10\n"
+        "⏱ 1 minuto"
     )
 
     # ========================================================
@@ -1655,7 +1655,7 @@ def main() -> None:
             # =================================================
             # TRADING PRIMERO
             #
-            # NO Telegram aquÃ­.
+            # NO Telegram aquí.
             #
             # El hilo de Telegram trabaja separado.
             # =================================================
@@ -1679,7 +1679,7 @@ def main() -> None:
             BOT_RUNNING = False
 
             telegram_send(
-                "ðŸ”´ BOT DETENIDO MANUALMENTE"
+                "🔴 BOT DETENIDO MANUALMENTE"
             )
 
             logger.info(
@@ -1704,7 +1704,7 @@ def main() -> None:
 
 
 # ============================================================
-# EJECUCIÃ“N
+# EJECUCIÓN
 # ============================================================
 
 if __name__ == "__main__":
