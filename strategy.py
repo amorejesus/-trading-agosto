@@ -10,6 +10,7 @@ import pandas as pd
 # ============================================================
 
 TIMEFRAME = 60
+
 MICRO_TIMEFRAME = 5
 
 MICRO_CANDLE_COUNT = 12
@@ -40,6 +41,7 @@ def safe_float(
         TypeError,
         ValueError,
     ):
+
         return 0.0
 
 
@@ -209,10 +211,6 @@ def detect_strong_movement(
         "range"
     ]
 
-    # --------------------------------------------------------
-    # Sin movimiento
-    # --------------------------------------------------------
-
     if direction == "none":
 
         return {
@@ -227,10 +225,6 @@ def detect_strong_movement(
                 "vela sin dirección",
         }
 
-    # --------------------------------------------------------
-    # Sin rango
-    # --------------------------------------------------------
-
     if candle_range <= 0:
 
         return {
@@ -244,10 +238,6 @@ def detect_strong_movement(
             "reason":
                 "vela sin rango",
         }
-
-    # --------------------------------------------------------
-    # Movimiento fuerte
-    # --------------------------------------------------------
 
     if body_ratio >= (
         MIN_STRONG_BODY_RATIO
@@ -289,31 +279,21 @@ def check_first_5s(
 ) -> Dict[str, Any]:
 
     first_open = safe_float(
-        first_micro.get("open")
+        first_micro.get(
+            "open"
+        )
     )
 
     first_close = safe_float(
-        first_micro.get("close")
+        first_micro.get(
+            "close"
+        )
     )
-
-    # ========================================================
-    # CALL
-    #
-    # Primera 5S debe cerrar por encima
-    # de la apertura de la vela de 1 minuto.
-    # ========================================================
 
     first_bullish = (
         first_close
         > minute_open
     )
-
-    # ========================================================
-    # PUT
-    #
-    # Primera 5S debe cerrar por debajo
-    # de la apertura de la vela de 1 minuto.
-    # ========================================================
 
     first_bearish = (
         first_close
@@ -322,13 +302,17 @@ def check_first_5s(
 
     return {
 
-        "first_open": first_open,
+        "first_open":
+            first_open,
 
-        "first_close": first_close,
+        "first_close":
+            first_close,
 
-        "call": first_bullish,
+        "call":
+            first_bullish,
 
-        "put": first_bearish,
+        "put":
+            first_bearish,
     }
 
 
@@ -346,10 +330,7 @@ def count_call_pullbacks(
 
     count = 0
 
-    # --------------------------------------------------------
-    # La primera microvela no cuenta como retroceso.
-    # --------------------------------------------------------
-
+    # La primera microvela no cuenta.
     for index in range(
         1,
         len(micro),
@@ -363,18 +344,7 @@ def count_call_pullbacks(
             row["close"]
         )
 
-        # Para CALL:
-        #
-        # durante el resto del minuto,
-        # las microvelas que cierran por debajo
-        # de la apertura de N se contabilizan
-        # como retroceso.
-        #
-        # Esta es la lógica de la estrategia actual.
-        #
-
         if close < minute_open:
-
             count += 1
 
     return count
@@ -394,10 +364,7 @@ def count_put_pullbacks(
 
     count = 0
 
-    # --------------------------------------------------------
-    # La primera microvela no cuenta como retroceso.
-    # --------------------------------------------------------
-
+    # La primera microvela no cuenta.
     for index in range(
         1,
         len(micro),
@@ -411,16 +378,7 @@ def count_put_pullbacks(
             row["close"]
         )
 
-        # Para PUT:
-        #
-        # durante el resto del minuto,
-        # las microvelas que cierran por encima
-        # de la apertura de N se contabilizan
-        # como retroceso.
-        #
-
         if close > minute_open:
-
             count += 1
 
     return count
@@ -449,16 +407,12 @@ def validate_call_pattern(
                 "microvelas insuficientes",
         }
 
-    first = micro.iloc[
-        0
-    ]
+    first = micro.iloc[0]
 
     first_data = check_first_5s(
         minute_open,
         first,
     )
-
-    # Primera 5S obligatoriamente alcista.
 
     if not first_data[
         "call"
@@ -475,12 +429,12 @@ def validate_call_pattern(
                 "la apertura de N",
         }
 
-    pullbacks = count_call_pullbacks(
-        minute_open,
-        micro,
+    pullbacks = (
+        count_call_pullbacks(
+            minute_open,
+            micro,
+        )
     )
-
-    # Debe existir al menos un retroceso.
 
     if pullbacks < 1:
 
@@ -498,7 +452,8 @@ def validate_call_pattern(
 
         "valid": True,
 
-        "pullback_count": pullbacks,
+        "pullback_count":
+            pullbacks,
 
         "first_5s_close":
             first_data[
@@ -533,16 +488,12 @@ def validate_put_pattern(
                 "microvelas insuficientes",
         }
 
-    first = micro.iloc[
-        0
-    ]
+    first = micro.iloc[0]
 
     first_data = check_first_5s(
         minute_open,
         first,
     )
-
-    # Primera 5S obligatoriamente bajista.
 
     if not first_data[
         "put"
@@ -559,12 +510,12 @@ def validate_put_pattern(
                 "debajo de la apertura de N",
         }
 
-    pullbacks = count_put_pullbacks(
-        minute_open,
-        micro,
+    pullbacks = (
+        count_put_pullbacks(
+            minute_open,
+            micro,
+        )
     )
-
-    # Debe existir al menos un retroceso.
 
     if pullbacks < 1:
 
@@ -582,7 +533,8 @@ def validate_put_pattern(
 
         "valid": True,
 
-        "pullback_count": pullbacks,
+        "pullback_count":
+            pullbacks,
 
         "first_5s_close":
             first_data[
@@ -623,6 +575,8 @@ def analyze_market(
 
         "body_ratio": 0.0,
 
+        "score": 0,
+
         "reason": "",
     }
 
@@ -634,6 +588,17 @@ def analyze_market(
 
         result["reason"] = (
             "vela 1M inexistente"
+        )
+
+        return result
+
+    if not isinstance(
+        candle,
+        pd.Series,
+    ):
+
+        result["reason"] = (
+            "vela 1M inválida"
         )
 
         return result
@@ -666,7 +631,9 @@ def analyze_market(
                 "minute_timestamp"
             ] = int(
                 float(
-                    candle["from"]
+                    candle[
+                        "from"
+                    ]
                 )
             )
 
@@ -710,8 +677,10 @@ def analyze_market(
     # MOVIMIENTO FUERTE
     # ========================================================
 
-    movement = detect_strong_movement(
-        candle
+    movement = (
+        detect_strong_movement(
+            candle
+        )
     )
 
     result[
@@ -732,14 +701,27 @@ def analyze_market(
         "body_ratio"
     ]
 
+    # Score descriptivo.
+    score = 0
+
+    if movement["strong"]:
+        score += 1
+
+    if (
+        movement["direction"]
+        in ("call", "put")
+    ):
+        score += 1
+
     # ========================================================
-    # SI NO HAY MOVIMIENTO FUERTE,
-    # NO SE OPERA.
+    # SIN MOVIMIENTO FUERTE = NO OPERAR
     # ========================================================
 
     if not movement[
         "strong"
     ]:
+
+        result["score"] = score
 
         result["reason"] = (
             "sin movimiento fuerte"
@@ -751,9 +733,7 @@ def analyze_market(
     # PRIMERA 5S
     # ========================================================
 
-    first = micro.iloc[
-        0
-    ]
+    first = micro.iloc[0]
 
     first_close = safe_float(
         first["close"]
@@ -764,37 +744,40 @@ def analyze_market(
     ] = first_close
 
     # ========================================================
-    # MOVIMIENTO FUERTE ALCISTA
+    # CALL
     # ========================================================
 
     if movement[
         "direction"
     ] == "call":
 
-        pattern = validate_call_pattern(
-            minute_open,
-            micro,
+        pattern = (
+            validate_call_pattern(
+                minute_open,
+                micro,
+            )
         )
 
         if not pattern[
             "valid"
         ]:
 
+            result["score"] = score
+
             result["reason"] = (
-                pattern[
-                    "reason"
-                ]
+                pattern["reason"]
             )
 
             return result
 
-        # ----------------------------------------------------
-        # CONFIRMACIÓN FINAL
-        #
-        # La vela N debe cerrar verde.
-        # ----------------------------------------------------
+        score += 2
+
+        if minute_close > minute_open:
+            score += 1
 
         if minute_close <= minute_open:
+
+            result["score"] = score
 
             result["reason"] = (
                 "movimiento alcista pero "
@@ -802,10 +785,6 @@ def analyze_market(
             )
 
             return result
-
-        # ----------------------------------------------------
-        # CALL
-        # ----------------------------------------------------
 
         result[
             "signal"
@@ -817,6 +796,10 @@ def analyze_market(
             "pullback_count"
         ]
 
+        score += 1
+
+        result["score"] = score
+
         result["reason"] = (
             "CALL | movimiento fuerte "
             "alcista | primera 5S alcista "
@@ -827,37 +810,40 @@ def analyze_market(
         return result
 
     # ========================================================
-    # MOVIMIENTO FUERTE BAJISTA
+    # PUT
     # ========================================================
 
     if movement[
         "direction"
     ] == "put":
 
-        pattern = validate_put_pattern(
-            minute_open,
-            micro,
+        pattern = (
+            validate_put_pattern(
+                minute_open,
+                micro,
+            )
         )
 
         if not pattern[
             "valid"
         ]:
 
+            result["score"] = score
+
             result["reason"] = (
-                pattern[
-                    "reason"
-                ]
+                pattern["reason"]
             )
 
             return result
 
-        # ----------------------------------------------------
-        # CONFIRMACIÓN FINAL
-        #
-        # La vela N debe cerrar roja.
-        # ----------------------------------------------------
+        score += 2
+
+        if minute_close < minute_open:
+            score += 1
 
         if minute_close >= minute_open:
+
+            result["score"] = score
 
             result["reason"] = (
                 "movimiento bajista pero "
@@ -865,10 +851,6 @@ def analyze_market(
             )
 
             return result
-
-        # ----------------------------------------------------
-        # PUT
-        # ----------------------------------------------------
 
         result[
             "signal"
@@ -880,6 +862,10 @@ def analyze_market(
             "pullback_count"
         ]
 
+        score += 1
+
+        result["score"] = score
+
         result["reason"] = (
             "PUT | movimiento fuerte "
             "bajista | primera 5S bajista "
@@ -889,9 +875,7 @@ def analyze_market(
 
         return result
 
-    # ========================================================
-    # SIN DIRECCIÓN
-    # ========================================================
+    result["score"] = score
 
     result["reason"] = (
         "movimiento sin dirección"
