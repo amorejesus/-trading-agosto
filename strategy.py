@@ -1,589 +1,831 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
+
 import pandas as pd
 
 
 # ============================================================
-# ESTRATEGIA 1M + MICROVELAS DE 5 SEGUNDOS
+# CONFIGURACIÓN
 # ============================================================
-#
-# CALL:
-#
-# 1. Comienza una vela de 1 minuto.
-# 2. La primera vela de 5 segundos cierra POR ENCIMA
-#    de la apertura de la vela de 1 minuto.
-# 3. Durante el resto de ese minuto, al menos una vela
-#    de 5 segundos cierra POR DEBAJO de la apertura de
-#    la vela de 1 minuto.
-# 4. La vela de 1 minuto termina VERDE:
-#       cierre_1m > apertura_1m
-# 5. Se genera CALL para la APERTURA de la siguiente
-#    vela de 1 minuto.
-#
-#
-# PUT:
-#
-# 1. Comienza una vela de 1 minuto.
-# 2. La primera vela de 5 segundos cierra POR DEBAJO
-#    de la apertura de la vela de 1 minuto.
-# 3. Durante el resto de ese minuto, al menos una vela
-#    de 5 segundos cierra POR ENCIMA de la apertura de
-#    la vela de 1 minuto.
-# 4. La vela de 1 minuto termina ROJA:
-#       cierre_1m < apertura_1m
-# 5. Se genera PUT para la APERTURA de la siguiente
-#    vela de 1 minuto.
-#
-#
-# IMPORTANTE:
-#
-# NO se utilizan:
-# - EMA
-# - RSI
-# - ATR
-# - Soporte/resistencia
-# - Tendencia
-# - Score
-# - Volumen
-# - Filtros adicionales
-# - Martingala
-#
-# SOLO se utiliza la lógica solicitada.
+
+TIMEFRAME = 60
+MICRO_TIMEFRAME = 5
+
+MICRO_CANDLE_COUNT = 12
+
+
 # ============================================================
+# FILTRO DE MOVIMIENTO FUERTE
+# ============================================================
+
+# Porcentaje mínimo del cuerpo respecto al rango total
+# para considerar que la vela de 1 minuto tiene
+# movimiento suficientemente fuerte.
+MIN_STRONG_BODY_RATIO = 0.50
 
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
-def _to_float(value: Any) -> Optional[float]:
-    """
-    Convierte un valor a float de forma segura.
-    """
+def safe_float(value: Any) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
-        return None
+        return 0.0
 
 
 # ============================================================
-# NORMALIZACIÓN DE MICROVELAS 5S
+# PREPARAR MICROVELAS
 # ============================================================
 
-def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normaliza el DataFrame de microvelas de 5 segundos.
+def prepare_micro_candles(
+    micro: pd.DataFrame,
+) -> pd.DataFrame:
 
-    Se esperan como mínimo:
-        open
-        close
-
-    Opcional:
-        from
-        high
-        low
-    """
-
-    if df is None:
+    if micro is None:
         return pd.DataFrame()
 
-    if not isinstance(df, pd.DataFrame):
+    if not isinstance(micro, pd.DataFrame):
         return pd.DataFrame()
 
-    if df.empty:
+    if micro.empty:
         return pd.DataFrame()
 
-    out = df.copy()
+    df = micro.copy()
 
-    # Compatibilidad con IQ Option.
-    rename = {}
+    required = [
+        "open",
+        "close",
+    ]
 
-    if "max" in out.columns and "high" not in out.columns:
-        rename["max"] = "high"
+    for column in required:
 
-    if "min" in out.columns and "low" not in out.columns:
-        rename["min"] = "low"
+        if column not in df.columns:
+            return pd.DataFrame()
 
-    if "Open" in out.columns and "open" not in out.columns:
-        rename["Open"] = "open"
-
-    if "High" in out.columns and "high" not in out.columns:
-        rename["High"] = "high"
-
-    if "Low" in out.columns and "low" not in out.columns:
-        rename["Low"] = "low"
-
-    if "Close" in out.columns and "close" not in out.columns:
-        rename["Close"] = "close"
-
-    if rename:
-        out.rename(columns=rename, inplace=True)
-
-    # Las únicas columnas obligatorias para esta estrategia.
-    if "open" not in out.columns:
-        return pd.DataFrame()
-
-    if "close" not in out.columns:
-        return pd.DataFrame()
-
-    out["open"] = pd.to_numeric(
-        out["open"],
-        errors="coerce",
-    )
-
-    out["close"] = pd.to_numeric(
-        out["close"],
-        errors="coerce",
-    )
-
-    if "from" in out.columns:
-        out["from"] = pd.to_numeric(
-            out["from"],
+        df[column] = pd.to_numeric(
+            df[column],
             errors="coerce",
         )
 
-        out.dropna(
+    df.dropna(
+        subset=required,
+        inplace=True,
+    )
+
+    if "from" in df.columns:
+
+        df["from"] = pd.to_numeric(
+            df["from"],
+            errors="coerce",
+        )
+
+        df.dropna(
             subset=["from"],
             inplace=True,
         )
 
-        out.sort_values(
+        df.sort_values(
             "from",
             inplace=True,
         )
 
-    out.dropna(
-        subset=["open", "close"],
-        inplace=True,
-    )
-
-    out.reset_index(
+    df.reset_index(
         drop=True,
         inplace=True,
     )
 
-    return out
+    return df
 
 
 # ============================================================
-# ANALIZAR UNA VELA DE 1 MINUTO
+# MOVIMIENTO DE LA VELA PRINCIPAL
 # ============================================================
 
-def analyze_minute(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Dict[str, Any]:
-    """
-    Analiza una vela de 1 minuto YA CERRADA utilizando
-    sus microvelas de 5 segundos.
+def get_main_candle_data(
+    candle: pd.Series,
+) -> Dict[str, float]:
 
-    ========================================================
-    CALL
-    ========================================================
+    opening = safe_float(
+        candle.get("open")
+    )
 
-    Primera 5s:
-        cierre > apertura 1M
+    closing = safe_float(
+        candle.get("close")
+    )
 
-    Retroceso:
-        alguna 5s posterior cierra < apertura 1M
+    high = safe_float(
+        candle.get("high")
+    )
 
-    Cierre 1M:
-        cierre > apertura 1M
+    low = safe_float(
+        candle.get("low")
+    )
 
-    Resultado:
-        CALL para N+1
+    candle_range = high - low
 
+    body = abs(
+        closing - opening
+    )
 
-    ========================================================
-    PUT
-    ========================================================
+    if candle_range > 0:
 
-    Primera 5s:
-        cierre < apertura 1M
+        body_ratio = (
+            body / candle_range
+        )
 
-    Retroceso:
-        alguna 5s posterior cierra > apertura 1M
+    else:
 
-    Cierre 1M:
-        cierre < apertura 1M
+        body_ratio = 0.0
 
-    Resultado:
-        PUT para N+1
-    ========================================================
-    """
+    if closing > opening:
 
-    result: Dict[str, Any] = {
-        "signal": None,
-        "valid": False,
-        "reason": "sin señal",
+        direction = "call"
 
-        "minute_timestamp": None,
+    elif closing < opening:
 
-        "minute_open": None,
-        "minute_close": None,
+        direction = "put"
 
-        "first_5s_open": None,
-        "first_5s_close": None,
+    else:
 
-        "pullback_count": 0,
+        direction = "none"
+
+    return {
+
+        "open": opening,
+
+        "close": closing,
+
+        "high": high,
+
+        "low": low,
+
+        "range": candle_range,
+
+        "body": body,
+
+        "body_ratio": body_ratio,
+
+        "direction": direction,
     }
 
-    # --------------------------------------------------------
-    # VALIDAR VELA DE 1 MINUTO
-    # --------------------------------------------------------
 
-    if candle_1m is None:
-        result["reason"] = (
-            "vela de 1 minuto no disponible"
-        )
-        return result
+# ============================================================
+# MOVIMIENTO FUERTE
+# ============================================================
 
-    opening = _to_float(
-        candle_1m.get("open")
+def detect_strong_movement(
+    candle: pd.Series,
+) -> Dict[str, Any]:
+
+    data = get_main_candle_data(
+        candle
     )
 
-    closing = _to_float(
-        candle_1m.get("close")
-    )
-
-    if opening is None:
-        result["reason"] = (
-            "apertura de vela 1M inválida"
-        )
-        return result
-
-    if closing is None:
-        result["reason"] = (
-            "cierre de vela 1M inválido"
-        )
-        return result
-
-    result["minute_open"] = opening
-    result["minute_close"] = closing
-
-    # Timestamp de la vela de 1 minuto.
-    if "from" in candle_1m.index:
-
-        try:
-            result["minute_timestamp"] = int(
-                float(candle_1m["from"])
-            )
-
-        except (TypeError, ValueError):
-            result["minute_timestamp"] = None
-
-    # --------------------------------------------------------
-    # NORMALIZAR MICROVELAS
-    # --------------------------------------------------------
-
-    micro = _normalize_5s(
-        candles_5s
-    )
-
-    if micro.empty:
-
-        result["reason"] = (
-            "no hay microvelas de 5 segundos"
-        )
-
-        return result
-
-    # --------------------------------------------------------
-    # FILTRAR MICROVELAS DEL MISMO MINUTO
-    # --------------------------------------------------------
-
-    minute_timestamp = result[
-        "minute_timestamp"
+    direction = data[
+        "direction"
     ]
 
-    if (
-        minute_timestamp is not None
-        and "from" in micro.columns
-    ):
+    body_ratio = data[
+        "body_ratio"
+    ]
 
-        start_time = minute_timestamp
-        end_time = minute_timestamp + 60
+    candle_range = data[
+        "range"
+    ]
 
-        micro = micro[
-            (micro["from"] >= start_time)
-            &
-            (micro["from"] < end_time)
-        ].copy()
-
-        micro.reset_index(
-            drop=True,
-            inplace=True,
-        )
-
-    # Para esta lógica necesitamos al menos:
-    #
-    # primera 5s
-    # otra 5s para comprobar retroceso
-    #
-
-    if len(micro) < 2:
-
-        result["reason"] = (
-            "faltan microvelas 5s del minuto"
-        )
-
-        return result
+    body = data[
+        "body"
+    ]
 
     # --------------------------------------------------------
-    # PRIMERA VELA DE 5 SEGUNDOS
+    # Sin movimiento
     # --------------------------------------------------------
 
-    first_5s = micro.iloc[0]
+    if direction == "none":
 
-    first_5s_open = _to_float(
-        first_5s["open"]
+        return {
+
+            "strong": False,
+
+            "direction": "none",
+
+            "body_ratio": body_ratio,
+
+            "reason":
+                "vela sin dirección",
+        }
+
+    # --------------------------------------------------------
+    # Sin rango
+    # --------------------------------------------------------
+
+    if candle_range <= 0:
+
+        return {
+
+            "strong": False,
+
+            "direction": direction,
+
+            "body_ratio": body_ratio,
+
+            "reason":
+                "vela sin rango",
+        }
+
+    # --------------------------------------------------------
+    # Movimiento fuerte
+    # --------------------------------------------------------
+
+    if body_ratio >= MIN_STRONG_BODY_RATIO:
+
+        return {
+
+            "strong": True,
+
+            "direction": direction,
+
+            "body_ratio": body_ratio,
+
+            "reason":
+                "movimiento fuerte "
+                f"{direction.upper()}",
+        }
+
+    return {
+
+        "strong": False,
+
+        "direction": direction,
+
+        "body_ratio": body_ratio,
+
+        "reason":
+            "movimiento débil",
+    }
+
+
+# ============================================================
+# PRIMERA MICROVELA
+# ============================================================
+
+def check_first_5s(
+    minute_open: float,
+    first_micro: pd.Series,
+) -> Dict[str, Any]:
+
+    first_open = safe_float(
+        first_micro.get("open")
     )
 
-    first_5s_close = _to_float(
-        first_5s["close"]
-    )
-
-    if first_5s_open is None:
-
-        result["reason"] = (
-            "apertura de primera 5s inválida"
-        )
-
-        return result
-
-    if first_5s_close is None:
-
-        result["reason"] = (
-            "cierre de primera 5s inválido"
-        )
-
-        return result
-
-    result["first_5s_open"] = (
-        first_5s_open
-    )
-
-    result["first_5s_close"] = (
-        first_5s_close
+    first_close = safe_float(
+        first_micro.get("close")
     )
 
     # ========================================================
     # CALL
+    # Primera 5S debe cerrar por encima
+    # de la apertura de la vela de 1 minuto.
     # ========================================================
 
-    # Primera microvela verde respecto a la apertura 1M.
-    if first_5s_close > opening:
-
-        # Las demás microvelas son el retroceso.
-        rest = micro.iloc[1:]
-
-        # Debe existir al menos una vela 5s que cierre
-        # POR DEBAJO de la apertura de la vela de 1 minuto.
-        pullback_mask = (
-            rest["close"] < opening
-        )
-
-        pullback_count = int(
-            pullback_mask.sum()
-        )
-
-        result["pullback_count"] = (
-            pullback_count
-        )
-
-        # Finalmente la vela de 1 minuto debe cerrar verde.
-        minute_is_green = (
-            closing > opening
-        )
-
-        if pullback_count > 0 and minute_is_green:
-
-            result["signal"] = "call"
-
-            result["valid"] = True
-
-            result["reason"] = (
-                "CALL confirmada: "
-                "primera 5s por encima de apertura; "
-                "retroceso con cierre 5s por debajo "
-                "de apertura; "
-                "vela 1M cerró verde"
-            )
-
-            return result
-
-        if pullback_count == 0:
-
-            result["reason"] = (
-                "CALL no válida: "
-                "no hubo retroceso con cierre 5s "
-                "por debajo de apertura 1M"
-            )
-
-            return result
-
-        result["reason"] = (
-            "CALL no válida: "
-            "vela 1M no cerró verde"
-        )
-
-        return result
+    first_bullish = (
+        first_close > minute_open
+    )
 
     # ========================================================
     # PUT
+    # Primera 5S debe cerrar por debajo
+    # de la apertura de la vela de 1 minuto.
     # ========================================================
 
-    # Primera microvela roja respecto a la apertura 1M.
-    if first_5s_close < opening:
+    first_bearish = (
+        first_close < minute_open
+    )
 
-        # Las demás microvelas son el retroceso.
-        rest = micro.iloc[1:]
+    return {
 
-        # Debe existir al menos una vela 5s que cierre
-        # POR ENCIMA de la apertura de la vela de 1 minuto.
-        pullback_mask = (
-            rest["close"] > opening
+        "first_open": first_open,
+
+        "first_close": first_close,
+
+        "call": first_bullish,
+
+        "put": first_bearish,
+    }
+
+
+# ============================================================
+# RETROCESO CALL
+# ============================================================
+
+def count_call_pullbacks(
+    minute_open: float,
+    micro: pd.DataFrame,
+) -> int:
+
+    if micro.empty:
+        return 0
+
+    count = 0
+
+    # --------------------------------------------------------
+    # La primera microvela no cuenta como retroceso.
+    # --------------------------------------------------------
+
+    for index in range(
+        1,
+        len(micro),
+    ):
+
+        row = micro.iloc[index]
+
+        close = safe_float(
+            row["close"]
         )
 
-        pullback_count = int(
-            pullback_mask.sum()
+        # Para CALL:
+        #
+        # durante el resto del minuto,
+        # las microvelas deben cerrar
+        # por debajo de la apertura de N.
+
+        if close < minute_open:
+
+            count += 1
+
+    return count
+
+
+# ============================================================
+# RETROCESO PUT
+# ============================================================
+
+def count_put_pullbacks(
+    minute_open: float,
+    micro: pd.DataFrame,
+) -> int:
+
+    if micro.empty:
+        return 0
+
+    count = 0
+
+    # --------------------------------------------------------
+    # La primera microvela no cuenta como retroceso.
+    # --------------------------------------------------------
+
+    for index in range(
+        1,
+        len(micro),
+    ):
+
+        row = micro.iloc[index]
+
+        close = safe_float(
+            row["close"]
         )
 
-        result["pullback_count"] = (
-            pullback_count
-        )
+        # Para PUT:
+        #
+        # durante el resto del minuto,
+        # las microvelas deben cerrar
+        # por encima de la apertura de N.
 
-        # Finalmente la vela de 1 minuto debe cerrar roja.
-        minute_is_red = (
-            closing < opening
-        )
+        if close > minute_open:
 
-        if pullback_count > 0 and minute_is_red:
+            count += 1
 
-            result["signal"] = "put"
+    return count
 
-            result["valid"] = True
 
-            result["reason"] = (
-                "PUT confirmada: "
-                "primera 5s por debajo de apertura; "
-                "retroceso con cierre 5s por encima "
-                "de apertura; "
-                "vela 1M cerró roja"
-            )
+# ============================================================
+# VALIDAR RETROCESO CALL
+# ============================================================
 
-            return result
+def validate_call_pattern(
+    minute_open: float,
+    micro: pd.DataFrame,
+) -> Dict[str, Any]:
 
-        if pullback_count == 0:
+    if len(micro) != MICRO_CANDLE_COUNT:
 
-            result["reason"] = (
-                "PUT no válida: "
-                "no hubo retroceso con cierre 5s "
-                "por encima de apertura 1M"
-            )
+        return {
 
-            return result
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "microvelas insuficientes",
+        }
+
+    first = micro.iloc[0]
+
+    first_data = check_first_5s(
+        minute_open,
+        first,
+    )
+
+    # Primera 5S obligatoriamente alcista.
+    if not first_data["call"]:
+
+        return {
+
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "primera 5S no supera "
+                "la apertura de N",
+        }
+
+    pullbacks = count_call_pullbacks(
+        minute_open,
+        micro,
+    )
+
+    # Debe existir al menos un retroceso.
+    if pullbacks < 1:
+
+        return {
+
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "no existe retroceso CALL",
+        }
+
+    return {
+
+        "valid": True,
+
+        "pullback_count": pullbacks,
+
+        "first_5s_close":
+            first_data["first_close"],
+
+        "reason":
+            "patrón CALL confirmado",
+    }
+
+
+# ============================================================
+# VALIDAR RETROCESO PUT
+# ============================================================
+
+def validate_put_pattern(
+    minute_open: float,
+    micro: pd.DataFrame,
+) -> Dict[str, Any]:
+
+    if len(micro) != MICRO_CANDLE_COUNT:
+
+        return {
+
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "microvelas insuficientes",
+        }
+
+    first = micro.iloc[0]
+
+    first_data = check_first_5s(
+        minute_open,
+        first,
+    )
+
+    # Primera 5S obligatoriamente bajista.
+    if not first_data["put"]:
+
+        return {
+
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "primera 5S no queda "
+                "debajo de la apertura de N",
+        }
+
+    pullbacks = count_put_pullbacks(
+        minute_open,
+        micro,
+    )
+
+    # Debe existir al menos un retroceso.
+    if pullbacks < 1:
+
+        return {
+
+            "valid": False,
+
+            "pullback_count": 0,
+
+            "reason":
+                "no existe retroceso PUT",
+        }
+
+    return {
+
+        "valid": True,
+
+        "pullback_count": pullbacks,
+
+        "first_5s_close":
+            first_data["first_close"],
+
+        "reason":
+            "patrón PUT confirmado",
+    }
+
+
+# ============================================================
+# ANALIZAR MERCADO
+# ============================================================
+
+def analyze_market(
+    candle: pd.Series,
+    micro: pd.DataFrame,
+) -> Dict[str, Any]:
+
+    result: Dict[str, Any] = {
+
+        "signal": None,
+
+        "minute_timestamp": None,
+
+        "minute_open": None,
+
+        "minute_close": None,
+
+        "first_5s_close": None,
+
+        "pullback_count": 0,
+
+        "movement_direction": None,
+
+        "movement_strong": False,
+
+        "body_ratio": 0.0,
+
+        "reason": "",
+    }
+
+    # ========================================================
+    # VALIDAR VELA PRINCIPAL
+    # ========================================================
+
+    if candle is None:
 
         result["reason"] = (
-            "PUT no válida: "
-            "vela 1M no cerró roja"
+            "vela 1M inexistente"
+        )
+
+        return result
+
+    minute_open = safe_float(
+        candle.get("open")
+    )
+
+    minute_close = safe_float(
+        candle.get("close")
+    )
+
+    if minute_open <= 0:
+
+        result["reason"] = (
+            "apertura 1M inválida"
         )
 
         return result
 
     # ========================================================
-    # NEUTRAL
+    # TIMESTAMP
+    # ========================================================
+
+    if "from" in candle.index:
+
+        try:
+
+            result[
+                "minute_timestamp"
+            ] = int(
+                float(
+                    candle["from"]
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            result[
+                "minute_timestamp"
+            ] = None
+
+    result[
+        "minute_open"
+    ] = minute_open
+
+    result[
+        "minute_close"
+    ] = minute_close
+
+    # ========================================================
+    # PREPARAR MICROVELAS
+    # ========================================================
+
+    micro = prepare_micro_candles(
+        micro
+    )
+
+    if len(micro) != MICRO_CANDLE_COUNT:
+
+        result["reason"] = (
+            "se requieren exactamente "
+            f"{MICRO_CANDLE_COUNT} microvelas 5S"
+        )
+
+        return result
+
+    # ========================================================
+    # MOVIMIENTO FUERTE
+    # ========================================================
+
+    movement = detect_strong_movement(
+        candle
+    )
+
+    result[
+        "movement_direction"
+    ] = movement["direction"]
+
+    result[
+        "movement_strong"
+    ] = movement["strong"]
+
+    result[
+        "body_ratio"
+    ] = movement["body_ratio"]
+
+    # ========================================================
+    # SI NO HAY MOVIMIENTO FUERTE,
+    # NO SE OPERA.
+    # ========================================================
+
+    if not movement["strong"]:
+
+        result["reason"] = (
+            "sin movimiento fuerte"
+        )
+
+        return result
+
+    # ========================================================
+    # PRIMERA 5S
+    # ========================================================
+
+    first = micro.iloc[0]
+
+    first_close = safe_float(
+        first["close"]
+    )
+
+    result[
+        "first_5s_close"
+    ] = first_close
+
+    # ========================================================
+    # MOVIMIENTO FUERTE ALCISTA
+    # ========================================================
+
+    if movement[
+        "direction"
+    ] == "call":
+
+        pattern = validate_call_pattern(
+            minute_open,
+            micro,
+        )
+
+        if not pattern["valid"]:
+
+            result["reason"] = (
+                pattern["reason"]
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # CONFIRMACIÓN FINAL
+        #
+        # La vela N debe cerrar verde.
+        # ----------------------------------------------------
+
+        if minute_close <= minute_open:
+
+            result["reason"] = (
+                "movimiento alcista pero "
+                "vela N no cerró verde"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # CALL
+        # ----------------------------------------------------
+
+        result["signal"] = "call"
+
+        result[
+            "pullback_count"
+        ] = pattern[
+            "pullback_count"
+        ]
+
+        result["reason"] = (
+            "CALL | movimiento fuerte "
+            "alcista | primera 5S alcista "
+            "| retroceso confirmado "
+            "| cierre N verde"
+        )
+
+        return result
+
+    # ========================================================
+    # MOVIMIENTO FUERTE BAJISTA
+    # ========================================================
+
+    if movement[
+        "direction"
+    ] == "put":
+
+        pattern = validate_put_pattern(
+            minute_open,
+            micro,
+        )
+
+        if not pattern["valid"]:
+
+            result["reason"] = (
+                pattern["reason"]
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # CONFIRMACIÓN FINAL
+        #
+        # La vela N debe cerrar roja.
+        # ----------------------------------------------------
+
+        if minute_close >= minute_open:
+
+            result["reason"] = (
+                "movimiento bajista pero "
+                "vela N no cerró roja"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # PUT
+        # ----------------------------------------------------
+
+        result["signal"] = "put"
+
+        result[
+            "pullback_count"
+        ] = pattern[
+            "pullback_count"
+        ]
+
+        result["reason"] = (
+            "PUT | movimiento fuerte "
+            "bajista | primera 5S bajista "
+            "| retroceso confirmado "
+            "| cierre N rojo"
+        )
+
+        return result
+
+    # ========================================================
+    # SIN DIRECCIÓN
     # ========================================================
 
     result["reason"] = (
-        "primera vela 5s cerró exactamente "
-        "en la apertura de la vela 1M"
+        "movimiento sin dirección"
     )
 
     return result
-
-
-# ============================================================
-# API PRINCIPAL
-# ============================================================
-
-def analyze_market(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Dict[str, Any]:
-    """
-    Función principal que debe utilizar bot.py.
-    """
-
-    return analyze_minute(
-        candle_1m,
-        candles_5s,
-    )
-
-
-# ============================================================
-# API SIMPLE
-# ============================================================
-
-def get_signal(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Optional[str]:
-    """
-    Devuelve únicamente:
-
-        "call"
-        "put"
-        None
-    """
-
-    result = analyze_market(
-        candle_1m,
-        candles_5s,
-    )
-
-    return result.get(
-        "signal"
-    )
-
-
-# ============================================================
-# COMPATIBILIDAD
-# ============================================================
-
-def signal(
-    candle_1m: pd.Series,
-    candles_5s: pd.DataFrame,
-) -> Optional[str]:
-    """
-    Alias de compatibilidad.
-    """
-
-    return get_signal(
-        candle_1m,
-        candles_5s,
-    )
-
-
-# ============================================================
-# PRUEBA
-# ============================================================
-
-if __name__ == "__main__":
-
-    print(
-        "strategy.py cargado correctamente."
-    )
-
-    print(
-        "Estrategia:"
-    )
-
-    print(
-        "1 minuto + microvelas de 5 segundos"
-    )
-
-    print(
-        "CALL/PUT según la lógica solicitada."
-    )
