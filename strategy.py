@@ -10,44 +10,62 @@ import pandas as pd
 # ============================================================
 
 TIMEFRAME = 60
-
 MICRO_TIMEFRAME = 5
-
 MICRO_CANDLE_COUNT = 12
 
-
 # ============================================================
-# FILTRO DE MOVIMIENTO FUERTE
+# FILTROS
 # ============================================================
 
-# Porcentaje mínimo del cuerpo respecto al rango total
-# para considerar que la vela de 1 minuto tiene
-# movimiento suficientemente fuerte.
-MIN_STRONG_BODY_RATIO = 0.50
+# Antes estaba en 0.50.
+# Era demasiado restrictivo y eliminaba demasiadas oportunidades.
+MIN_BODY_RATIO = 0.30
 
+# Si más del 40% de las microvelas cierran en contra
+# de la dirección de N, consideramos que hay demasiada
+# inestabilidad.
+MAX_OPPOSITE_MICRO_RATIO = 0.40
+
+# Primera microvela:
+# debe comenzar mostrando continuidad.
+FIRST_MICRO_MIN_MOVE_RATIO = 0.0
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
-def safe_float(
-    value: Any,
-) -> float:
 
+def safe_float(value: Any) -> float:
     try:
         return float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
+    except (TypeError, ValueError):
         return 0.0
+
+
+def empty_result(reason: str = "") -> Dict[str, Any]:
+    return {
+        "signal": None,
+        "minute_timestamp": None,
+        "minute_open": None,
+        "minute_close": None,
+        "minute_high": None,
+        "minute_low": None,
+        "first_5s_close": None,
+        "micro_count": 0,
+        "opposite_micro_count": 0,
+        "body_ratio": 0.0,
+        "movement_direction": None,
+        "movement_strong": False,
+        "continuity": False,
+        "score": 0,
+        "reason": reason,
+    }
 
 
 # ============================================================
 # PREPARAR MICROVELAS
 # ============================================================
+
 
 def prepare_micro_candles(
     micro: pd.DataFrame,
@@ -56,10 +74,7 @@ def prepare_micro_candles(
     if micro is None:
         return pd.DataFrame()
 
-    if not isinstance(
-        micro,
-        pd.DataFrame,
-    ):
+    if not isinstance(micro, pd.DataFrame):
         return pd.DataFrame()
 
     if micro.empty:
@@ -70,10 +85,11 @@ def prepare_micro_candles(
     required = [
         "open",
         "close",
+        "high",
+        "low",
     ]
 
     for column in required:
-
         if column not in df.columns:
             return pd.DataFrame()
 
@@ -99,8 +115,16 @@ def prepare_micro_candles(
             inplace=True,
         )
 
+        df["from"] = df["from"].astype("int64")
+
         df.sort_values(
             "from",
+            inplace=True,
+        )
+
+        df.drop_duplicates(
+            subset=["from"],
+            keep="last",
             inplace=True,
         )
 
@@ -113,8 +137,9 @@ def prepare_micro_candles(
 
 
 # ============================================================
-# MOVIMIENTO DE LA VELA PRINCIPAL
+# DATOS DE VELA 1M
 # ============================================================
+
 
 def get_main_candle_data(
     candle: pd.Series,
@@ -136,8 +161,9 @@ def get_main_candle_data(
         candle.get("low")
     )
 
-    candle_range = (
-        high - low
+    candle_range = max(
+        high - low,
+        0.0,
     )
 
     body = abs(
@@ -145,53 +171,37 @@ def get_main_candle_data(
     )
 
     if candle_range > 0:
-
-        body_ratio = (
-            body
-            / candle_range
-        )
-
+        body_ratio = body / candle_range
     else:
-
         body_ratio = 0.0
 
     if closing > opening:
-
         direction = "call"
 
     elif closing < opening:
-
         direction = "put"
 
     else:
-
         direction = "none"
 
     return {
-
         "open": opening,
-
         "close": closing,
-
         "high": high,
-
         "low": low,
-
         "range": candle_range,
-
         "body": body,
-
         "body_ratio": body_ratio,
-
         "direction": direction,
     }
 
 
 # ============================================================
-# MOVIMIENTO FUERTE
+# MOVIMIENTO DE N
 # ============================================================
 
-def detect_strong_movement(
+
+def detect_movement(
     candle: pd.Series,
 ) -> Dict[str, Any]:
 
@@ -199,395 +209,284 @@ def detect_strong_movement(
         candle
     )
 
-    direction = data[
-        "direction"
-    ]
-
-    body_ratio = data[
-        "body_ratio"
-    ]
-
-    candle_range = data[
-        "range"
-    ]
+    direction = data["direction"]
+    body_ratio = data["body_ratio"]
 
     if direction == "none":
 
         return {
-
+            "valid": False,
             "strong": False,
-
             "direction": "none",
-
             "body_ratio": body_ratio,
-
-            "reason":
-                "vela sin dirección",
+            "reason": "N cerró sin dirección",
         }
 
-    if candle_range <= 0:
+    if data["range"] <= 0:
 
         return {
-
+            "valid": False,
             "strong": False,
-
             "direction": direction,
-
             "body_ratio": body_ratio,
-
-            "reason":
-                "vela sin rango",
+            "reason": "N no tiene rango",
         }
 
-    if body_ratio >= (
-        MIN_STRONG_BODY_RATIO
-    ):
+    # Movimiento válido.
+    #
+    # Ya no exigimos 50%.
+    # Con 30% puede haber una vela suficientemente direccional
+    # sin bloquear casi todas las señales.
+    if body_ratio >= MIN_BODY_RATIO:
 
         return {
-
+            "valid": True,
             "strong": True,
-
             "direction": direction,
-
             "body_ratio": body_ratio,
-
-            "reason":
-                "movimiento fuerte "
-                f"{direction.upper()}",
+            "reason": "movimiento direccional válido",
         }
 
     return {
-
+        "valid": False,
         "strong": False,
-
         "direction": direction,
-
         "body_ratio": body_ratio,
-
-        "reason":
-            "movimiento débil",
+        "reason": (
+            f"cuerpo insuficiente "
+            f"({body_ratio:.3f} < {MIN_BODY_RATIO:.3f})"
+        ),
     }
 
 
 # ============================================================
-# PRIMERA MICROVELA
+# MICROESTRUCTURA
 # ============================================================
 
-def check_first_5s(
+
+def analyze_micro_continuity(
     minute_open: float,
-    first_micro: pd.Series,
+    minute_close: float,
+    direction: str,
+    micro: pd.DataFrame,
 ) -> Dict[str, Any]:
 
-    first_open = safe_float(
-        first_micro.get(
-            "open"
+    result = {
+        "valid": False,
+        "first_close": None,
+        "opposite_count": 0,
+        "opposite_ratio": 1.0,
+        "reason": "",
+    }
+
+    if micro is None or micro.empty:
+
+        result["reason"] = (
+            "no hay microvelas"
         )
-    )
+
+        return result
+
+    if len(micro) != MICRO_CANDLE_COUNT:
+
+        result["reason"] = (
+            f"microvelas incompletas "
+            f"({len(micro)}/{MICRO_CANDLE_COUNT})"
+        )
+
+        return result
+
+    first = micro.iloc[0]
 
     first_close = safe_float(
-        first_micro.get(
-            "close"
+        first["close"]
+    )
+
+    result["first_close"] = first_close
+
+    # --------------------------------------------------------
+    # DIRECCIÓN FINAL DE N
+    # --------------------------------------------------------
+
+    if direction == "call":
+
+        if minute_close <= minute_open:
+
+            result["reason"] = (
+                "N no cerró verde"
+            )
+
+            return result
+
+        # Primera microvela debe acompañar.
+        if first_close <= minute_open:
+
+            result["reason"] = (
+                "primera 5S no confirma CALL"
+            )
+
+            return result
+
+        opposite_count = 0
+
+        # El resto de microvelas.
+        for index in range(1, len(micro)):
+
+            row = micro.iloc[index]
+
+            close = safe_float(
+                row["close"]
+            )
+
+            # Cerrar por debajo de la apertura de N
+            # es una señal clara de pérdida de continuidad.
+            if close < minute_open:
+                opposite_count += 1
+
+    elif direction == "put":
+
+        if minute_close >= minute_open:
+
+            result["reason"] = (
+                "N no cerró roja"
+            )
+
+            return result
+
+        if first_close >= minute_open:
+
+            result["reason"] = (
+                "primera 5S no confirma PUT"
+            )
+
+            return result
+
+        opposite_count = 0
+
+        for index in range(1, len(micro)):
+
+            row = micro.iloc[index]
+
+            close = safe_float(
+                row["close"]
+            )
+
+            if close > minute_open:
+                opposite_count += 1
+
+    else:
+
+        result["reason"] = (
+            "N sin dirección"
         )
+
+        return result
+
+    total_after_first = max(
+        len(micro) - 1,
+        1,
     )
 
-    first_bullish = (
-        first_close
-        > minute_open
+    opposite_ratio = (
+        opposite_count /
+        total_after_first
     )
 
-    first_bearish = (
-        first_close
-        < minute_open
+    result["opposite_count"] = (
+        opposite_count
     )
 
-    return {
+    result["opposite_ratio"] = (
+        opposite_ratio
+    )
 
-        "first_open":
-            first_open,
+    # --------------------------------------------------------
+    # DEMASIADA OPOSICIÓN
+    # --------------------------------------------------------
 
-        "first_close":
-            first_close,
+    if opposite_ratio > MAX_OPPOSITE_MICRO_RATIO:
 
-        "call":
-            first_bullish,
+        result["reason"] = (
+            "demasiada pérdida de continuidad "
+            f"({opposite_count}/{total_after_first} "
+            f"microvelas en contra)"
+        )
 
-        "put":
-            first_bearish,
-    }
+        return result
+
+    result["valid"] = True
+
+    result["reason"] = (
+        "continuidad micro confirmada"
+    )
+
+    return result
 
 
 # ============================================================
-# RETROCESO CALL
+# SCORE
 # ============================================================
 
-def count_call_pullbacks(
-    minute_open: float,
-    micro: pd.DataFrame,
+
+def calculate_score(
+    movement: Dict[str, Any],
+    micro_result: Dict[str, Any],
 ) -> int:
 
-    if micro.empty:
-        return 0
+    score = 0
 
-    count = 0
+    # Movimiento válido.
+    if movement.get("valid"):
+        score += 3
 
-    # La primera microvela no cuenta.
-    for index in range(
-        1,
-        len(micro),
-    ):
+    # Primera microvela confirma.
+    if micro_result.get("first_close") is not None:
+        score += 2
 
-        row = micro.iloc[
-            index
-        ]
+    # Continuidad.
+    if micro_result.get("valid"):
+        score += 3
 
-        close = safe_float(
-            row["close"]
-        )
-
-        if close < minute_open:
-            count += 1
-
-    return count
-
-
-# ============================================================
-# RETROCESO PUT
-# ============================================================
-
-def count_put_pullbacks(
-    minute_open: float,
-    micro: pd.DataFrame,
-) -> int:
-
-    if micro.empty:
-        return 0
-
-    count = 0
-
-    # La primera microvela no cuenta.
-    for index in range(
-        1,
-        len(micro),
-    ):
-
-        row = micro.iloc[
-            index
-        ]
-
-        close = safe_float(
-            row["close"]
-        )
-
-        if close > minute_open:
-            count += 1
-
-    return count
-
-
-# ============================================================
-# VALIDAR RETROCESO CALL
-# ============================================================
-
-def validate_call_pattern(
-    minute_open: float,
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    if len(micro) != (
-        MICRO_CANDLE_COUNT
-    ):
-
-        return {
-
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "microvelas insuficientes",
-        }
-
-    first = micro.iloc[0]
-
-    first_data = check_first_5s(
-        minute_open,
-        first,
-    )
-
-    if not first_data[
-        "call"
-    ]:
-
-        return {
-
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "primera 5S no supera "
-                "la apertura de N",
-        }
-
-    pullbacks = (
-        count_call_pullbacks(
-            minute_open,
-            micro,
+    # Poco movimiento contrario.
+    opposite_ratio = float(
+        micro_result.get(
+            "opposite_ratio",
+            1.0,
         )
     )
 
-    if pullbacks < 1:
+    if opposite_ratio <= 0.20:
+        score += 2
 
-        return {
+    elif opposite_ratio <= 0.40:
+        score += 1
 
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "no existe retroceso CALL",
-        }
-
-    return {
-
-        "valid": True,
-
-        "pullback_count":
-            pullbacks,
-
-        "first_5s_close":
-            first_data[
-                "first_close"
-            ],
-
-        "reason":
-            "patrón CALL confirmado",
-    }
-
-
-# ============================================================
-# VALIDAR RETROCESO PUT
-# ============================================================
-
-def validate_put_pattern(
-    minute_open: float,
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    if len(micro) != (
-        MICRO_CANDLE_COUNT
-    ):
-
-        return {
-
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "microvelas insuficientes",
-        }
-
-    first = micro.iloc[0]
-
-    first_data = check_first_5s(
-        minute_open,
-        first,
+    return min(
+        score,
+        10,
     )
-
-    if not first_data[
-        "put"
-    ]:
-
-        return {
-
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "primera 5S no queda "
-                "debajo de la apertura de N",
-        }
-
-    pullbacks = (
-        count_put_pullbacks(
-            minute_open,
-            micro,
-        )
-    )
-
-    if pullbacks < 1:
-
-        return {
-
-            "valid": False,
-
-            "pullback_count": 0,
-
-            "reason":
-                "no existe retroceso PUT",
-        }
-
-    return {
-
-        "valid": True,
-
-        "pullback_count":
-            pullbacks,
-
-        "first_5s_close":
-            first_data[
-                "first_close"
-            ],
-
-        "reason":
-            "patrón PUT confirmado",
-    }
 
 
 # ============================================================
 # ANALIZAR MERCADO
 # ============================================================
 
+
 def analyze_market(
     candle: pd.Series,
     micro: pd.DataFrame,
 ) -> Dict[str, Any]:
 
-    result: Dict[str, Any] = {
+    result = empty_result()
 
-        "signal": None,
-
-        "minute_timestamp": None,
-
-        "minute_open": None,
-
-        "minute_close": None,
-
-        "first_5s_close": None,
-
-        "pullback_count": 0,
-
-        "movement_direction": None,
-
-        "movement_strong": False,
-
-        "body_ratio": 0.0,
-
-        "score": 0,
-
-        "reason": "",
-    }
-
-    # ========================================================
-    # VALIDAR VELA PRINCIPAL
-    # ========================================================
+    # --------------------------------------------------------
+    # VALIDACIÓN
+    # --------------------------------------------------------
 
     if candle is None:
 
         result["reason"] = (
-            "vela 1M inexistente"
+            "vela N inexistente"
         )
 
         return result
@@ -598,287 +497,215 @@ def analyze_market(
     ):
 
         result["reason"] = (
-            "vela 1M inválida"
+            "vela N inválida"
         )
 
         return result
 
-    minute_open = safe_float(
-        candle.get("open")
+    # --------------------------------------------------------
+    # DATOS DE N
+    # --------------------------------------------------------
+
+    data = get_main_candle_data(
+        candle
     )
 
-    minute_close = safe_float(
-        candle.get("close")
+    minute_open = data["open"]
+    minute_close = data["close"]
+
+    result["minute_open"] = (
+        minute_open
     )
 
-    if minute_open <= 0:
+    result["minute_close"] = (
+        minute_close
+    )
 
-        result["reason"] = (
-            "apertura 1M inválida"
-        )
+    result["minute_high"] = (
+        data["high"]
+    )
 
-        return result
+    result["minute_low"] = (
+        data["low"]
+    )
 
-    # ========================================================
-    # TIMESTAMP
-    # ========================================================
+    result["body_ratio"] = (
+        data["body_ratio"]
+    )
 
+    result["movement_direction"] = (
+        data["direction"]
+    )
+
+    # Timestamp.
     if "from" in candle.index:
 
         try:
-
-            result[
-                "minute_timestamp"
-            ] = int(
-                float(
-                    candle[
-                        "from"
-                    ]
-                )
+            result["minute_timestamp"] = int(
+                float(candle["from"])
             )
-
         except (
             TypeError,
             ValueError,
         ):
+            pass
 
-            result[
-                "minute_timestamp"
-            ] = None
+    # --------------------------------------------------------
+    # N VÁLIDA
+    # --------------------------------------------------------
 
-    result[
-        "minute_open"
-    ] = minute_open
+    if minute_open <= 0:
 
-    result[
-        "minute_close"
-    ] = minute_close
+        result["reason"] = (
+            "apertura N inválida"
+        )
 
-    # ========================================================
-    # PREPARAR MICROVELAS
-    # ========================================================
+        return result
+
+    # --------------------------------------------------------
+    # MOVIMIENTO
+    # --------------------------------------------------------
+
+    movement = detect_movement(
+        candle
+    )
+
+    result["movement_strong"] = (
+        movement["strong"]
+    )
+
+    # --------------------------------------------------------
+    # MICROVELAS
+    # --------------------------------------------------------
 
     micro = prepare_micro_candles(
         micro
     )
 
-    if len(micro) != (
-        MICRO_CANDLE_COUNT
-    ):
-
-        result["reason"] = (
-            "se requieren exactamente "
-            f"{MICRO_CANDLE_COUNT} microvelas 5S"
-        )
-
-        return result
-
-    # ========================================================
-    # MOVIMIENTO FUERTE
-    # ========================================================
-
-    movement = (
-        detect_strong_movement(
-            candle
-        )
+    result["micro_count"] = len(
+        micro
     )
 
-    result[
-        "movement_direction"
-    ] = movement[
-        "direction"
-    ]
-
-    result[
-        "movement_strong"
-    ] = movement[
-        "strong"
-    ]
-
-    result[
-        "body_ratio"
-    ] = movement[
-        "body_ratio"
-    ]
-
-    # Score descriptivo.
-    score = 0
-
-    if movement["strong"]:
-        score += 1
-
-    if (
-        movement["direction"]
-        in ("call", "put")
-    ):
-        score += 1
-
-    # ========================================================
-    # SIN MOVIMIENTO FUERTE = NO OPERAR
-    # ========================================================
-
-    if not movement[
-        "strong"
-    ]:
-
-        result["score"] = score
+    if len(micro) != MICRO_CANDLE_COUNT:
 
         result["reason"] = (
-            "sin movimiento fuerte"
+            f"microvelas incompletas: "
+            f"{len(micro)}/{MICRO_CANDLE_COUNT}"
         )
 
         return result
 
-    # ========================================================
-    # PRIMERA 5S
-    # ========================================================
+    # --------------------------------------------------------
+    # MICROCONTINUIDAD
+    # --------------------------------------------------------
 
-    first = micro.iloc[0]
-
-    first_close = safe_float(
-        first["close"]
+    micro_result = analyze_micro_continuity(
+        minute_open,
+        minute_close,
+        movement["direction"],
+        micro,
     )
 
-    result[
-        "first_5s_close"
-    ] = first_close
+    result["first_5s_close"] = (
+        micro_result["first_close"]
+    )
 
-    # ========================================================
-    # CALL
-    # ========================================================
+    result["opposite_micro_count"] = (
+        micro_result["opposite_count"]
+    )
 
-    if movement[
-        "direction"
-    ] == "call":
+    result["continuity"] = (
+        micro_result["valid"]
+    )
 
-        pattern = (
-            validate_call_pattern(
-                minute_open,
-                micro,
-            )
-        )
+    # --------------------------------------------------------
+    # SCORE
+    # --------------------------------------------------------
 
-        if not pattern[
-            "valid"
-        ]:
-
-            result["score"] = score
-
-            result["reason"] = (
-                pattern["reason"]
-            )
-
-            return result
-
-        score += 2
-
-        if minute_close > minute_open:
-            score += 1
-
-        if minute_close <= minute_open:
-
-            result["score"] = score
-
-            result["reason"] = (
-                "movimiento alcista pero "
-                "vela N no cerró verde"
-            )
-
-            return result
-
-        result[
-            "signal"
-        ] = "call"
-
-        result[
-            "pullback_count"
-        ] = pattern[
-            "pullback_count"
-        ]
-
-        score += 1
-
-        result["score"] = score
-
-        result["reason"] = (
-            "CALL | movimiento fuerte "
-            "alcista | primera 5S alcista "
-            "| retroceso confirmado "
-            "| cierre N verde"
-        )
-
-        return result
-
-    # ========================================================
-    # PUT
-    # ========================================================
-
-    if movement[
-        "direction"
-    ] == "put":
-
-        pattern = (
-            validate_put_pattern(
-                minute_open,
-                micro,
-            )
-        )
-
-        if not pattern[
-            "valid"
-        ]:
-
-            result["score"] = score
-
-            result["reason"] = (
-                pattern["reason"]
-            )
-
-            return result
-
-        score += 2
-
-        if minute_close < minute_open:
-            score += 1
-
-        if minute_close >= minute_open:
-
-            result["score"] = score
-
-            result["reason"] = (
-                "movimiento bajista pero "
-                "vela N no cerró roja"
-            )
-
-            return result
-
-        result[
-            "signal"
-        ] = "put"
-
-        result[
-            "pullback_count"
-        ] = pattern[
-            "pullback_count"
-        ]
-
-        score += 1
-
-        result["score"] = score
-
-        result["reason"] = (
-            "PUT | movimiento fuerte "
-            "bajista | primera 5S bajista "
-            "| retroceso confirmado "
-            "| cierre N rojo"
-        )
-
-        return result
+    score = calculate_score(
+        movement,
+        micro_result,
+    )
 
     result["score"] = score
 
+    # --------------------------------------------------------
+    # FILTRO DE MOVIMIENTO
+    # --------------------------------------------------------
+
+    if not movement["valid"]:
+
+        result["reason"] = (
+            "SIN ENTRADA | "
+            + movement["reason"]
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # FILTRO DE CONTINUIDAD
+    # --------------------------------------------------------
+
+    if not micro_result["valid"]:
+
+        result["reason"] = (
+            "SIN ENTRADA | "
+            + micro_result["reason"]
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # SCORE MÍNIMO
+    # --------------------------------------------------------
+
+    if score < 6:
+
+        result["reason"] = (
+            f"SIN ENTRADA | score bajo "
+            f"{score}/10"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # CALL
+    # --------------------------------------------------------
+
+    if movement["direction"] == "call":
+
+        result["signal"] = "call"
+
+        result["reason"] = (
+            "CALL | continuidad confirmada | "
+            f"body_ratio={data['body_ratio']:.3f} | "
+            f"micro={len(micro)} | "
+            f"opuestas={micro_result['opposite_count']} | "
+            f"score={score}/10"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # PUT
+    # --------------------------------------------------------
+
+    if movement["direction"] == "put":
+
+        result["signal"] = "put"
+
+        result["reason"] = (
+            "PUT | continuidad confirmada | "
+            f"body_ratio={data['body_ratio']:.3f} | "
+            f"micro={len(micro)} | "
+            f"opuestas={micro_result['opposite_count']} | "
+            f"score={score}/10"
+        )
+
+        return result
+
     result["reason"] = (
-        "movimiento sin dirección"
+        "SIN ENTRADA | dirección desconocida"
     )
 
     return result
