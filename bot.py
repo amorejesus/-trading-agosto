@@ -1,8 +1,3 @@
-# ============================================================
-# bot.py
-# IQ OPTION - ESTRATEGIA M1 + 12 VELAS DE 5 SEGUNDOS
-# ============================================================
-
 import os
 import time
 import requests
@@ -13,7 +8,7 @@ import strategy
 
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 55000
+AMOUNT = 3333
 EXPIRATION = 1
 
 TIMEFRAME_5S = 5
