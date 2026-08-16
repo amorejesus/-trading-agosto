@@ -1,7 +1,6 @@
 # ============================================================
 # BOT.PY
-# IQ OPTION
-# M1 + EXACTAMENTE 12 VELAS DE 5 SEGUNDOS
+# IQ OPTION - M1 + 12 VELAS DE 5 SEGUNDOS
 # ============================================================
 
 import os
@@ -9,8 +8,8 @@ import time
 import requests
 from datetime import datetime
 
-import strategy
 from iqoptionapi.stable_api import IQ_Option
+from strategy import check_pattern
 
 
 # ============================================================
@@ -19,12 +18,15 @@ from iqoptionapi.stable_api import IQ_Option
 
 PAIR = "EURUSD-OTC"
 
-AMOUNT = 55
+AMOUNT = 550
 
+# Expiración en minutos
 EXPIRATION = 1
 
+# Cada vela = 5 segundos
 TIMEFRAME_5S = 5
 
+# Una M1 = 12 velas de 5 segundos
 CANDLES_PER_M1 = 12
 
 
@@ -101,8 +103,7 @@ def connect_iq():
 
         try:
 
-            print()
-            print("======================================")
+            print("\n======================================")
             print("CONECTANDO A IQ OPTION")
             print("======================================")
 
@@ -123,12 +124,14 @@ def connect_iq():
                         "PRACTICE"
                     )
 
-                    print("✓ CUENTA PRACTICE")
+                    print(
+                        "✓ CUENTA PRACTICE"
+                    )
 
                 except Exception as e:
 
                     print(
-                        f"[BALANCE] {e}"
+                        f"[BALANCE] Aviso: {e}"
                     )
 
                 send_telegram(
@@ -172,8 +175,9 @@ def ensure_connection(iq):
 
         pass
 
-    print()
-    print("⚠ CONEXIÓN PERDIDA")
+    print(
+        "\n⚠ CONEXIÓN PERDIDA"
+    )
 
     try:
 
@@ -206,9 +210,13 @@ def ensure_connection(iq):
 
 def get_current_minute():
 
-    now = int(time.time())
+    now = int(
+        time.time()
+    )
 
-    return now - (now % 60)
+    return now - (
+        now % 60
+    )
 
 
 # ============================================================
@@ -221,9 +229,14 @@ def wait_for_new_m1(last_m1=None):
 
         current_m1 = get_current_minute()
 
+        # Primera ejecución:
+        # tomar la M1 anterior ya cerrada.
+
         if last_m1 is None:
 
             return current_m1 - 60
+
+        # Nueva M1 cerrada.
 
         if current_m1 > last_m1:
 
@@ -233,12 +246,156 @@ def wait_for_new_m1(last_m1=None):
 
 
 # ============================================================
-# OBTENER EXACTAMENTE 12 VELAS DE 5S
+# NORMALIZAR UNA VELA DE IQ OPTION
+# ============================================================
+
+def normalize_candle(candle):
+
+    """
+    IQ Option normalmente entrega:
+
+        open
+        close
+        min
+        max
+        from
+        to
+        volume
+
+    Algunas partes de la estrategia pueden utilizar:
+
+        low
+        high
+
+    Por eso aquí normalizamos ambos formatos.
+
+    IMPORTANTE:
+    NO modificamos los precios.
+    Solo damos nombres compatibles.
+    """
+
+    if not isinstance(candle, dict):
+
+        return None
+
+    result = dict(candle)
+
+    # --------------------------------------------------------
+    # TIMESTAMP
+    # --------------------------------------------------------
+
+    timestamp = result.get("from")
+
+    if timestamp is None:
+
+        return None
+
+    try:
+
+        result["from"] = int(
+            timestamp
+        )
+
+    except Exception:
+
+        return None
+
+    # --------------------------------------------------------
+    # OPEN
+    # --------------------------------------------------------
+
+    if result.get("open") is None:
+
+        return None
+
+    # --------------------------------------------------------
+    # CLOSE
+    # --------------------------------------------------------
+
+    if result.get("close") is None:
+
+        return None
+
+    # --------------------------------------------------------
+    # HIGH
+    #
+    # IQ Option usa normalmente "max".
+    # --------------------------------------------------------
+
+    if result.get("high") is None:
+
+        if result.get("max") is not None:
+
+            result["high"] = result["max"]
+
+    # --------------------------------------------------------
+    # LOW
+    #
+    # IQ Option usa normalmente "min".
+    # --------------------------------------------------------
+
+    if result.get("low") is None:
+
+        if result.get("min") is not None:
+
+            result["low"] = result["min"]
+
+    # --------------------------------------------------------
+    # Si existe high pero no max
+    # --------------------------------------------------------
+
+    if result.get("max") is None:
+
+        if result.get("high") is not None:
+
+            result["max"] = result["high"]
+
+    # --------------------------------------------------------
+    # Si existe low pero no min
+    # --------------------------------------------------------
+
+    if result.get("min") is None:
+
+        if result.get("low") is not None:
+
+            result["min"] = result["low"]
+
+    # --------------------------------------------------------
+    # Validar high
+    # --------------------------------------------------------
+
+    if result.get("high") is None:
+
+        print(
+            "[M1] Vela sin dato HIGH/MAX."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Validar low
+    # --------------------------------------------------------
+
+    if result.get("low") is None:
+
+        print(
+            "[M1] Vela sin dato LOW/MIN."
+        )
+
+        return None
+
+    return result
+
+
+# ============================================================
+# OBTENER LAS 12 VELAS DE 5S
 # ============================================================
 
 def get_m1_5s_candles(iq, m1_start):
 
-    m1_end = m1_start + 60
+    m1_end = (
+        m1_start + 60
+    )
 
     try:
 
@@ -260,39 +417,47 @@ def get_m1_5s_candles(iq, m1_start):
     if not candles:
 
         print(
-            "[CANDLES] API no devolvió velas."
+            "[M1] IQ Option no devolvió velas."
         )
 
         return None
 
     valid = []
 
-    for candle in candles:
+    # ========================================================
+    # NORMALIZAR Y FILTRAR
+    # ========================================================
 
-        try:
+    for raw_candle in candles:
 
-            timestamp = int(
-                candle.get("from")
-            )
+        candle = normalize_candle(
+            raw_candle
+        )
 
-        except Exception:
+        if candle is None:
 
             continue
 
-        # ====================================================
-        # SOLO VELAS PERTENECIENTES A ESTA M1
-        # ====================================================
+        timestamp = candle["from"]
 
-        if m1_start <= timestamp < m1_end:
+        # EXACTAMENTE dentro de la M1
 
-            valid.append(candle)
+        if (
+            m1_start
+            <= timestamp
+            < m1_end
+        ):
+
+            valid.append(
+                candle
+            )
 
     # ========================================================
     # ORDEN CRONOLÓGICO
     # ========================================================
 
     valid.sort(
-        key=lambda x: int(x["from"])
+        key=lambda x: x["from"]
     )
 
     # ========================================================
@@ -302,22 +467,25 @@ def get_m1_5s_candles(iq, m1_start):
     if len(valid) != CANDLES_PER_M1:
 
         print(
-            f"[M1] Velas encontradas: "
+            f"[M1] Velas válidas: "
             f"{len(valid)}/{CANDLES_PER_M1}"
         )
 
         return None
 
     # ========================================================
-    # COMPROBAR QUE SEAN REALMENTE DE 5S
+    # COMPROBAR SECUENCIA DE 5 SEGUNDOS
     # ========================================================
 
     timestamps = [
-        int(candle["from"])
+        candle["from"]
         for candle in valid
     ]
 
-    for i in range(1, len(timestamps)):
+    for i in range(
+        1,
+        len(timestamps)
+    ):
 
         difference = (
             timestamps[i]
@@ -327,39 +495,22 @@ def get_m1_5s_candles(iq, m1_start):
         if difference != 5:
 
             print(
-                "[M1] Secuencia inválida."
-            )
-
-            print(
-                f"Diferencia encontrada: "
-                f"{difference}s"
+                "[M1] Secuencia 5s inválida: "
+                f"{timestamps[i - 1]} -> "
+                f"{timestamps[i]} "
+                f"(diferencia={difference})"
             )
 
             return None
 
     # ========================================================
-    # COMPROBAR OHLC
+    # COMPROBACIÓN FINAL
     # ========================================================
 
-    for index, candle in enumerate(valid, start=1):
-
-        required = (
-            "open",
-            "close",
-            "high",
-            "low"
-        )
-
-        for key in required:
-
-            if candle.get(key) is None:
-
-                print(
-                    f"[M1] Vela {index} "
-                    f"sin dato '{key}'."
-                )
-
-                return None
+    print(
+        f"✓ M1 contiene exactamente "
+        f"{len(valid)} velas de 5s"
+    )
 
     return valid
 
@@ -370,8 +521,7 @@ def get_m1_5s_candles(iq, m1_start):
 
 def print_m1_candles(candles):
 
-    print()
-    print("--------------------------------------")
+    print("\n--------------------------------------")
     print("12 VELAS DE 5S")
     print("--------------------------------------")
 
@@ -388,13 +538,25 @@ def print_m1_candles(candles):
             timestamp
         )
 
-        open_price = float(
-            candle["open"]
+        open_price = candle.get(
+            "open"
         )
 
-        close_price = float(
-            candle["close"]
+        close_price = candle.get(
+            "close"
         )
+
+        high_price = candle.get(
+            "high"
+        )
+
+        low_price = candle.get(
+            "low"
+        )
+
+        # ----------------------------------------------------
+        # DIRECCIÓN
+        # ----------------------------------------------------
 
         if close_price > open_price:
 
@@ -416,7 +578,9 @@ def print_m1_candles(candles):
             f"{dt.strftime('%H:%M:%S')} | "
             f"{symbol} {direction} | "
             f"O={open_price} | "
-            f"C={close_price}"
+            f"C={close_price} | "
+            f"H={high_price} | "
+            f"L={low_price}"
         )
 
     print("--------------------------------------")
@@ -429,91 +593,42 @@ def print_m1_candles(candles):
 def analyze_strategy(candles):
 
     """
-    La matemática pertenece exclusivamente
-    a strategy.py.
+    BOT.PY NO calcula la estrategia.
 
-    Orden de compatibilidad:
+    Solo entrega las 12 velas cerradas
+    directamente a:
 
-    1. check_pattern()
-    2. get_strategy_analysis()
+        strategy.check_pattern()
 
-    El bot NO calcula la dirección.
     """
 
-    # ========================================================
-    # OPCIÓN 1
-    # ========================================================
+    if not candles:
 
-    check_pattern = getattr(
-        strategy,
-        "check_pattern",
-        None
-    )
+        return None
 
-    if callable(check_pattern):
+    if len(candles) != CANDLES_PER_M1:
 
-        try:
+        print(
+            "[STRATEGY] Cantidad incorrecta de velas."
+        )
 
-            return check_pattern(
-                candles
-            )
+        return None
 
-        except Exception as e:
+    try:
 
-            print(
-                f"[STRATEGY] Error en "
-                f"check_pattern(): {e}"
-            )
+        signal = check_pattern(
+            candles
+        )
 
-            return None
+        return signal
 
-    # ========================================================
-    # OPCIÓN 2
-    # ========================================================
+    except Exception as e:
 
-    get_strategy_analysis = getattr(
-        strategy,
-        "get_strategy_analysis",
-        None
-    )
+        print(
+            f"[STRATEGY] Error: {e}"
+        )
 
-    if callable(get_strategy_analysis):
-
-        try:
-
-            return get_strategy_analysis(
-                candles
-            )
-
-        except Exception as e:
-
-            print(
-                f"[STRATEGY] Error en "
-                f"get_strategy_analysis(): {e}"
-            )
-
-            return None
-
-    # ========================================================
-    # NO EXISTE FUNCIÓN COMPATIBLE
-    # ========================================================
-
-    print()
-    print("======================================")
-    print("ERROR DE COMPATIBILIDAD")
-    print("======================================")
-    print(
-        "strategy.py no contiene:"
-    )
-    print(
-        "  check_pattern()"
-    )
-    print(
-        "  ni get_strategy_analysis()"
-    )
-    print("======================================")
-
-    return None
+        return None
 
 
 # ============================================================
@@ -526,50 +641,24 @@ def normalize_signal(signal):
 
         return None
 
-    # --------------------------------------------------------
-    # STRING
-    # --------------------------------------------------------
+    if isinstance(
+        signal,
+        str
+    ):
 
-    if isinstance(signal, str):
+        signal = (
+            signal
+            .strip()
+            .lower()
+        )
 
-        value = signal.strip().lower()
-
-        if value == "call":
+        if signal == "call":
 
             return "call"
 
-        if value == "put":
+        if signal == "put":
 
             return "put"
-
-        return None
-
-    # --------------------------------------------------------
-    # DICCIONARIO
-    # --------------------------------------------------------
-
-    if isinstance(signal, dict):
-
-        for key in (
-            "signal",
-            "direction",
-            "action",
-            "trade"
-        ):
-
-            value = signal.get(key)
-
-            if isinstance(value, str):
-
-                value = value.strip().lower()
-
-                if value == "call":
-
-                    return "call"
-
-                if value == "put":
-
-                    return "put"
 
     return None
 
@@ -595,29 +684,32 @@ def execute_trade(iq, signal):
 
         return False, None
 
-    print()
-    print("======================================")
+    print("\n======================================")
     print("SEÑAL CONFIRMADA")
     print("======================================")
 
     if signal == "call":
 
-        print("🟢 CALL")
+        print(
+            "🟢 CALL"
+        )
 
     else:
 
-        print("🔴 PUT")
+        print(
+            "🔴 PUT"
+        )
 
     print(
-        f"Activo      : {PAIR}"
+        f"Activo: {PAIR}"
     )
 
     print(
-        f"Monto       : {AMOUNT}"
+        f"Monto: {AMOUNT}"
     )
 
     print(
-        f"Expiración  : {EXPIRATION}M"
+        f"Expiración: {EXPIRATION} minuto"
     )
 
     print("======================================")
@@ -667,7 +759,10 @@ def execute_trade(iq, signal):
 # RESULTADO DE OPERACIÓN
 # ============================================================
 
-def get_trade_result(iq, order_id):
+def get_trade_result(
+    iq,
+    order_id
+):
 
     if not order_id:
 
@@ -677,9 +772,8 @@ def get_trade_result(iq, order_id):
         EXPIRATION * 60
     ) + 5
 
-    print()
     print(
-        f"Esperando resultado "
+        f"\nEsperando resultado "
         f"({wait_seconds}s)..."
     )
 
@@ -695,7 +789,9 @@ def get_trade_result(iq, order_id):
 
         if result is not None:
 
-            return float(result)
+            return float(
+                result
+            )
 
     except Exception as e:
 
@@ -714,17 +810,18 @@ def print_result(result):
 
     if result is None:
 
-        print()
         print(
-            "⚠ RESULTADO NO DISPONIBLE"
+            "\n⚠ RESULTADO NO DISPONIBLE"
         )
 
         return
 
     if result > 0:
 
-        print()
-        print("🟢 WIN")
+        print(
+            "\n🟢 WIN"
+        )
+
         print(
             f"Resultado: +{result}"
         )
@@ -736,8 +833,10 @@ def print_result(result):
 
     elif result < 0:
 
-        print()
-        print("🔴 LOSS")
+        print(
+            "\n🔴 LOSS"
+        )
+
         print(
             f"Resultado: {result}"
         )
@@ -749,8 +848,10 @@ def print_result(result):
 
     else:
 
-        print()
-        print("⚪ EMPATE")
+        print(
+            "\n⚪ EMPATE"
+        )
+
         print(
             f"Resultado: {result}"
         )
@@ -762,15 +863,15 @@ def print_result(result):
 
 
 # ============================================================
-# INFORMACIÓN INICIAL
+# CICLO PRINCIPAL
 # ============================================================
 
-def print_startup():
+def main():
 
-    print()
+    print("\n")
     print("==========================================")
-    print("             BOT IQ OPTION")
-    print("        M1 + 12 VELAS DE 5S")
+    print("           BOT IQ OPTION")
+    print("           M1 + 12 VELAS DE 5S")
     print("==========================================")
 
     print(
@@ -790,96 +891,13 @@ def print_startup():
     )
 
     print(
-        f"TIMEFRAME    : {TIMEFRAME_5S}s"
-    )
-
-    print(
         "ESTRATEGIA   : strategy.py"
     )
 
     print("==========================================")
 
-
-# ============================================================
-# COMPROBAR QUE STRATEGY.PY TENGA UNA INTERFAZ VÁLIDA
-# ============================================================
-
-def check_strategy_interface():
-
-    check_pattern = getattr(
-        strategy,
-        "check_pattern",
-        None
-    )
-
-    get_strategy_analysis = getattr(
-        strategy,
-        "get_strategy_analysis",
-        None
-    )
-
-    if callable(check_pattern):
-
-        print(
-            "✓ strategy.py: check_pattern()"
-        )
-
-        return True
-
-    if callable(get_strategy_analysis):
-
-        print(
-            "✓ strategy.py: "
-            "get_strategy_analysis()"
-        )
-
-        return True
-
-    print()
-    print("======================================")
-    print("✗ ERROR: STRATEGY.PY INCOMPATIBLE")
-    print("======================================")
-    print(
-        "Debe existir una de estas funciones:"
-    )
-    print()
-    print(
-        "check_pattern(candles_5s)"
-    )
-    print()
-    print(
-        "o"
-    )
-    print()
-    print(
-        "get_strategy_analysis(candles_5s)"
-    )
-    print("======================================")
-
-    return False
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print_startup()
-
     # ========================================================
-    # COMPROBAR STRATEGY.PY
-    # ========================================================
-
-    if not check_strategy_interface():
-
-        raise RuntimeError(
-            "strategy.py no tiene una función "
-            "compatible."
-        )
-
-    # ========================================================
-    # CONECTAR
+    # CONEXIÓN
     # ========================================================
 
     iq = connect_iq()
@@ -891,13 +909,7 @@ def main():
     last_processed_m1 = None
 
     # ========================================================
-    # CONTROL DE OPERACIÓN
-    # ========================================================
-
-    operation_in_progress = False
-
-    # ========================================================
-    # LOOP PRINCIPAL
+    # CICLO
     # ========================================================
 
     while True:
@@ -937,7 +949,7 @@ def main():
 
                 continue
 
-            print()
+            print("\n")
             print("======================================")
             print("M1 CERRADA")
             print(
@@ -950,7 +962,7 @@ def main():
             print("======================================")
 
             # =================================================
-            # OBTENER 12 VELAS
+            # OBTENER LAS 12 VELAS
             # =================================================
 
             candles = None
@@ -968,8 +980,7 @@ def main():
 
                 print(
                     f"[M1] Esperando datos..."
-                    f" intento "
-                    f"{attempt + 1}/5"
+                    f" intento {attempt + 1}/5"
                 )
 
                 time.sleep(1)
@@ -986,9 +997,8 @@ def main():
 
             if candles is None:
 
-                print()
                 print(
-                    "⚠ M1 DESCARTADA"
+                    "\n⚠ M1 DESCARTADA"
                 )
 
                 print(
@@ -998,6 +1008,7 @@ def main():
 
                 send_telegram(
                     "⚠ M1 DESCARTADA\n"
+                    f"{PAIR}\n"
                     "Datos 5s incompletos."
                 )
 
@@ -1015,9 +1026,9 @@ def main():
             # ANALIZAR
             # =================================================
 
-            print()
             print(
-                "Analizando las 12 velas..."
+                "\nAnalizando "
+                "las 12 velas..."
             )
 
             signal = analyze_strategy(
@@ -1032,8 +1043,7 @@ def main():
             # RESULTADO
             # =================================================
 
-            print()
-            print("--------------------------------------")
+            print("\n--------------------------------------")
             print("RESULTADO DE STRATEGY.PY")
             print("--------------------------------------")
 
@@ -1070,27 +1080,13 @@ def main():
                 send_telegram(
                     "⚪ SIN OPERACIÓN\n"
                     f"{PAIR}\n"
-                    "strategy.py no generó "
-                    "una señal válida."
+                    "strategy.py no generó CALL/PUT."
                 )
 
                 continue
 
             # =================================================
-            # NO DUPLICAR OPERACIÓN
-            # =================================================
-
-            if operation_in_progress:
-
-                print(
-                    "⚠ Ya existe una operación "
-                    "en progreso."
-                )
-
-                continue
-
-            # =================================================
-            # EJECUTAR
+            # EJECUTAR OPERACIÓN
             # =================================================
 
             success, order_id = execute_trade(
@@ -1101,8 +1097,6 @@ def main():
             if not success:
 
                 continue
-
-            operation_in_progress = True
 
             # =================================================
             # ESPERAR RESULTADO
@@ -1117,17 +1111,14 @@ def main():
                 result
             )
 
-            operation_in_progress = False
-
         # =====================================================
         # CTRL+C
         # =====================================================
 
         except KeyboardInterrupt:
 
-            print()
             print(
-                "BOT DETENIDO POR EL USUARIO."
+                "\n\nBOT DETENIDO POR EL USUARIO."
             )
 
             send_telegram(
@@ -1142,14 +1133,21 @@ def main():
 
         except Exception as e:
 
-            print()
-            print("======================================")
-            print("ERROR GENERAL")
-            print("======================================")
+            print(
+                "\n======================================"
+            )
+
+            print(
+                "ERROR GENERAL"
+            )
+
             print(
                 str(e)
             )
-            print("======================================")
+
+            print(
+                "======================================"
+            )
 
             send_telegram(
                 "⚠ ERROR EN BOT\n"
