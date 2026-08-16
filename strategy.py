@@ -16,9 +16,7 @@ import pandas as pd
 # 2. Después existe al menos una 5s que cierra
 #    POR DEBAJO de apertura 1M.
 # 3. La vela 1M termina VERDE.
-# 4. Continuidad compradora.
-# 5. Confirmaciones adicionales.
-# 6. Se prepara CALL para N+1.
+# 4. Se prepara CALL para N+1.
 #
 #
 # PUT:
@@ -27,52 +25,34 @@ import pandas as pd
 # 2. Después existe al menos una 5s que cierra
 #    POR ENCIMA de apertura 1M.
 # 3. La vela 1M termina ROJA.
-# 4. Continuidad vendedora.
-# 5. Confirmaciones adicionales.
-# 6. Se prepara PUT para N+1.
+# 4. Se prepara PUT para N+1.
 #
 #
-# CONFIRMACIONES AÑADIDAS:
+# FILTRO AÑADIDO:
 #
-# - EMA
-# - RSI
-# - VOLUMEN
-# - TENDENCIA
-# - SCORE
-# - MAYORÍA
+# Después de cumplirse la lógica original:
 #
+# CALL:
+#     El dominio comprador debe confirmar continuidad.
 #
-# IMPORTANTE:
+# PUT:
+#     El dominio vendedor debe confirmar continuidad.
 #
-# Estas confirmaciones NO crean una señal.
-#
-# Primero debe cumplirse:
-#
-#       LOGICA ORIGINAL
-#              +
-#       CONTINUIDAD DOMINANTE
-#
-# Después se aplican las confirmaciones.
+# Este filtro NO sustituye la estrategia.
+# Solamente permite la señal si existe continuidad
+# posterior al último retroceso.
 #
 # ============================================================
 
-
-# ============================================================
-# CONFIGURACION DE CONFIRMACIONES
-# ============================================================
-
-EMA_FAST_PERIOD = 5
-EMA_SLOW_PERIOD = 9
-
-RSI_PERIOD = 7
-
-MIN_SCORE = 4
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
 def _to_float(value: Any) -> Optional[float]:
+    """
+    Conversión segura a float.
+    """
 
     try:
         return float(value)
@@ -88,6 +68,18 @@ def _to_float(value: Any) -> Optional[float]:
 def _normalize_5s(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
+    """
+    Normaliza las microvelas de 5 segundos.
+
+    Columnas obligatorias:
+        open
+        close
+
+    Opcional:
+        from
+        high
+        low
+    """
 
     if df is None:
         return pd.DataFrame()
@@ -101,6 +93,10 @@ def _normalize_5s(
     out = df.copy()
 
     rename = {}
+
+    # --------------------------------------------------------
+    # Compatibilidad IQ Option
+    # --------------------------------------------------------
 
     if "max" in out.columns and "high" not in out.columns:
         rename["max"] = "high"
@@ -120,20 +116,25 @@ def _normalize_5s(
     if "Close" in out.columns and "close" not in out.columns:
         rename["Close"] = "close"
 
-    if "Volume" in out.columns and "volume" not in out.columns:
-        rename["Volume"] = "volume"
-
     if rename:
         out.rename(
             columns=rename,
             inplace=True,
         )
 
+    # --------------------------------------------------------
+    # Validación
+    # --------------------------------------------------------
+
     if "open" not in out.columns:
         return pd.DataFrame()
 
     if "close" not in out.columns:
         return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # Conversión numérica
+    # --------------------------------------------------------
 
     out["open"] = pd.to_numeric(
         out["open"],
@@ -145,26 +146,9 @@ def _normalize_5s(
         errors="coerce",
     )
 
-    if "high" in out.columns:
-
-        out["high"] = pd.to_numeric(
-            out["high"],
-            errors="coerce",
-        )
-
-    if "low" in out.columns:
-
-        out["low"] = pd.to_numeric(
-            out["low"],
-            errors="coerce",
-        )
-
-    if "volume" in out.columns:
-
-        out["volume"] = pd.to_numeric(
-            out["volume"],
-            errors="coerce",
-        )
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
 
     if "from" in out.columns:
 
@@ -183,6 +167,10 @@ def _normalize_5s(
             inplace=True,
         )
 
+    # --------------------------------------------------------
+    # Eliminar datos inválidos
+    # --------------------------------------------------------
+
     out.dropna(
         subset=["open", "close"],
         inplace=True,
@@ -197,17 +185,31 @@ def _normalize_5s(
 
 
 # ============================================================
-# VALIDAR SECUENCIA 5S
+# VALIDAR SECUENCIA DE MICROVELAS
 # ============================================================
 
 def _validate_5s_sequence(
     micro: pd.DataFrame,
 ) -> bool:
+    """
+    Comprueba que las microvelas sean consecutivas
+    cada 5 segundos.
+
+    Esto NO cambia la estrategia.
+
+    Solo evita analizar:
+        - duplicados
+        - huecos
+        - timestamps incorrectos
+        - datos desordenados
+    """
 
     if micro.empty:
         return False
 
     if "from" not in micro.columns:
+        # Si IQ Option no entrega timestamp,
+        # no podemos comprobar la secuencia.
         return True
 
     if len(micro) < 2:
@@ -226,6 +228,7 @@ def _validate_5s_sequence(
             - timestamps[i - 1]
         )
 
+        # 5 segundos exactos.
         if difference != 5:
             return False
 
@@ -240,6 +243,10 @@ def _get_minute_micro_candles(
     candle_1m: pd.Series,
     candles_5s: pd.DataFrame,
 ) -> pd.DataFrame:
+    """
+    Obtiene únicamente las microvelas pertenecientes
+    al mismo minuto de la vela 1M.
+    """
 
     micro = _normalize_5s(
         candles_5s
@@ -263,8 +270,11 @@ def _get_minute_micro_candles(
                 )
 
         except (TypeError, ValueError):
-
             minute_timestamp = None
+
+    # --------------------------------------------------------
+    # Si tenemos timestamp, filtrar exactamente el minuto
+    # --------------------------------------------------------
 
     if (
         minute_timestamp is not None
@@ -272,7 +282,6 @@ def _get_minute_micro_candles(
     ):
 
         start_time = minute_timestamp
-
         end_time = (
             minute_timestamp + 60
         )
@@ -303,16 +312,42 @@ def _get_minute_micro_candles(
 
 
 # ============================================================
-# CONTINUIDAD COMPRADORA
+# FILTRO DE CONTINUIDAD COMPRADORA
 # ============================================================
 
 def _buyer_continuity_confirmed(
     micro: pd.DataFrame,
     opening: float,
 ) -> bool:
+    """
+    Confirma continuidad compradora.
+
+    Se ejecuta DESPUÉS de encontrar el último
+    retroceso comprador.
+
+    Condiciones:
+
+    1. Debe existir retroceso.
+    2. Se toma el último cierre por debajo
+       de la apertura 1M.
+    3. Después de ese retroceso debe existir
+       recuperación compradora.
+    4. El último cierre debe estar por encima
+       de la apertura 1M.
+    5. Debe existir avance posterior:
+       un cierre posterior superior al cierre
+       inmediatamente anterior.
+
+    No utiliza mayoría.
+    No utiliza indicadores.
+    """
 
     if micro.empty:
         return False
+
+    # --------------------------------------------------------
+    # Encontrar todos los retrocesos vendedores
+    # --------------------------------------------------------
 
     pullback_indexes = []
 
@@ -326,16 +361,17 @@ def _buyer_continuity_confirmed(
             continue
 
         if close_value < opening:
-
             pullback_indexes.append(i)
 
     if not pullback_indexes:
         return False
 
+    # Último retroceso.
     last_pullback = (
         pullback_indexes[-1]
     )
 
+    # No puede ser la última vela.
     if last_pullback >= len(micro) - 1:
         return False
 
@@ -345,6 +381,10 @@ def _buyer_continuity_confirmed(
 
     if continuation.empty:
         return False
+
+    # --------------------------------------------------------
+    # Recuperación compradora
+    # --------------------------------------------------------
 
     recovered = False
 
@@ -358,12 +398,15 @@ def _buyer_continuity_confirmed(
             continue
 
         if close_value > opening:
-
             recovered = True
             break
 
     if not recovered:
         return False
+
+    # --------------------------------------------------------
+    # Último cierre debe mantenerse encima
+    # --------------------------------------------------------
 
     last_close = _to_float(
         continuation.iloc[-1]["close"]
@@ -374,6 +417,10 @@ def _buyer_continuity_confirmed(
 
     if last_close <= opening:
         return False
+
+    # --------------------------------------------------------
+    # Confirmación de avance
+    # --------------------------------------------------------
 
     if len(continuation) >= 2:
 
@@ -398,16 +445,37 @@ def _buyer_continuity_confirmed(
 
 
 # ============================================================
-# CONTINUIDAD VENDEDORA
+# FILTRO DE CONTINUIDAD VENDEDORA
 # ============================================================
 
 def _seller_continuity_confirmed(
     micro: pd.DataFrame,
     opening: float,
 ) -> bool:
+    """
+    Confirma continuidad vendedora.
+
+    Es el espejo exacto del filtro comprador.
+
+    Condiciones:
+
+    1. Debe existir retroceso.
+    2. Se toma el último cierre por encima
+       de la apertura 1M.
+    3. Después debe existir recuperación vendedora.
+    4. El último cierre debe estar por debajo
+       de la apertura 1M.
+    5. Debe existir avance posterior:
+       un cierre posterior inferior al cierre
+       inmediatamente anterior.
+    """
 
     if micro.empty:
         return False
+
+    # --------------------------------------------------------
+    # Encontrar todos los retrocesos compradores
+    # --------------------------------------------------------
 
     pullback_indexes = []
 
@@ -421,16 +489,17 @@ def _seller_continuity_confirmed(
             continue
 
         if close_value > opening:
-
             pullback_indexes.append(i)
 
     if not pullback_indexes:
         return False
 
+    # Último retroceso.
     last_pullback = (
         pullback_indexes[-1]
     )
 
+    # No puede ser la última vela.
     if last_pullback >= len(micro) - 1:
         return False
 
@@ -440,6 +509,10 @@ def _seller_continuity_confirmed(
 
     if continuation.empty:
         return False
+
+    # --------------------------------------------------------
+    # Recuperación vendedora
+    # --------------------------------------------------------
 
     recovered = False
 
@@ -453,12 +526,15 @@ def _seller_continuity_confirmed(
             continue
 
         if close_value < opening:
-
             recovered = True
             break
 
     if not recovered:
         return False
+
+    # --------------------------------------------------------
+    # Último cierre debe mantenerse debajo
+    # --------------------------------------------------------
 
     last_close = _to_float(
         continuation.iloc[-1]["close"]
@@ -469,6 +545,10 @@ def _seller_continuity_confirmed(
 
     if last_close >= opening:
         return False
+
+    # --------------------------------------------------------
+    # Confirmación de avance
+    # --------------------------------------------------------
 
     if len(continuation) >= 2:
 
@@ -490,559 +570,6 @@ def _seller_continuity_confirmed(
             return False
 
     return True
-
-
-# ============================================================
-# EMA
-# ============================================================
-
-def _calculate_ema(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    result = {
-        "ema_fast": None,
-        "ema_slow": None,
-        "ema_bullish": False,
-        "ema_bearish": False,
-    }
-
-    if "close" not in micro.columns:
-        return result
-
-    if len(micro) < EMA_SLOW_PERIOD:
-        return result
-
-    closes = pd.to_numeric(
-        micro["close"],
-        errors="coerce",
-    )
-
-    if closes.isna().any():
-        return result
-
-    ema_fast = closes.ewm(
-        span=EMA_FAST_PERIOD,
-        adjust=False,
-    ).mean()
-
-    ema_slow = closes.ewm(
-        span=EMA_SLOW_PERIOD,
-        adjust=False,
-    ).mean()
-
-    fast = _to_float(
-        ema_fast.iloc[-1]
-    )
-
-    slow = _to_float(
-        ema_slow.iloc[-1]
-    )
-
-    last_close = _to_float(
-        closes.iloc[-1]
-    )
-
-    if (
-        fast is None
-        or slow is None
-        or last_close is None
-    ):
-        return result
-
-    result["ema_fast"] = fast
-    result["ema_slow"] = slow
-
-    result["ema_bullish"] = (
-        fast > slow
-        and last_close > fast
-    )
-
-    result["ema_bearish"] = (
-        fast < slow
-        and last_close < fast
-    )
-
-    return result
-
-
-# ============================================================
-# RSI
-# ============================================================
-
-def _calculate_rsi(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    result = {
-        "rsi": None,
-        "rsi_bullish": False,
-        "rsi_bearish": False,
-    }
-
-    if "close" not in micro.columns:
-        return result
-
-    if len(micro) < RSI_PERIOD + 1:
-        return result
-
-    closes = pd.to_numeric(
-        micro["close"],
-        errors="coerce",
-    )
-
-    if closes.isna().any():
-        return result
-
-    delta = closes.diff()
-
-    gains = delta.clip(
-        lower=0
-    )
-
-    losses = (
-        -delta.clip(
-            upper=0
-        )
-    )
-
-    average_gain = gains.rolling(
-        RSI_PERIOD
-    ).mean()
-
-    average_loss = losses.rolling(
-        RSI_PERIOD
-    ).mean()
-
-    gain = _to_float(
-        average_gain.iloc[-1]
-    )
-
-    loss = _to_float(
-        average_loss.iloc[-1]
-    )
-
-    if gain is None or loss is None:
-        return result
-
-    if loss == 0:
-
-        rsi = 100.0
-
-    else:
-
-        relative_strength = (
-            gain / loss
-        )
-
-        rsi = (
-            100
-            -
-            (
-                100
-                /
-                (
-                    1
-                    +
-                    relative_strength
-                )
-            )
-        )
-
-    result["rsi"] = rsi
-
-    # --------------------------------------------------------
-    # Confirmación compradora
-    # --------------------------------------------------------
-
-    result["rsi_bullish"] = (
-        50 < rsi < 70
-    )
-
-    # --------------------------------------------------------
-    # Confirmación vendedora
-    # --------------------------------------------------------
-
-    result["rsi_bearish"] = (
-        30 < rsi < 50
-    )
-
-    return result
-
-
-# ============================================================
-# VOLUMEN
-# ============================================================
-
-def _volume_confirmation(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    result = {
-        "volume_available": False,
-        "volume_bullish": False,
-        "volume_bearish": False,
-        "volume_current": None,
-        "volume_average": None,
-    }
-
-    if "volume" not in micro.columns:
-        return result
-
-    if len(micro) < 3:
-        return result
-
-    volumes = pd.to_numeric(
-        micro["volume"],
-        errors="coerce",
-    )
-
-    if volumes.isna().all():
-        return result
-
-    volumes = volumes.dropna()
-
-    if len(volumes) < 3:
-        return result
-
-    current_volume = _to_float(
-        volumes.iloc[-1]
-    )
-
-    previous_volumes = volumes.iloc[
-        :-1
-    ]
-
-    average_volume = _to_float(
-        previous_volumes.mean()
-    )
-
-    if (
-        current_volume is None
-        or average_volume is None
-    ):
-        return result
-
-    result["volume_available"] = True
-
-    result[
-        "volume_current"
-    ] = current_volume
-
-    result[
-        "volume_average"
-    ] = average_volume
-
-    # --------------------------------------------------------
-    # El volumen debe superar el promedio.
-    # --------------------------------------------------------
-
-    if current_volume <= average_volume:
-        return result
-
-    # --------------------------------------------------------
-    # Determinar dominio por última microvela.
-    # --------------------------------------------------------
-
-    last = micro.iloc[-1]
-
-    last_open = _to_float(
-        last["open"]
-    )
-
-    last_close = _to_float(
-        last["close"]
-    )
-
-    if (
-        last_open is None
-        or last_close is None
-    ):
-        return result
-
-    if last_close > last_open:
-
-        result[
-            "volume_bullish"
-        ] = True
-
-    elif last_close < last_open:
-
-        result[
-            "volume_bearish"
-        ] = True
-
-    return result
-
-
-# ============================================================
-# TENDENCIA
-# ============================================================
-
-def _trend_confirmation(
-    micro: pd.DataFrame,
-) -> Dict[str, Any]:
-
-    result = {
-        "trend": "neutral",
-        "trend_bullish": False,
-        "trend_bearish": False,
-    }
-
-    if len(micro) < 3:
-        return result
-
-    closes = pd.to_numeric(
-        micro["close"],
-        errors="coerce",
-    )
-
-    if closes.isna().any():
-        return result
-
-    first = _to_float(
-        closes.iloc[-3]
-    )
-
-    second = _to_float(
-        closes.iloc[-2]
-    )
-
-    third = _to_float(
-        closes.iloc[-1]
-    )
-
-    if (
-        first is None
-        or second is None
-        or third is None
-    ):
-        return result
-
-    # --------------------------------------------------------
-    # Tendencia compradora
-    # --------------------------------------------------------
-
-    if (
-        third > second
-        and second > first
-    ):
-
-        result[
-            "trend"
-        ] = "bullish"
-
-        result[
-            "trend_bullish"
-        ] = True
-
-        return result
-
-    # --------------------------------------------------------
-    # Tendencia vendedora
-    # --------------------------------------------------------
-
-    if (
-        third < second
-        and second < first
-    ):
-
-        result[
-            "trend"
-        ] = "bearish"
-
-        result[
-            "trend_bearish"
-        ] = True
-
-        return result
-
-    return result
-
-
-# ============================================================
-# CONFIRMACIONES + SCORE + MAYORIA
-# ============================================================
-
-def _additional_confirmations(
-    micro: pd.DataFrame,
-    signal: str,
-) -> Dict[str, Any]:
-
-    ema = _calculate_ema(
-        micro
-    )
-
-    rsi = _calculate_rsi(
-        micro
-    )
-
-    volume = _volume_confirmation(
-        micro
-    )
-
-    trend = _trend_confirmation(
-        micro
-    )
-
-    confirmations = []
-
-    # ========================================================
-    # EMA
-    # ========================================================
-
-    if signal == "call":
-
-        ema_ok = bool(
-            ema["ema_bullish"]
-        )
-
-    else:
-
-        ema_ok = bool(
-            ema["ema_bearish"]
-        )
-
-    confirmations.append(
-        ema_ok
-    )
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    if signal == "call":
-
-        rsi_ok = bool(
-            rsi["rsi_bullish"]
-        )
-
-    else:
-
-        rsi_ok = bool(
-            rsi["rsi_bearish"]
-        )
-
-    confirmations.append(
-        rsi_ok
-    )
-
-    # ========================================================
-    # VOLUMEN
-    # ========================================================
-
-    if signal == "call":
-
-        volume_ok = bool(
-            volume["volume_bullish"]
-        )
-
-    else:
-
-        volume_ok = bool(
-            volume["volume_bearish"]
-        )
-
-    confirmations.append(
-        volume_ok
-    )
-
-    # ========================================================
-    # TENDENCIA
-    # ========================================================
-
-    if signal == "call":
-
-        trend_ok = bool(
-            trend["trend_bullish"]
-        )
-
-    else:
-
-        trend_ok = bool(
-            trend["trend_bearish"]
-        )
-
-    confirmations.append(
-        trend_ok
-    )
-
-    # ========================================================
-    # SCORE
-    # ========================================================
-
-    score = sum(
-        1
-        for confirmation
-        in confirmations
-        if confirmation
-    )
-
-    total_filters = len(
-        confirmations
-    )
-
-    # ========================================================
-    # MAYORIA
-    # ========================================================
-
-    majority = (
-        score
-        >
-        total_filters / 2
-    )
-
-    # ========================================================
-    # CONFIRMACION FINAL
-    # ========================================================
-
-    confirmed = (
-        score >= MIN_SCORE
-        and majority
-    )
-
-    return {
-
-        "ema_fast": ema[
-            "ema_fast"
-        ],
-
-        "ema_slow": ema[
-            "ema_slow"
-        ],
-
-        "ema_confirmed": ema_ok,
-
-        "rsi": rsi[
-            "rsi"
-        ],
-
-        "rsi_confirmed": rsi_ok,
-
-        "volume_current": volume[
-            "volume_current"
-        ],
-
-        "volume_average": volume[
-            "volume_average"
-        ],
-
-        "volume_confirmed": volume_ok,
-
-        "trend": trend[
-            "trend"
-        ],
-
-        "trend_confirmed": trend_ok,
-
-        "score": score,
-
-        "score_total": total_filters,
-
-        "majority": majority,
-
-        "confirmed": confirmed,
-    }
 
 
 # ============================================================
@@ -1075,34 +602,6 @@ def analyze_minute(
         "pullback_count": 0,
 
         "continuity_confirmed": False,
-
-        "ema_fast": None,
-
-        "ema_slow": None,
-
-        "ema_confirmed": False,
-
-        "rsi": None,
-
-        "rsi_confirmed": False,
-
-        "volume_current": None,
-
-        "volume_average": None,
-
-        "volume_confirmed": False,
-
-        "trend": "neutral",
-
-        "trend_confirmed": False,
-
-        "score": 0,
-
-        "score_total": 4,
-
-        "majority": False,
-
-        "confirmations_confirmed": False,
     }
 
     # ========================================================
@@ -1145,7 +644,7 @@ def analyze_minute(
     result["minute_close"] = closing
 
     # ========================================================
-    # TIMESTAMP
+    # TIMESTAMP 1M
     # ========================================================
 
     if "from" in candle_1m.index:
@@ -1165,7 +664,7 @@ def analyze_minute(
             ] = None
 
     # ========================================================
-    # MICROVELAS
+    # OBTENER MICROVELAS
     # ========================================================
 
     micro = _get_minute_micro_candles(
@@ -1182,12 +681,10 @@ def analyze_minute(
         return result
 
     # ========================================================
-    # SECUENCIA
+    # VALIDACIÓN DE SECUENCIA
     # ========================================================
 
-    if not _validate_5s_sequence(
-        micro
-    ):
+    if not _validate_5s_sequence(micro):
 
         result["reason"] = (
             "secuencia 5s inválida: "
@@ -1195,6 +692,10 @@ def analyze_minute(
         )
 
         return result
+
+    # ========================================================
+    # NECESITAMOS AL MENOS 2 MICROVELAS
+    # ========================================================
 
     if len(micro) < 2:
 
@@ -1280,7 +781,7 @@ def analyze_minute(
             return result
 
         # ----------------------------------------------------
-        # CONTINUIDAD COMPRADORA
+        # FILTRO DOMINANTE COMPRADOR
         # ----------------------------------------------------
 
         continuity = (
@@ -1299,41 +800,8 @@ def analyze_minute(
 
             return result
 
-        result[
-            "continuity_confirmed"
-        ] = True
-
         # ----------------------------------------------------
-        # CONFIRMACIONES ADICIONALES
-        # ----------------------------------------------------
-
-        confirmations = (
-            _additional_confirmations(
-                micro,
-                "call",
-            )
-        )
-
-        result.update(
-            confirmations
-        )
-
-        if not confirmations[
-            "confirmed"
-        ]:
-
-            result["reason"] = (
-                "CALL bloqueada: "
-                "confirmaciones insuficientes | "
-                f"score="
-                f"{confirmations['score']}/"
-                f"{confirmations['score_total']}"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # CALL FINAL
+        # CALL CONFIRMADA
         # ----------------------------------------------------
 
         result["signal"] = "call"
@@ -1341,15 +809,13 @@ def analyze_minute(
         result["valid"] = True
 
         result[
-            "confirmations_confirmed"
+            "continuity_confirmed"
         ] = True
 
         result["reason"] = (
             "CALL confirmada: "
-            "patrón original + "
-            "continuidad compradora + "
-            "EMA + RSI + volumen + "
-            "tendencia + mayoría"
+            "patrón original completo + "
+            "continuidad compradora"
         )
 
         return result
@@ -1397,7 +863,7 @@ def analyze_minute(
             return result
 
         # ----------------------------------------------------
-        # CONTINUIDAD VENDEDORA
+        # FILTRO DOMINANTE VENDEDOR
         # ----------------------------------------------------
 
         continuity = (
@@ -1416,41 +882,8 @@ def analyze_minute(
 
             return result
 
-        result[
-            "continuity_confirmed"
-        ] = True
-
         # ----------------------------------------------------
-        # CONFIRMACIONES ADICIONALES
-        # ----------------------------------------------------
-
-        confirmations = (
-            _additional_confirmations(
-                micro,
-                "put",
-            )
-        )
-
-        result.update(
-            confirmations
-        )
-
-        if not confirmations[
-            "confirmed"
-        ]:
-
-            result["reason"] = (
-                "PUT bloqueada: "
-                "confirmaciones insuficientes | "
-                f"score="
-                f"{confirmations['score']}/"
-                f"{confirmations['score_total']}"
-            )
-
-            return result
-
-        # ----------------------------------------------------
-        # PUT FINAL
+        # PUT CONFIRMADA
         # ----------------------------------------------------
 
         result["signal"] = "put"
@@ -1458,15 +891,13 @@ def analyze_minute(
         result["valid"] = True
 
         result[
-            "confirmations_confirmed"
+            "continuity_confirmed"
         ] = True
 
         result["reason"] = (
             "PUT confirmada: "
-            "patrón original + "
-            "continuidad vendedora + "
-            "EMA + RSI + volumen + "
-            "tendencia + mayoría"
+            "patrón original completo + "
+            "continuidad vendedora"
         )
 
         return result
@@ -1547,17 +978,9 @@ if __name__ == "__main__":
     )
 
     print(
-        "Logica original conservada."
+        "Lógica original conservada."
     )
 
     print(
-        "Continuidad dominante activa."
-    )
-
-    print(
-        "EMA + RSI + volumen + tendencia"
-    )
-
-    print(
-        "Score + mayoría activos."
+        "Filtro de continuidad dominante activo."
         )
