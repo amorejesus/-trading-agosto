@@ -7,17 +7,17 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 import requests
+
 from iqoptionapi.stable_api import IQ_Option
 
 from strategy import (
     analyze_market,
     MICRO_CANDLE_COUNT,
-    MICRO_TIMEFRAME,
 )
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIG
 # ============================================================
 
 IQ_EMAIL = os.getenv("IQ_EMAIL")
@@ -26,53 +26,45 @@ IQ_PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-
-# Pares OTC
 PAIRS = [
     "EURUSD-OTC",
     "GBPUSD-OTC",
     "EURJPY-OTC",
 ]
 
-
-# Temporalidad principal
 TIMEFRAME = 60
+MICRO_TIMEFRAME = 5
 
-# Expiración operación digital
 EXPIRATION = 1
+AMOUNT = 10
 
-# Importe
-AMOUNT = 100
-
-# Historial principal
 CANDLE_COUNT = 60
 
+# Cantidad adicional para poder localizar exactamente
+# las 12 microvelas correspondientes a N.
+MICRO_FETCH_COUNT = 20
 
 # ============================================================
-# EJECUCIÓN
+# LOOP
 # ============================================================
 
 POLL_INTERVAL = 0.08
 
-# Entrada exclusivamente en N+1
-# segundo 01–03
+# ============================================================
+# ENTRADA N+1
+# ============================================================
+
 ENTRY_MIN_SECOND = 1.0
 ENTRY_MAX_SECOND = 3.0
 
 TRADE_COOLDOWN = 60.0
 
-
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-TELEGRAM_TIMEOUT = 1.5
-
-# Evita bombardear Telegram si está caído.
 TELEGRAM_COMMAND_INTERVAL = 2.0
-
-LAST_TELEGRAM_COMMAND_CHECK = 0.0
-
+TELEGRAM_TIMEOUT = 0.8
 
 # ============================================================
 # ESTADO
@@ -84,19 +76,24 @@ LAST_UPDATE_ID: Optional[int] = None
 
 IQ: Optional[IQ_Option] = None
 
-
-# Última vela N cerrada procesada por cada par.
 LAST_CONFIRMED_CANDLE: Dict[str, int] = {}
 
+PENDING_ENTRY: Dict[
+    str,
+    Dict[str, Any],
+] = {}
 
-# Señales pendientes para ejecutar en N+1.
-PENDING_ENTRY: Dict[str, Dict[str, Any]] = {}
+LAST_TRADE_TIME: Dict[
+    str,
+    float,
+] = {}
 
+LAST_TRADE_CANDLE: Dict[
+    str,
+    int,
+] = {}
 
-# Última operación por par.
-LAST_TRADE_TIME: Dict[str, float] = {}
-
-LAST_TRADE_CANDLE: Dict[str, int] = {}
+LAST_TELEGRAM_CHECK = 0.0
 
 
 # ============================================================
@@ -112,22 +109,44 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# HTTP SESSION
+# ============================================================
+
+HTTP = requests.Session()
+
+HTTP.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "Railway-IQ-Bot"
+        )
+    }
+)
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
-def telegram_send(message: str) -> bool:
 
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+def telegram_send(
+    message: str,
+) -> bool:
+
+    if not TELEGRAM_TOKEN:
+        return False
+
+    if not TELEGRAM_CHAT_ID:
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_TOKEN}/sendMessage"
     )
 
     try:
 
-        response = requests.post(
+        response = HTTP.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -148,18 +167,10 @@ def telegram_send(message: str) -> bool:
 
         return True
 
-    except requests.exceptions.Timeout:
+    except requests.RequestException as exc:
 
         logger.warning(
-            "Telegram timeout enviando mensaje."
-        )
-
-        return False
-
-    except requests.exceptions.RequestException as exc:
-
-        logger.warning(
-            "Telegram no disponible: %s",
+            "Telegram envío no disponible: %s",
             exc,
         )
 
@@ -168,7 +179,7 @@ def telegram_send(message: str) -> bool:
     except Exception as exc:
 
         logger.warning(
-            "Error Telegram: %s",
+            "Telegram error: %s",
             exc,
         )
 
@@ -176,31 +187,36 @@ def telegram_send(message: str) -> bool:
 
 
 # ============================================================
-# COMANDOS TELEGRAM
+# TELEGRAM COMMANDS
 # ============================================================
 
-def check_commands() -> None:
+
+def check_commands(
+    force: bool = False,
+) -> None:
 
     global LAST_UPDATE_ID
     global BOT_RUNNING
-    global LAST_TELEGRAM_COMMAND_CHECK
+    global LAST_TELEGRAM_CHECK
+
+    now = time.time()
+
+    # No consultar Telegram cada 0.08 segundos.
+    if not force:
+
+        if (
+            now - LAST_TELEGRAM_CHECK
+            < TELEGRAM_COMMAND_INTERVAL
+        ):
+            return
+
+    LAST_TELEGRAM_CHECK = now
 
     if not TELEGRAM_TOKEN:
         return
 
-    now = time.time()
-
-    # No consultar Telegram en cada vuelta del loop.
-    if (
-        now - LAST_TELEGRAM_COMMAND_CHECK
-        < TELEGRAM_COMMAND_INTERVAL
-    ):
-        return
-
-    LAST_TELEGRAM_COMMAND_CHECK = now
-
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_TOKEN}/getUpdates"
     )
 
@@ -216,7 +232,7 @@ def check_commands() -> None:
 
     try:
 
-        response = requests.get(
+        response = HTTP.get(
             url,
             params=params,
             timeout=TELEGRAM_TIMEOUT,
@@ -232,8 +248,8 @@ def check_commands() -> None:
             [],
         ):
 
-            LAST_UPDATE_ID = update.get(
-                "update_id"
+            LAST_UPDATE_ID = (
+                update.get("update_id")
             )
 
             message = update.get(
@@ -258,14 +274,15 @@ def check_commands() -> None:
                 )
             )
 
-            if chat_id != str(
-                TELEGRAM_CHAT_ID
+            if (
+                chat_id
+                != str(TELEGRAM_CHAT_ID)
             ):
                 continue
 
-            # =================================================
+            # ------------------------------------------------
             # START
-            # =================================================
+            # ------------------------------------------------
 
             if text == "/start":
 
@@ -277,19 +294,16 @@ def check_commands() -> None:
                     "EURUSD-OTC\n"
                     "GBPUSD-OTC\n"
                     "EURJPY-OTC\n\n"
-                    "N se analiza SOLO después "
-                    "de cerrar.\n"
+                    "N se analiza SOLO "
+                    "después de cerrar.\n"
                     "N nunca se opera.\n"
-                    "Entrada: N+1, segundo 01–03."
+                    "Entrada: N+1 "
+                    "segundo 01–03."
                 )
 
-                logger.info(
-                    "Telegram: BOT ACTIVADO"
-                )
-
-            # =================================================
+            # ------------------------------------------------
             # STOP
-            # =================================================
+            # ------------------------------------------------
 
             elif text == "/stop":
 
@@ -297,23 +311,29 @@ def check_commands() -> None:
 
                 telegram_send(
                     "🔴 BOT DETENIDO\n\n"
-                    "No se abrirán nuevas operaciones."
+                    "No se abrirán "
+                    "nuevas operaciones."
                 )
 
-                logger.info(
-                    "Telegram: BOT DETENIDO"
-                )
-
-            # =================================================
+            # ------------------------------------------------
             # STATUS
-            # =================================================
+            # ------------------------------------------------
 
             elif text == "/status":
 
                 status = (
                     "🟢 ACTIVO"
                     if BOT_RUNNING
-                    else "🔴 DETENIDO"
+                    else
+                    "🔴 DETENIDO"
+                )
+
+                pending = (
+                    ", ".join(
+                        PENDING_ENTRY.keys()
+                    )
+                    if PENDING_ENTRY
+                    else "ninguna"
                 )
 
                 telegram_send(
@@ -321,23 +341,17 @@ def check_commands() -> None:
                     f"Estado: {status}\n"
                     "Mercado: DIGITAL OTC\n"
                     "Temporalidad: 1 minuto\n"
-                    "Microvelas: 5 segundos\n"
-                    f"Microvelas requeridas: "
-                    f"{MICRO_CANDLE_COUNT}\n"
+                    "Micro: 5 segundos\n"
                     "Expiración: 1 minuto\n"
                     f"Importe: ${AMOUNT}\n"
-                    f"Pares: {', '.join(PAIRS)}"
+                    f"Pares: "
+                    f"{', '.join(PAIRS)}\n"
+                    f"Pendientes: {pending}"
                 )
 
-    except requests.exceptions.Timeout:
+    except requests.RequestException as exc:
 
-        # No llenamos Railway con traceback.
-        logger.warning(
-            "Telegram commands: timeout"
-        )
-
-    except requests.exceptions.RequestException as exc:
-
+        # No llenamos Railway con miles de errores.
         logger.warning(
             "Telegram commands: %s",
             exc,
@@ -346,7 +360,7 @@ def check_commands() -> None:
     except Exception as exc:
 
         logger.warning(
-            "Error Telegram commands: %s",
+            "Telegram commands: %s",
             exc,
         )
 
@@ -355,14 +369,19 @@ def check_commands() -> None:
 # IQ OPTION
 # ============================================================
 
+
 def connect_iq() -> bool:
 
     global IQ
 
-    if not IQ_EMAIL or not IQ_PASSWORD:
-
+    if not IQ_EMAIL:
         raise ValueError(
-            "Faltan IQ_EMAIL/IQ_PASSWORD"
+            "Falta IQ_EMAIL"
+        )
+
+    if not IQ_PASSWORD:
+        raise ValueError(
+            "Falta IQ_PASSWORD"
         )
 
     logger.info(
@@ -390,7 +409,6 @@ def connect_iq() -> bool:
         "🟢 CONECTADO A IQ OPTION\n\n"
         "Confirmación: N cerrada\n"
         "Entrada: N+1, segundo 01–03\n"
-        "Microanálisis: 12 velas de 5S\n"
         "Expiración: 1 minuto"
     )
 
@@ -441,8 +459,9 @@ def ensure_connection() -> bool:
 
 
 # ============================================================
-# OBTENER VELAS DE 1 MINUTO
+# CANDLES 1M
 # ============================================================
+
 
 def get_candles(
     pair: str,
@@ -470,9 +489,6 @@ def get_candles(
         if df.empty:
             return None
 
-        # IQ Option normalmente devuelve:
-        # max = high
-        # min = low
         df.rename(
             columns={
                 "max": "high",
@@ -486,6 +502,7 @@ def get_candles(
             "close",
             "high",
             "low",
+            "from",
         ]
 
         for column in required:
@@ -493,7 +510,7 @@ def get_candles(
             if column not in df.columns:
 
                 logger.warning(
-                    "%s | Falta columna %s",
+                    "%s | falta columna %s",
                     pair,
                     column,
                 )
@@ -510,28 +527,10 @@ def get_candles(
             inplace=True,
         )
 
-        if "from" not in df.columns:
-
-            logger.warning(
-                "%s | IQ no devolvió 'from'",
-                pair,
-            )
-
-            return None
-
-        df["from"] = pd.to_numeric(
-            df["from"],
-            errors="coerce",
+        df["from"] = (
+            df["from"]
+            .astype("int64")
         )
-
-        df.dropna(
-            subset=["from"],
-            inplace=True,
-        )
-
-        df["from"] = df[
-            "from"
-        ].astype("int64")
 
         df.sort_values(
             "from",
@@ -549,10 +548,11 @@ def get_candles(
             inplace=True,
         )
 
-        return df.tail(
-            CANDLE_COUNT
-        ).reset_index(
-            drop=True
+        return (
+            df.tail(
+                CANDLE_COUNT
+            )
+            .reset_index(drop=True)
         )
 
     except Exception as exc:
@@ -567,70 +567,53 @@ def get_candles(
 
 
 # ============================================================
-# OBTENER MICROVELAS DE 5 SEGUNDOS
+# MICROVELAS 5S DE N
 # ============================================================
 
-def get_micro_candles(
+
+def get_micro_candles_for_minute(
     pair: str,
-    minute_timestamp: int,
-) -> Optional[pd.DataFrame]:
+    minute_ts: int,
+) -> pd.DataFrame:
 
     if IQ is None:
-        return None
+        return pd.DataFrame()
 
     try:
 
-        # N dura exactamente 60 segundos.
-        #
-        # Ejemplo:
-        #
-        # N empieza:
-        # 12:30:00
-        #
-        # N termina:
-        # 12:31:00
-        #
-        # Las 12 microvelas son:
-        #
-        # 12:30:00
-        # 12:30:05
-        # ...
-        # 12:30:55
-        #
-        # Por eso solicitamos las microvelas
-        # hasta el final de N.
-
-        end_timestamp = (
-            int(minute_timestamp)
+        # Pedimos algunas más para evitar que IQ
+        # entregue una vela adicional de borde.
+        end_time = (
+            minute_ts
             + TIMEFRAME
+            - 1
         )
 
-        micro = IQ.get_candles(
+        candles = IQ.get_candles(
             pair,
             MICRO_TIMEFRAME,
-            MICRO_CANDLE_COUNT,
-            end_timestamp,
+            MICRO_FETCH_COUNT,
+            end_time,
         )
 
-        if not micro:
+        if not candles:
 
             logger.info(
-                "%s | No se obtuvieron "
-                "microvelas 5S | N=%s",
+                "%s | N=%s | sin microvelas",
                 pair,
-                minute_timestamp,
+                minute_ts,
             )
 
-            return None
+            return pd.DataFrame()
 
-        micro_df = pd.DataFrame(
-            micro
+        micro = pd.DataFrame(
+            candles
         )
 
-        if micro_df.empty:
-            return None
+        if micro.empty:
+            return pd.DataFrame()
 
-        micro_df.rename(
+        micro.rename(
             columns={
                 "max": "high",
                 "min": "low",
@@ -641,97 +624,130 @@ def get_micro_candles(
         required = [
             "open",
             "close",
+            "high",
+            "low",
+            "from",
         ]
 
         for column in required:
 
-            if column not in micro_df.columns:
+            if column not in micro.columns:
 
                 logger.warning(
-                    "%s | microvelas sin %s",
+                    "%s | micro falta %s",
                     pair,
                     column,
                 )
 
-                return None
+                return pd.DataFrame()
 
-            micro_df[column] = pd.to_numeric(
-                micro_df[column],
+            micro[column] = pd.to_numeric(
+                micro[column],
                 errors="coerce",
             )
 
-        micro_df.dropna(
+        micro.dropna(
             subset=required,
             inplace=True,
         )
 
-        if "from" in micro_df.columns:
+        micro["from"] = (
+            micro["from"]
+            .astype("int64")
+        )
 
-            micro_df["from"] = pd.to_numeric(
-                micro_df["from"],
-                errors="coerce",
-            )
+        micro.sort_values(
+            "from",
+            inplace=True,
+        )
 
-            micro_df.dropna(
-                subset=["from"],
-                inplace=True,
-            )
+        micro.drop_duplicates(
+            subset=["from"],
+            keep="last",
+            inplace=True,
+        )
 
-            micro_df["from"] = (
-                micro_df["from"]
-                .astype("int64")
-            )
+        # ----------------------------------------------------
+        # EXACTAMENTE LAS MICROVELAS DE N
+        # ----------------------------------------------------
 
-            micro_df.sort_values(
-                "from",
-                inplace=True,
-            )
+        start = minute_ts
 
-            micro_df.drop_duplicates(
-                subset=["from"],
-                keep="last",
-                inplace=True,
-            )
+        end = (
+            minute_ts
+            + TIMEFRAME
+        )
 
-        micro_df.reset_index(
+        micro = micro[
+            (micro["from"] >= start)
+            &
+            (micro["from"] < end)
+        ].copy()
+
+        micro.sort_values(
+            "from",
+            inplace=True,
+        )
+
+        micro.reset_index(
             drop=True,
             inplace=True,
         )
 
-        micro_df = micro_df.tail(
-            MICRO_CANDLE_COUNT
-        ).reset_index(
-            drop=True
-        )
+        # ----------------------------------------------------
+        # Validar continuidad
+        # ----------------------------------------------------
 
-        if len(micro_df) != MICRO_CANDLE_COUNT:
+        if len(micro) != MICRO_CANDLE_COUNT:
 
             logger.info(
-                "%s | 5S incompletas | "
-                "esperadas=%s | recibidas=%s",
+                "%s | N=%s | 5S incompletas "
+                "| recibidas=%s esperadas=%s",
                 pair,
+                minute_ts,
+                len(micro),
                 MICRO_CANDLE_COUNT,
-                len(micro_df),
             )
 
-            return None
+            return pd.DataFrame()
 
-        return micro_df
+        expected = start
+
+        for ts in micro["from"]:
+
+            if int(ts) != expected:
+
+                logger.info(
+                    "%s | N=%s | hueco 5S "
+                    "| esperado=%s recibido=%s",
+                    pair,
+                    minute_ts,
+                    expected,
+                    int(ts),
+                )
+
+                return pd.DataFrame()
+
+            expected += MICRO_TIMEFRAME
+
+        return micro
 
     except Exception as exc:
 
         logger.error(
-            "%s | Error microvelas 5S: %s",
+            "%s | error microvelas N=%s: %s",
             pair,
+            minute_ts,
             exc,
         )
 
-        return None
+        return pd.DataFrame()
 
 
 # ============================================================
-# TIMESTAMP DE VELA
+# UTILIDADES DE VELA
 # ============================================================
+
 
 def candle_timestamp(
     df: pd.DataFrame,
@@ -759,10 +775,6 @@ def candle_timestamp(
         return None
 
 
-# ============================================================
-# VALORES DE VELA
-# ============================================================
-
 def candle_values(
     df: pd.DataFrame,
     index: int,
@@ -778,10 +790,6 @@ def candle_values(
     }
 
 
-# ============================================================
-# SECUENCIA DE VELAS
-# ============================================================
-
 def sequential(
     previous_ts: int,
     current_ts: int,
@@ -792,10 +800,6 @@ def sequential(
         == previous_ts + TIMEFRAME
     )
 
-
-# ============================================================
-# COOLDOWN
-# ============================================================
 
 def cooldown_active(
     pair: str,
@@ -812,16 +816,15 @@ def cooldown_active(
 
 
 # ============================================================
-# ANALIZAR N CERRADA
-# Y CREAR PENDIENTE PARA N+1
+# CREAR PENDIENTE N+1
 # ============================================================
+
 
 def save_pending_entry(
     pair: str,
     df: pd.DataFrame,
 ) -> bool:
 
-    # Ya existe una señal pendiente.
     if pair in PENDING_ENTRY:
         return False
 
@@ -843,7 +846,10 @@ def save_pending_entry(
         -1,
     )
 
-    if n_ts is None or n1_ts is None:
+    if (
+        n_ts is None
+        or n1_ts is None
+    ):
         return False
 
     if not sequential(
@@ -852,8 +858,8 @@ def save_pending_entry(
     ):
 
         logger.warning(
-            "%s | N/N+1 no consecutivas | "
-            "N=%s N+1=%s",
+            "%s | N/N+1 no consecutivas "
+            "| N=%s N+1=%s",
             pair,
             n_ts,
             n1_ts,
@@ -871,38 +877,21 @@ def save_pending_entry(
         -1,
     )
 
-    # ========================================================
-    # OJO:
-    #
-    # AQUÍ ESTÁ LA CORRECCIÓN PRINCIPAL.
-    #
-    # La estrategia NO recibe un DataFrame.
-    # Recibe:
-    #
-    #     candle
-    #     micro
-    #
-    # ========================================================
-
-    candle_n = df.iloc[
-        -2
-    ].copy()
-
     # --------------------------------------------------------
-    # Obtener las 12 microvelas de N.
+    # OBTENER MICROVELAS DE N
     # --------------------------------------------------------
 
-    micro = get_micro_candles(
+    micro = get_micro_candles_for_minute(
         pair,
         n_ts,
     )
 
-    if micro is None:
+    if micro.empty:
 
         logger.info(
             "%s | N cerrada=%s | "
-            "sin 12 microvelas 5S | "
-            "SIN ENTRADA",
+            "SIN ENTRADA | microvelas 5S "
+            "no disponibles",
             pair,
             n_ts,
         )
@@ -910,75 +899,22 @@ def save_pending_entry(
         return False
 
     logger.info(
-        "%s | 5S N completas | "
-        "N=%s | cantidad=%s | "
-        "última=%s",
+        "%s | N=%s | 5S completas=%s",
         pair,
         n_ts,
         len(micro),
-        (
-            int(micro.iloc[-1]["from"])
-            if "from" in micro.columns
-            and not micro.empty
-            else "N/A"
-        ),
     )
 
-    # ========================================================
-    # LLAMADA CORRECTA A STRATEGY.PY
-    #
-    # analyze_market(candle, micro)
-    #
-    # NO:
-    #
-    # analyze_market(df)
-    #
-    # NO:
-    #
-    # analyze_market(
-    #     df,
-    #     confirmation_index=-2
-    # )
-    # ========================================================
+    # --------------------------------------------------------
+    # ANALIZAR N + MICROVELAS
+    # --------------------------------------------------------
 
-    try:
+    n_series = df.iloc[-2].copy()
 
-        result = analyze_market(
-            candle_n,
-            micro,
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "%s | ERROR EN STRATEGY | "
-            "N=%s",
-            pair,
-            n_ts,
-        )
-
-        telegram_send(
-            "⚠️ ERROR EN STRATEGY\n\n"
-            f"Par: {pair}\n"
-            f"N: {n_ts}\n"
-            f"Error: {exc}"
-        )
-
-        return False
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-
-        logger.error(
-            "%s | strategy devolvió "
-            "tipo inválido: %r",
-            pair,
-            type(result),
-        )
-
-        return False
+    result = analyze_market(
+        n_series,
+        micro,
+    )
 
     signal = result.get(
         "signal"
@@ -998,8 +934,7 @@ def save_pending_entry(
 
     logger.info(
         "%s | N cerrada | ts=%s | "
-        "signal=%s | score=%s | "
-        "%s",
+        "signal=%s | score=%s | %s",
         pair,
         n_ts,
         signal,
@@ -1007,9 +942,9 @@ def save_pending_entry(
         reason,
     )
 
-    # ========================================================
-    # SIN SEÑAL
-    # ========================================================
+    # --------------------------------------------------------
+    # NO HAY SEÑAL
+    # --------------------------------------------------------
 
     if signal not in (
         "call",
@@ -1017,18 +952,19 @@ def save_pending_entry(
     ):
 
         logger.info(
-            "%s | SIN ENTRADA | "
-            "N=%s | razón=%s",
+            "%s | SIN ENTRADA | N=%s | "
+            "score=%s | motivo=%s",
             pair,
             n_ts,
+            score,
             reason,
         )
 
         return False
 
-    # ========================================================
+    # --------------------------------------------------------
     # CREAR PENDIENTE
-    # ========================================================
+    # --------------------------------------------------------
 
     PENDING_ENTRY[pair] = {
 
@@ -1037,15 +973,11 @@ def save_pending_entry(
         "n_ts": n_ts,
 
         "n_open": n["open"],
-
         "n_high": n["high"],
-
         "n_low": n["low"],
-
         "n_close": n["close"],
 
         "n1_ts": n1_ts,
-
         "n1_open": n1["open"],
 
         "score": int(
@@ -1053,30 +985,25 @@ def save_pending_entry(
         ),
 
         "reason": reason,
-
     }
 
     logger.info(
         "\n"
         "==================================================\n"
-        "%s | SEÑAL CONFIRMADA\n"
-        "N CERRADA:\n"
-        "  timestamp = %s\n"
-        "  open      = %.10f\n"
-        "  high      = %.10f\n"
-        "  low       = %.10f\n"
-        "  close     = %.10f\n"
+        "%s | SEÑAL PENDIENTE N+1\n"
+        "N CERRADA\n"
+        " timestamp = %s\n"
+        " open      = %.10f\n"
+        " high      = %.10f\n"
+        " low       = %.10f\n"
+        " close     = %.10f\n"
         "\n"
-        "N+1 ABIERTA:\n"
-        "  timestamp = %s\n"
-        "  open      = %.10f\n"
+        "N+1 ABIERTA\n"
+        " timestamp = %s\n"
+        " open      = %.10f\n"
         "\n"
         "SEÑAL = %s\n"
-        "SCORE = %s\n"
-        "RAZÓN = %s\n"
-        "\n"
-        "🚫 N NO SE OPERA\n"
-        "🎯 ENTRADA SOLO N+1 01–03\n"
+        "SCORE = %s/10\n"
         "==================================================",
         pair,
         n_ts,
@@ -1088,7 +1015,6 @@ def save_pending_entry(
         n1["open"],
         signal.upper(),
         score,
-        reason,
     )
 
     direction = (
@@ -1099,30 +1025,31 @@ def save_pending_entry(
     )
 
     telegram_send(
-        "📌 SEÑAL CONFIRMADA AL CIERRE\n\n"
+        "📌 SEÑAL CONFIRMADA\n\n"
         f"Par: {pair}\n"
         f"Dirección: {direction}\n\n"
-        "VELA N — CERRADA:\n"
+        "VELA N — CERRADA\n"
         f"Timestamp: {n_ts}\n"
         f"Apertura: {n['open']}\n"
         f"Máximo: {n['high']}\n"
         f"Mínimo: {n['low']}\n"
         f"Cierre: {n['close']}\n\n"
-        "VELA N+1 — ABIERTA:\n"
+        "VELA N+1 — ABIERTA\n"
         f"Timestamp: {n1_ts}\n"
         f"Apertura: {n1['open']}\n\n"
-        f"Score: {score}\n"
-        f"Razón: {reason}\n\n"
+        f"Score: {score}/10\n"
+        f"Motivo: {reason}\n\n"
         "🚫 N nunca se opera.\n"
-        "🎯 Entrada N+1, segundo 01–03."
+        "🎯 Entrada N+1 segundo 01–03."
     )
 
     return True
 
 
 # ============================================================
-# COMPRA DIGITAL
+# ORDEN DIGITAL
 # ============================================================
+
 
 def buy_digital(
     pair: str,
@@ -1134,11 +1061,26 @@ def buy_digital(
 
     try:
 
+        logger.info(
+            "%s | enviando DIGITAL | "
+            "signal=%s | amount=%s | exp=%s",
+            pair,
+            signal,
+            AMOUNT,
+            EXPIRATION,
+        )
+
         result = IQ.buy_digital_spot(
             pair,
             AMOUNT,
             signal,
             EXPIRATION,
+        )
+
+        logger.info(
+            "%s | respuesta IQ DIGITAL: %r",
+            pair,
+            result,
         )
 
         if isinstance(
@@ -1153,7 +1095,7 @@ def buy_digital(
                     result[1],
                 )
 
-            if result:
+            if len(result) == 1:
 
                 return (
                     bool(result[0]),
@@ -1184,10 +1126,9 @@ def buy_digital(
 
     except Exception as exc:
 
-        logger.error(
-            "buy_digital %s %s: %s",
+        logger.exception(
+            "%s | error buy_digital: %s",
             pair,
-            signal,
             exc,
         )
 
@@ -1201,8 +1142,10 @@ def buy_digital(
 # EJECUTAR N+1
 # ============================================================
 
+
 def try_execute_pending(
     pair: str,
+    df: pd.DataFrame,
 ) -> bool:
 
     pending = PENDING_ENTRY.get(
@@ -1215,16 +1158,12 @@ def try_execute_pending(
     if cooldown_active(pair):
 
         logger.info(
-            "%s | cooldown activo | "
-            "entrada no ejecutada",
+            "%s | entrada pendiente "
+            "pero cooldown activo",
             pair,
         )
 
         return False
-
-    df = get_candles(
-        pair
-    )
 
     if df is None or len(df) < 2:
         return False
@@ -1241,22 +1180,21 @@ def try_execute_pending(
         pending["n1_ts"]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # TODAVÍA NO LLEGÓ N+1
-    # ========================================================
+    # --------------------------------------------------------
 
     if current_ts < n1_ts:
         return False
 
-    # ========================================================
-    # N+1 YA TERMINÓ
-    # NO ENTRAR TARDE
-    # ========================================================
+    # --------------------------------------------------------
+    # YA PASÓ N+1
+    # --------------------------------------------------------
 
     if current_ts > n1_ts:
 
         logger.warning(
-            "%s | N+1 perdida | "
+            "%s | N+1 PERDIDA | "
             "esperada=%s | actual=%s",
             pair,
             n1_ts,
@@ -1267,7 +1205,7 @@ def try_execute_pending(
             "⏳ ENTRADA CANCELADA\n\n"
             f"Par: {pair}\n"
             f"N+1 esperada: {n1_ts}\n"
-            f"Vela actual: {current_ts}\n"
+            f"Vela actual: {current_ts}\n\n"
             "No se ejecuta tarde."
         )
 
@@ -1278,72 +1216,18 @@ def try_execute_pending(
 
         return False
 
-    # ========================================================
-    # VERIFICAR SECUENCIA
-    # ========================================================
+    # --------------------------------------------------------
+    # N+1 DEBE SER EXACTAMENTE LA SIGUIENTE
+    # --------------------------------------------------------
 
     if not sequential(
         int(pending["n_ts"]),
         current_ts,
     ):
 
-        return False
-
-    # ========================================================
-    # APERTURA REAL DE N+1
-    # ========================================================
-
-    try:
-
-        n1 = candle_values(
-            df,
-            -1,
-        )
-
-        live_open = n1[
-            "open"
-        ]
-
-    except Exception:
-
-        return False
-
-    # ========================================================
-    # TIEMPO REAL DESDE EL INICIO DE N+1
-    # ========================================================
-
-    elapsed = (
-        time.time()
-        - float(n1_ts)
-    )
-
-    # ========================================================
-    # ANTES DEL SEGUNDO 1
-    # ========================================================
-
-    if elapsed < ENTRY_MIN_SECOND:
-
-        return False
-
-    # ========================================================
-    # DESPUÉS DEL SEGUNDO 3
-    # ========================================================
-
-    if elapsed > ENTRY_MAX_SECOND:
-
         logger.warning(
-            "%s | fuera de ventana | "
-            "elapsed=%.3fs",
+            "%s | N+1 no es consecutiva",
             pair,
-            elapsed,
-        )
-
-        telegram_send(
-            "⏳ ENTRADA CANCELADA\n\n"
-            f"Par: {pair}\n"
-            f"N+1: {n1_ts}\n"
-            f"Tiempo: {elapsed:.3f}s\n"
-            "La ventana 01–03 ya terminó."
         )
 
         PENDING_ENTRY.pop(
@@ -1353,9 +1237,64 @@ def try_execute_pending(
 
         return False
 
-    # ========================================================
-    # EVITAR DOBLE OPERACIÓN
-    # ========================================================
+    # --------------------------------------------------------
+    # DATOS ACTUALES DE N+1
+    # --------------------------------------------------------
+
+    try:
+
+        n1 = candle_values(
+            df,
+            -1,
+        )
+
+        live_open = n1["open"]
+
+    except Exception:
+
+        return False
+
+    # --------------------------------------------------------
+    # SEGUNDO EXACTO
+    # --------------------------------------------------------
+
+    elapsed = (
+        time.time()
+        - float(n1_ts)
+    )
+
+    # Antes de segundo 1.
+    if elapsed < ENTRY_MIN_SECOND:
+        return False
+
+    # Después de segundo 3.
+    if elapsed > ENTRY_MAX_SECOND:
+
+        logger.warning(
+            "%s | FUERA DE VENTANA | "
+            "elapsed=%.3f",
+            pair,
+            elapsed,
+        )
+
+        telegram_send(
+            "⏳ ENTRADA CANCELADA\n\n"
+            f"Par: {pair}\n"
+            f"N+1: {n1_ts}\n"
+            f"Tiempo: {elapsed:.3f}s\n"
+            "Ventana 01–03 terminada."
+        )
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # NO REPETIR OPERACIÓN
+    # --------------------------------------------------------
 
     if (
         LAST_TRADE_CANDLE.get(
@@ -1381,11 +1320,10 @@ def try_execute_pending(
     )
 
     logger.info(
-        "%s | N+1 | timestamp=%s | "
+        "%s | N+1 | ts=%s | "
         "open_capturada=%.10f | "
         "open_actual=%.10f | "
-        "diff=%.12f | "
-        "segundo=%.3f",
+        "diff=%.12f | segundo=%.3f",
         pair,
         n1_ts,
         captured_open,
@@ -1405,37 +1343,34 @@ def try_execute_pending(
         "PUT 🔴"
     )
 
-    # ========================================================
-    # MENSAJE DE EJECUCIÓN
-    # ========================================================
-
     telegram_send(
         "⚡ EJECUTANDO N+1\n\n"
         f"Par: {pair}\n"
         f"Dirección: {direction}\n\n"
         "N CERRADA:\n"
-        f"Apertura: {pending['n_open']}\n"
-        f"Cierre: {pending['n_close']}\n\n"
+        f"Apertura: "
+        f"{pending['n_open']}\n"
+        f"Cierre: "
+        f"{pending['n_close']}\n\n"
         "N+1:\n"
-        f"Timestamp: {n1_ts}\n"
-        f"Apertura IQ: {live_open}\n"
+        f"Apertura: {live_open}\n"
         f"Segundo: {elapsed:.3f}\n\n"
         f"💵 ${AMOUNT}\n"
         f"⏱ {EXPIRATION} minuto"
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # EJECUTAR
-    # ========================================================
+    # --------------------------------------------------------
 
     ok, order_id = buy_digital(
         pair,
         signal,
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # RECHAZADA
-    # ========================================================
+    # --------------------------------------------------------
 
     if not ok:
 
@@ -1459,7 +1394,7 @@ def try_execute_pending(
             f"N+1: {n1_ts}\n"
             f"Apertura: {live_open}\n"
             f"Segundo: {elapsed:.3f}\n"
-            f"Respuesta: {order_id!r}"
+            f"Respuesta IQ: {order_id!r}"
         )
 
         PENDING_ENTRY.pop(
@@ -1469,9 +1404,9 @@ def try_execute_pending(
 
         return False
 
-    # ========================================================
-    # OPERACIÓN ABIERTA
-    # ========================================================
+    # --------------------------------------------------------
+    # ABIERTA
+    # --------------------------------------------------------
 
     LAST_TRADE_TIME[pair] = (
         time.time()
@@ -1489,8 +1424,8 @@ def try_execute_pending(
     logger.info(
         "%s | DIGITAL ABIERTA | "
         "%s | open=%.10f | "
-        "elapsed=%.3f | N+1=%s | "
-        "ID=%s",
+        "elapsed=%.3f | "
+        "N+1=%s | ID=%s",
         pair,
         signal.upper(),
         live_open,
@@ -1515,6 +1450,7 @@ def try_execute_pending(
 # PROCESAR PAR
 # ============================================================
 
+
 def process_pair(
     pair: str,
 ) -> None:
@@ -1526,10 +1462,10 @@ def process_pair(
     if df is None or len(df) < 2:
         return
 
-    # ========================================================
-    # -1 = vela viva
-    # -2 = última vela cerrada
-    # ========================================================
+    # --------------------------------------------------------
+    # -1 = VELA VIVA
+    # -2 = ÚLTIMA CERRADA
+    # --------------------------------------------------------
 
     live_ts = candle_timestamp(
         df,
@@ -1547,30 +1483,31 @@ def process_pair(
     ):
         return
 
-    # ========================================================
-    # PRIMERO:
-    # intentar ejecutar una señal pendiente.
-    # ========================================================
+    # --------------------------------------------------------
+    # PRIMERO: INTENTAR EJECUTAR
+    # UNA SEÑAL YA PENDIENTE
+    # --------------------------------------------------------
 
     if pair in PENDING_ENTRY:
 
         try_execute_pending(
-            pair
+            pair,
+            df,
         )
 
-    # ========================================================
-    # ÚLTIMA VELA CERRADA PROCESADA
-    # ========================================================
+    # --------------------------------------------------------
+    # ÚLTIMA N CERRADA PROCESADA
+    # --------------------------------------------------------
 
-    previous = LAST_CONFIRMED_CANDLE.get(
-        pair
+    previous = (
+        LAST_CONFIRMED_CANDLE.get(
+            pair
+        )
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # PRIMERA SINCRONIZACIÓN
-    #
-    # No entrar.
-    # ========================================================
+    # --------------------------------------------------------
 
     if previous is None:
 
@@ -1580,7 +1517,7 @@ def process_pair(
 
         logger.info(
             "%s | sincronización inicial | "
-            "cerrada=%s | viva=%s",
+            "N cerrada=%s | N+1=%s",
             pair,
             closed_ts,
             live_ts,
@@ -1588,18 +1525,16 @@ def process_pair(
 
         return
 
-    # ========================================================
-    # MISMA VELA
-    #
-    # No analizar otra vez.
-    # ========================================================
+    # --------------------------------------------------------
+    # MISMA N
+    # --------------------------------------------------------
 
     if closed_ts == previous:
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # TIMESTAMP RETROCEDIÓ
-    # ========================================================
+    # --------------------------------------------------------
 
     if closed_ts < previous:
 
@@ -1613,11 +1548,9 @@ def process_pair(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # SALTO DE MÁS DE UNA VELA
-    #
-    # No inventar señales.
-    # ========================================================
+    # --------------------------------------------------------
 
     if not sequential(
         previous,
@@ -1627,7 +1560,7 @@ def process_pair(
         logger.warning(
             "%s | salto de vela | "
             "anterior=%s actual=%s | "
-            "sincronizando",
+            "sin inventar señal",
             pair,
             previous,
             closed_ts,
@@ -1639,9 +1572,9 @@ def process_pair(
 
         return
 
-    # ========================================================
-    # DATOS DE N Y N+1
-    # ========================================================
+    # --------------------------------------------------------
+    # NUEVA N CONFIRMADA
+    # --------------------------------------------------------
 
     n = candle_values(
         df,
@@ -1659,15 +1592,15 @@ def process_pair(
         "%s | NUEVA VELA CONFIRMADA\n"
         "\n"
         "N CERRADA:\n"
-        "  ts    = %s\n"
-        "  open  = %.10f\n"
-        "  high  = %.10f\n"
-        "  low   = %.10f\n"
-        "  close = %.10f\n"
+        " ts=%s\n"
+        " open=%.10f\n"
+        " high=%.10f\n"
+        " low=%.10f\n"
+        " close=%.10f\n"
         "\n"
         "N+1 VIVA:\n"
-        "  ts    = %s\n"
-        "  open  = %.10f\n"
+        " ts=%s\n"
+        " open=%.10f\n"
         "--------------------------------------------------",
         pair,
         closed_ts,
@@ -1679,19 +1612,17 @@ def process_pair(
         n1["open"],
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # MARCAR N COMO PROCESADA
-    # ========================================================
+    # --------------------------------------------------------
 
     LAST_CONFIRMED_CANDLE[
         pair
     ] = closed_ts
 
-    # ========================================================
+    # --------------------------------------------------------
     # ANALIZAR N
-    #
-    # La función obtiene las microvelas 5S de N.
-    # ========================================================
+    # --------------------------------------------------------
 
     save_pending_entry(
         pair,
@@ -1702,6 +1633,7 @@ def process_pair(
 # ============================================================
 # TODOS LOS PARES
 # ============================================================
+
 
 def analyze_all_pairs() -> None:
 
@@ -1731,6 +1663,7 @@ def analyze_all_pairs() -> None:
 # MAIN
 # ============================================================
 
+
 def main() -> None:
 
     global BOT_RUNNING
@@ -1744,7 +1677,7 @@ def main() -> None:
     )
 
     logger.info(
-        "N CERRADA / N+1"
+        "N CERRADA -> N+1"
     )
 
     logger.info(
@@ -1757,12 +1690,7 @@ def main() -> None:
     )
 
     logger.info(
-        "MICROTIMEFRAME: 5S"
-    )
-
-    logger.info(
-        "MICRO CANDLES: %s",
-        MICRO_CANDLE_COUNT,
+        "MICRO: 5S"
     )
 
     logger.info(
@@ -1784,9 +1712,9 @@ def main() -> None:
         "===================================="
     )
 
-    # ========================================================
-    # VARIABLES OBLIGATORIAS
-    # ========================================================
+    # --------------------------------------------------------
+    # VARIABLES
+    # --------------------------------------------------------
 
     required = {
         "IQ_EMAIL": IQ_EMAIL,
@@ -1797,7 +1725,8 @@ def main() -> None:
 
     missing = [
         key
-        for key, value in required.items()
+        for key, value
+        in required.items()
         if not value
     ]
 
@@ -1810,9 +1739,9 @@ def main() -> None:
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # CONEXIÓN IQ
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
 
@@ -1831,41 +1760,41 @@ def main() -> None:
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # BOT LISTO
-    # ========================================================
+    # --------------------------------------------------------
 
     telegram_send(
         "🤖 BOT LISTO\n\n"
         "DIGITAL OTC\n"
-        "EURUSD-OTC | GBPUSD-OTC | EURJPY-OTC\n\n"
-        "🔒 N se analiza solo al cierre.\n"
+        "EURUSD-OTC | "
+        "GBPUSD-OTC | "
+        "EURJPY-OTC\n\n"
+        "🔒 N se analiza únicamente "
+        "al cierre.\n"
         "🚫 N nunca se opera.\n"
-        "➡️ Entrada exclusivamente en N+1.\n"
-        "📊 N se analiza con 12 microvelas de 5S.\n"
-        "🎯 Entrada segundo 01–03."
+        "➡️ Señal creada para N+1.\n"
+        "🎯 Entrada únicamente "
+        "segundo 01–03."
     )
 
-    # ========================================================
-    # LOOP PRINCIPAL
-    # ========================================================
+    # --------------------------------------------------------
+    # LOOP
+    # --------------------------------------------------------
 
     while True:
 
         try:
 
-            # Telegram no bloquea el loop constantemente.
+            # Telegram se revisa cada 2 segundos,
+            # no cada 0.08 segundos.
             check_commands()
 
             if not BOT_RUNNING:
 
-                time.sleep(1)
+                time.sleep(0.5)
 
                 continue
-
-            # =================================================
-            # IQ OPTION
-            # =================================================
 
             if not ensure_connection():
 
@@ -1873,15 +1802,7 @@ def main() -> None:
 
                 continue
 
-            # =================================================
-            # ANALIZAR
-            # =================================================
-
             analyze_all_pairs()
-
-            # =================================================
-            # POLLING
-            # =================================================
 
             time.sleep(
                 POLL_INTERVAL
@@ -1893,10 +1814,6 @@ def main() -> None:
 
             telegram_send(
                 "🔴 BOT DETENIDO MANUALMENTE"
-            )
-
-            logger.info(
-                "Bot detenido."
             )
 
             break
@@ -1919,6 +1836,6 @@ def main() -> None:
 # START
 # ============================================================
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     main()
