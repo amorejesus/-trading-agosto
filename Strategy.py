@@ -49,7 +49,7 @@ import pandas as pd
 # - Filtros adicionales
 # - Martingala
 #
-# SOLO se utiliza la lógica solicitada.
+# SOLO se utiliza la lÃ³gica solicitada.
 # ============================================================
 
 
@@ -68,14 +68,14 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 # ============================================================
-# NORMALIZACIÓN DE MICROVELAS 5S
+# NORMALIZACIÃ“N DE MICROVELAS 5S
 # ============================================================
 
 def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza el DataFrame de microvelas de 5 segundos.
 
-    Se esperan como mínimo:
+    Se esperan como mÃ­nimo:
         open
         close
 
@@ -120,7 +120,7 @@ def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
     if rename:
         out.rename(columns=rename, inplace=True)
 
-    # Las únicas columnas obligatorias para esta estrategia.
+    # Las Ãºnicas columnas obligatorias para esta estrategia.
     if "open" not in out.columns:
         return pd.DataFrame()
 
@@ -216,7 +216,7 @@ def analyze_minute(
     result: Dict[str, Any] = {
         "signal": None,
         "valid": False,
-        "reason": "sin señal",
+        "reason": "sin seÃ±al",
 
         "minute_timestamp": None,
 
@@ -249,13 +249,13 @@ def analyze_minute(
 
     if opening is None:
         result["reason"] = (
-            "apertura de vela 1M inválida"
+            "apertura de vela 1M invÃ¡lida"
         )
         return result
 
     if closing is None:
         result["reason"] = (
-            "cierre de vela 1M inválido"
+            "cierre de vela 1M invÃ¡lido"
         )
         return result
 
@@ -316,7 +316,7 @@ def analyze_minute(
             inplace=True,
         )
 
-    # Para esta lógica necesitamos al menos:
+    # Para esta lÃ³gica necesitamos al menos:
     #
     # primera 5s
     # otra 5s para comprobar retroceso
@@ -347,7 +347,7 @@ def analyze_minute(
     if first_5s_open is None:
 
         result["reason"] = (
-            "apertura de primera 5s inválida"
+            "apertura de primera 5s invÃ¡lida"
         )
 
         return result
@@ -355,7 +355,7 @@ def analyze_minute(
     if first_5s_close is None:
 
         result["reason"] = (
-            "cierre de primera 5s inválido"
+            "cierre de primera 5s invÃ¡lido"
         )
 
         return result
@@ -375,7 +375,7 @@ def analyze_minute(
     # Primera microvela verde respecto a la apertura 1M.
     if first_5s_close > opening:
 
-        # Las demás microvelas son el retroceso.
+        # Las demÃ¡s microvelas son el retroceso.
         rest = micro.iloc[1:]
 
         # Debe existir al menos una vela 5s que cierre
@@ -408,7 +408,7 @@ def analyze_minute(
                 "primera 5s por encima de apertura; "
                 "retroceso con cierre 5s por debajo "
                 "de apertura; "
-                "vela 1M cerró verde"
+                "vela 1M cerrÃ³ verde"
             )
 
             return result
@@ -416,7 +416,7 @@ def analyze_minute(
         if pullback_count == 0:
 
             result["reason"] = (
-                "CALL no válida: "
+                "CALL no vÃ¡lida: "
                 "no hubo retroceso con cierre 5s "
                 "por debajo de apertura 1M"
             )
@@ -424,8 +424,8 @@ def analyze_minute(
             return result
 
         result["reason"] = (
-            "CALL no válida: "
-            "vela 1M no cerró verde"
+            "CALL no vÃ¡lida: "
+            "vela 1M no cerrÃ³ verde"
         )
 
         return result
@@ -437,7 +437,7 @@ def analyze_minute(
     # Primera microvela roja respecto a la apertura 1M.
     if first_5s_close < opening:
 
-        # Las demás microvelas son el retroceso.
+        # Las demÃ¡s microvelas son el retroceso.
         rest = micro.iloc[1:]
 
         # Debe existir al menos una vela 5s que cierre
@@ -470,7 +470,7 @@ def analyze_minute(
                 "primera 5s por debajo de apertura; "
                 "retroceso con cierre 5s por encima "
                 "de apertura; "
-                "vela 1M cerró roja"
+                "vela 1M cerrÃ³ roja"
             )
 
             return result
@@ -478,7 +478,7 @@ def analyze_minute(
         if pullback_count == 0:
 
             result["reason"] = (
-                "PUT no válida: "
+                "PUT no vÃ¡lida: "
                 "no hubo retroceso con cierre 5s "
                 "por encima de apertura 1M"
             )
@@ -486,8 +486,8 @@ def analyze_minute(
             return result
 
         result["reason"] = (
-            "PUT no válida: "
-            "vela 1M no cerró roja"
+            "PUT no vÃ¡lida: "
+            "vela 1M no cerrÃ³ roja"
         )
 
         return result
@@ -497,7 +497,7 @@ def analyze_minute(
     # ========================================================
 
     result["reason"] = (
-        "primera vela 5s cerró exactamente "
+        "primera vela 5s cerrÃ³ exactamente "
         "en la apertura de la vela 1M"
     )
 
@@ -513,7 +513,7 @@ def analyze_market(
     candles_5s: pd.DataFrame,
 ) -> Dict[str, Any]:
     """
-    Función principal que debe utilizar bot.py.
+    FunciÃ³n principal que debe utilizar bot.py.
     """
 
     return analyze_minute(
@@ -531,7 +531,7 @@ def get_signal(
     candles_5s: pd.DataFrame,
 ) -> Optional[str]:
     """
-    Devuelve únicamente:
+    Devuelve Ãºnicamente:
 
         "call"
         "put"
@@ -585,5 +585,5 @@ if __name__ == "__main__":
     )
 
     print(
-        "CALL/PUT según la lógica solicitada."
-    )
+        "CALL/PUT segÃºn la lÃ³gica solicitada."
+                     )
