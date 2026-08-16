@@ -45,7 +45,7 @@ MICRO_CANDLE_COUNT = 12
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 70
+AMOUNT = 700
 EXPIRATION = 1
 
 
