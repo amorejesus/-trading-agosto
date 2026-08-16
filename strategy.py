@@ -1446,6 +1446,124 @@ def signal(
 
 
 # ============================================================
+# COMPATIBILIDAD CON bot.py
+# ============================================================
+#
+# Estas funciones NO cambian la estrategia matemática.
+# Adaptan la interfaz que usa bot.py a analyze_market().
+# ============================================================
+
+def _build_strategy_inputs(candles_5s: Any):
+    """Convierte las 12 velas 5S recibidas por bot.py en
+    candle_1m + DataFrame para analyze_market().
+    """
+
+    if candles_5s is None:
+        return None, None
+
+    if isinstance(candles_5s, pd.DataFrame):
+        df = candles_5s.copy()
+    else:
+        try:
+            df = pd.DataFrame(list(candles_5s))
+        except Exception:
+            return None, None
+
+    df = _normalize_5s(df)
+
+    if len(df) != MICRO_CANDLES_REQUIRED:
+        return None, None
+
+    if "from" not in df.columns:
+        return None, None
+
+    try:
+        first = df.iloc[0]
+        last = df.iloc[-1]
+
+        high = None
+        low = None
+
+        if "high" in df.columns and "low" in df.columns:
+            highs = pd.to_numeric(df["high"], errors="coerce")
+            lows = pd.to_numeric(df["low"], errors="coerce")
+            if highs.notna().all() and lows.notna().all():
+                high = float(highs.max())
+                low = float(lows.min())
+
+        if high is None or low is None:
+            opens = pd.to_numeric(df["open"], errors="coerce")
+            closes = pd.to_numeric(df["close"], errors="coerce")
+            if opens.isna().any() or closes.isna().any():
+                return None, None
+            high = max(float(opens.max()), float(closes.max()))
+            low = min(float(opens.min()), float(closes.min()))
+
+        candle_1m = pd.Series({
+            "from": int(float(first["from"])),
+            "open": float(first["open"]),
+            "close": float(last["close"]),
+            "high": high,
+            "low": low,
+        })
+
+        return candle_1m, df
+
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None, None
+
+
+def check_pattern(candles_5s: Any) -> Optional[str]:
+    """Interfaz requerida por bot.py.
+
+    Devuelve exactamente la señal calculada por analyze_market().
+    No modifica ni duplica la lógica de la estrategia.
+    """
+
+    candle_1m, micro = _build_strategy_inputs(candles_5s)
+
+    if candle_1m is None or micro is None:
+        return None
+
+    result = analyze_market(candle_1m, micro)
+    return result.get("signal")
+
+
+def get_m1_direction(candles_5s: Any) -> Optional[str]:
+    """Devuelve la dirección básica de la M1 formada por las 12 5S."""
+
+    candle_1m, micro = _build_strategy_inputs(candles_5s)
+
+    if candle_1m is None or micro is None:
+        return None
+
+    opening = _to_float(candle_1m.get("open"))
+    closing = _to_float(candle_1m.get("close"))
+
+    if opening is None or closing is None:
+        return None
+
+    if closing > opening:
+        return "call"
+
+    if closing < opening:
+        return "put"
+
+    return None
+
+
+def get_strategy_analysis(candles_5s: Any) -> Optional[Dict[str, Any]]:
+    """Interfaz de análisis completo requerida por bot.py."""
+
+    candle_1m, micro = _build_strategy_inputs(candles_5s)
+
+    if candle_1m is None or micro is None:
+        return None
+
+    return analyze_market(candle_1m, micro)
+
+
+# ============================================================
 # PRUEBA
 # ============================================================
 
