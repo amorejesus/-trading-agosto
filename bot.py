@@ -258,7 +258,21 @@ def save_pending_entry(pair: str, df: pd.DataFrame) -> bool:
     n1 = candle_values(df, -1)
 
     # CLAVE: se analiza exclusivamente N cerrada.
-    result = analyze_market(df, confirmation_index=-2)
+    # La estrategia recibe SOLO las velas hasta N.
+    # Así puede usar su última vela como confirmación sin
+    # necesitar el argumento confirmation_index.
+    # N+1 queda reservada exclusivamente para la ejecución.
+    analysis_df = df.iloc[:-1].copy()
+
+    if len(analysis_df) < 2:
+        logger.info(
+            "%s | historial insuficiente para analizar N=%s",
+            pair,
+            n_ts,
+        )
+        return False
+
+    result = analyze_market(analysis_df)
     signal = result.get("signal")
 
     logger.info(
