@@ -1,54 +1,47 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
-
 import pandas as pd
 
 
 # ============================================================
-# ESTRATEGIA 1M + MICROVELAS 5S
+# ESTRATEGIA 1M + MICROVELAS DE 5 SEGUNDOS
 # ============================================================
 #
-# LÓGICA ORIGINAL:
+# LOGICA ORIGINAL — NO SE CAMBIA
 #
 # CALL:
-# 1. Primera 5S cierra por encima de apertura 1M.
-# 2. Alguna 5S posterior cierra por debajo de apertura 1M.
-# 3. 1M termina verde.
+#
+# 1. Primera 5s cierra POR ENCIMA de apertura 1M.
+# 2. Después existe al menos una 5s que cierra
+#    POR DEBAJO de apertura 1M.
+# 3. La vela 1M termina VERDE.
+# 4. Se prepara CALL para N+1.
+#
 #
 # PUT:
-# 1. Primera 5S cierra por debajo de apertura 1M.
-# 2. Alguna 5S posterior cierra por encima de apertura 1M.
-# 3. 1M termina roja.
 #
-# NUEVO ÚNICO FILTRO:
+# 1. Primera 5s cierra POR DEBAJO de apertura 1M.
+# 2. Después existe al menos una 5s que cierra
+#    POR ENCIMA de apertura 1M.
+# 3. La vela 1M termina ROJA.
+# 4. Se prepara PUT para N+1.
+#
+#
+# FILTRO AÑADIDO:
 #
 # Después de cumplirse la lógica original:
 #
 # CALL:
-#     Los compradores deben confirmar continuidad.
+#     El dominio comprador debe confirmar continuidad.
 #
 # PUT:
-#     Los vendedores deben confirmar continuidad.
+#     El dominio vendedor debe confirmar continuidad.
 #
-# Si la dominancia NO confirma:
+# Este filtro NO sustituye la estrategia.
+# Solamente permite la señal si existe continuidad
+# posterior al último retroceso.
 #
-#     signal = None
-#
-# IMPORTANTE:
-#
-# NO se utilizan:
-# - EMA
-# - RSI
-# - ATR
-# - Volumen
-# - Score
-# - Martingala
-# - Soporte/resistencia
-# - Indicadores externos
-#
-# Tampoco se cambia la dirección determinada por la
-# estrategia original.
 # ============================================================
 
 
@@ -58,7 +51,7 @@ import pandas as pd
 
 def _to_float(value: Any) -> Optional[float]:
     """
-    Convierte un valor a float de forma segura.
+    Conversión segura a float.
     """
 
     try:
@@ -69,7 +62,7 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 # ============================================================
-# NORMALIZACIÓN DE MICROVELAS 5S
+# NORMALIZAR MICROVELAS 5S
 # ============================================================
 
 def _normalize_5s(
@@ -78,7 +71,7 @@ def _normalize_5s(
     """
     Normaliza las microvelas de 5 segundos.
 
-    Obligatorio:
+    Columnas obligatorias:
         open
         close
 
@@ -91,10 +84,7 @@ def _normalize_5s(
     if df is None:
         return pd.DataFrame()
 
-    if not isinstance(
-        df,
-        pd.DataFrame,
-    ):
+    if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
 
     if df.empty:
@@ -108,40 +98,22 @@ def _normalize_5s(
     # Compatibilidad IQ Option
     # --------------------------------------------------------
 
-    if (
-        "max" in out.columns
-        and "high" not in out.columns
-    ):
+    if "max" in out.columns and "high" not in out.columns:
         rename["max"] = "high"
 
-    if (
-        "min" in out.columns
-        and "low" not in out.columns
-    ):
+    if "min" in out.columns and "low" not in out.columns:
         rename["min"] = "low"
 
-    if (
-        "Open" in out.columns
-        and "open" not in out.columns
-    ):
+    if "Open" in out.columns and "open" not in out.columns:
         rename["Open"] = "open"
 
-    if (
-        "High" in out.columns
-        and "high" not in out.columns
-    ):
+    if "High" in out.columns and "high" not in out.columns:
         rename["High"] = "high"
 
-    if (
-        "Low" in out.columns
-        and "low" not in out.columns
-    ):
+    if "Low" in out.columns and "low" not in out.columns:
         rename["Low"] = "low"
 
-    if (
-        "Close" in out.columns
-        and "close" not in out.columns
-    ):
+    if "Close" in out.columns and "close" not in out.columns:
         rename["Close"] = "close"
 
     if rename:
@@ -151,7 +123,7 @@ def _normalize_5s(
         )
 
     # --------------------------------------------------------
-    # Columnas obligatorias
+    # Validación
     # --------------------------------------------------------
 
     if "open" not in out.columns:
@@ -200,10 +172,7 @@ def _normalize_5s(
     # --------------------------------------------------------
 
     out.dropna(
-        subset=[
-            "open",
-            "close",
-        ],
+        subset=["open", "close"],
         inplace=True,
     )
 
@@ -216,273 +185,389 @@ def _normalize_5s(
 
 
 # ============================================================
-# FILTRO DE DOMINANCIA
+# VALIDAR SECUENCIA DE MICROVELAS
 # ============================================================
 
-def _confirm_buyer_continuity(
+def _validate_5s_sequence(
     micro: pd.DataFrame,
-    opening: float,
-    pullback_indexes: list[int],
 ) -> bool:
     """
-    Confirma continuidad compradora después del retroceso.
+    Comprueba que las microvelas sean consecutivas
+    cada 5 segundos.
 
-    NO utiliza mayoría de velas.
+    Esto NO cambia la estrategia.
 
-    Busca la estructura:
-
-        retroceso
-             ↓
-        recuperación
-             ↓
-        continuación
-             ↓
-        cierre manteniendo dominio comprador
-
-    Condiciones:
-
-    1. Debe existir una vela posterior al retroceso.
-
-    2. El precio debe recuperar la apertura 1M o mantenerse
-       por encima de ella al final.
-
-    3. Debe existir una continuación alcista real:
-       un cierre posterior superior al cierre anterior.
-
-    4. Las últimas velas no pueden terminar mostrando una
-       pérdida clara del dominio comprador.
-
-    Esta función solamente confirma continuidad.
-    No genera la señal.
+    Solo evita analizar:
+        - duplicados
+        - huecos
+        - timestamps incorrectos
+        - datos desordenados
     """
 
     if micro.empty:
         return False
 
-    if not pullback_indexes:
+    if "from" not in micro.columns:
+        # Si IQ Option no entrega timestamp,
+        # no podemos comprobar la secuencia.
+        return True
+
+    if len(micro) < 2:
         return False
 
-    # --------------------------------------------------------
-    # Último retroceso comprador
-    # --------------------------------------------------------
-
-    last_pullback = max(
-        pullback_indexes
+    timestamps = (
+        micro["from"]
+        .astype(float)
+        .tolist()
     )
 
-    recovery = micro.iloc[
-        last_pullback + 1:
-    ].copy()
+    for i in range(1, len(timestamps)):
 
-    if recovery.empty:
-        return False
+        difference = (
+            timestamps[i]
+            - timestamps[i - 1]
+        )
 
-    # --------------------------------------------------------
-    # Debe existir recuperación posterior
-    # --------------------------------------------------------
-
-    if len(recovery) < 2:
-        return False
-
-    closes = [
-        _to_float(value)
-        for value in recovery["close"]
-    ]
-
-    closes = [
-        value
-        for value in closes
-        if value is not None
-    ]
-
-    if len(closes) < 2:
-        return False
-
-    # --------------------------------------------------------
-    # El cierre final debe estar por encima de la apertura
-    # 1M.
-    #
-    # Esto evita aceptar una simple reacción que no consiguió
-    # recuperar el nivel.
-    # --------------------------------------------------------
-
-    final_close = closes[-1]
-
-    if final_close <= opening:
-        return False
-
-    # --------------------------------------------------------
-    # CONTINUIDAD COMPRADORA
-    #
-    # No contamos mayoría.
-    #
-    # Buscamos una secuencia donde después del retroceso
-    # exista por lo menos una continuación de precio:
-    #
-    # cierre actual > cierre anterior
-    # --------------------------------------------------------
-
-    continuation = False
-
-    for index in range(
-        1,
-        len(closes),
-    ):
-
-        previous_close = closes[
-            index - 1
-        ]
-
-        current_close = closes[
-            index
-        ]
-
-        if current_close > previous_close:
-
-            continuation = True
-
-            break
-
-    if not continuation:
-        return False
-
-    # --------------------------------------------------------
-    # Las dos últimas velas no pueden estar ambas perdiendo
-    # el nivel de apertura.
-    # --------------------------------------------------------
-
-    last_closes = closes[-2:]
-
-    if all(
-        close < opening
-        for close in last_closes
-    ):
-        return False
+        # 5 segundos exactos.
+        if difference != 5:
+            return False
 
     return True
 
 
-def _confirm_seller_continuity(
+# ============================================================
+# FILTRAR MICROVELAS DEL MINUTO
+# ============================================================
+
+def _get_minute_micro_candles(
+    candle_1m: pd.Series,
+    candles_5s: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Obtiene únicamente las microvelas pertenecientes
+    al mismo minuto de la vela 1M.
+    """
+
+    micro = _normalize_5s(
+        candles_5s
+    )
+
+    if micro.empty:
+        return pd.DataFrame()
+
+    minute_timestamp = None
+
+    if candle_1m is not None:
+
+        try:
+
+            if "from" in candle_1m.index:
+
+                minute_timestamp = int(
+                    float(
+                        candle_1m["from"]
+                    )
+                )
+
+        except (TypeError, ValueError):
+            minute_timestamp = None
+
+    # --------------------------------------------------------
+    # Si tenemos timestamp, filtrar exactamente el minuto
+    # --------------------------------------------------------
+
+    if (
+        minute_timestamp is not None
+        and "from" in micro.columns
+    ):
+
+        start_time = minute_timestamp
+        end_time = (
+            minute_timestamp + 60
+        )
+
+        micro = micro[
+            (micro["from"] >= start_time)
+            &
+            (micro["from"] < end_time)
+        ].copy()
+
+        micro.sort_values(
+            "from",
+            inplace=True,
+        )
+
+        micro.drop_duplicates(
+            subset=["from"],
+            keep="last",
+            inplace=True,
+        )
+
+        micro.reset_index(
+            drop=True,
+            inplace=True,
+        )
+
+    return micro
+
+
+# ============================================================
+# FILTRO DE CONTINUIDAD COMPRADORA
+# ============================================================
+
+def _buyer_continuity_confirmed(
     micro: pd.DataFrame,
     opening: float,
-    pullback_indexes: list[int],
 ) -> bool:
     """
-    Confirma continuidad vendedora después del retroceso.
+    Confirma continuidad compradora.
 
-    Es la versión simétrica del filtro comprador.
+    Se ejecuta DESPUÉS de encontrar el último
+    retroceso comprador.
 
-    NO utiliza mayoría de velas.
+    Condiciones:
 
-    Busca:
+    1. Debe existir retroceso.
+    2. Se toma el último cierre por debajo
+       de la apertura 1M.
+    3. Después de ese retroceso debe existir
+       recuperación compradora.
+    4. El último cierre debe estar por encima
+       de la apertura 1M.
+    5. Debe existir avance posterior:
+       un cierre posterior superior al cierre
+       inmediatamente anterior.
 
-        retroceso
-             ↓
-        recuperación bajista
-             ↓
-        continuación
-             ↓
-        cierre manteniendo dominio vendedor
+    No utiliza mayoría.
+    No utiliza indicadores.
     """
 
     if micro.empty:
         return False
 
+    # --------------------------------------------------------
+    # Encontrar todos los retrocesos vendedores
+    # --------------------------------------------------------
+
+    pullback_indexes = []
+
+    for i in range(1, len(micro)):
+
+        close_value = _to_float(
+            micro.iloc[i]["close"]
+        )
+
+        if close_value is None:
+            continue
+
+        if close_value < opening:
+            pullback_indexes.append(i)
+
     if not pullback_indexes:
         return False
 
-    # --------------------------------------------------------
-    # Último retroceso vendedor
-    # --------------------------------------------------------
-
-    last_pullback = max(
-        pullback_indexes
+    # Último retroceso.
+    last_pullback = (
+        pullback_indexes[-1]
     )
 
-    recovery = micro.iloc[
+    # No puede ser la última vela.
+    if last_pullback >= len(micro) - 1:
+        return False
+
+    continuation = micro.iloc[
         last_pullback + 1:
     ].copy()
 
-    if recovery.empty:
+    if continuation.empty:
         return False
 
     # --------------------------------------------------------
-    # Debe existir recuperación posterior
+    # Recuperación compradora
     # --------------------------------------------------------
 
-    if len(recovery) < 2:
-        return False
+    recovered = False
 
-    closes = [
-        _to_float(value)
-        for value in recovery["close"]
-    ]
+    for _, candle in continuation.iterrows():
 
-    closes = [
-        value
-        for value in closes
-        if value is not None
-    ]
+        close_value = _to_float(
+            candle["close"]
+        )
 
-    if len(closes) < 2:
-        return False
+        if close_value is None:
+            continue
 
-    # --------------------------------------------------------
-    # El cierre final debe estar por debajo de la apertura
-    # 1M.
-    # --------------------------------------------------------
-
-    final_close = closes[-1]
-
-    if final_close >= opening:
-        return False
-
-    # --------------------------------------------------------
-    # CONTINUIDAD VENDEDORA
-    #
-    # No contamos mayoría.
-    #
-    # Buscamos al menos una continuación:
-    #
-    # cierre actual < cierre anterior
-    # --------------------------------------------------------
-
-    continuation = False
-
-    for index in range(
-        1,
-        len(closes),
-    ):
-
-        previous_close = closes[
-            index - 1
-        ]
-
-        current_close = closes[
-            index
-        ]
-
-        if current_close < previous_close:
-
-            continuation = True
-
+        if close_value > opening:
+            recovered = True
             break
 
-    if not continuation:
+    if not recovered:
         return False
 
     # --------------------------------------------------------
-    # Las dos últimas velas no pueden estar ambas por encima
-    # de la apertura.
+    # Último cierre debe mantenerse encima
     # --------------------------------------------------------
 
-    last_closes = closes[-2:]
+    last_close = _to_float(
+        continuation.iloc[-1]["close"]
+    )
 
-    if all(
-        close > opening
-        for close in last_closes
-    ):
+    if last_close is None:
         return False
+
+    if last_close <= opening:
+        return False
+
+    # --------------------------------------------------------
+    # Confirmación de avance
+    # --------------------------------------------------------
+
+    if len(continuation) >= 2:
+
+        previous_close = _to_float(
+            continuation.iloc[-2]["close"]
+        )
+
+        current_close = _to_float(
+            continuation.iloc[-1]["close"]
+        )
+
+        if (
+            previous_close is None
+            or current_close is None
+        ):
+            return False
+
+        if current_close <= previous_close:
+            return False
+
+    return True
+
+
+# ============================================================
+# FILTRO DE CONTINUIDAD VENDEDORA
+# ============================================================
+
+def _seller_continuity_confirmed(
+    micro: pd.DataFrame,
+    opening: float,
+) -> bool:
+    """
+    Confirma continuidad vendedora.
+
+    Es el espejo exacto del filtro comprador.
+
+    Condiciones:
+
+    1. Debe existir retroceso.
+    2. Se toma el último cierre por encima
+       de la apertura 1M.
+    3. Después debe existir recuperación vendedora.
+    4. El último cierre debe estar por debajo
+       de la apertura 1M.
+    5. Debe existir avance posterior:
+       un cierre posterior inferior al cierre
+       inmediatamente anterior.
+    """
+
+    if micro.empty:
+        return False
+
+    # --------------------------------------------------------
+    # Encontrar todos los retrocesos compradores
+    # --------------------------------------------------------
+
+    pullback_indexes = []
+
+    for i in range(1, len(micro)):
+
+        close_value = _to_float(
+            micro.iloc[i]["close"]
+        )
+
+        if close_value is None:
+            continue
+
+        if close_value > opening:
+            pullback_indexes.append(i)
+
+    if not pullback_indexes:
+        return False
+
+    # Último retroceso.
+    last_pullback = (
+        pullback_indexes[-1]
+    )
+
+    # No puede ser la última vela.
+    if last_pullback >= len(micro) - 1:
+        return False
+
+    continuation = micro.iloc[
+        last_pullback + 1:
+    ].copy()
+
+    if continuation.empty:
+        return False
+
+    # --------------------------------------------------------
+    # Recuperación vendedora
+    # --------------------------------------------------------
+
+    recovered = False
+
+    for _, candle in continuation.iterrows():
+
+        close_value = _to_float(
+            candle["close"]
+        )
+
+        if close_value is None:
+            continue
+
+        if close_value < opening:
+            recovered = True
+            break
+
+    if not recovered:
+        return False
+
+    # --------------------------------------------------------
+    # Último cierre debe mantenerse debajo
+    # --------------------------------------------------------
+
+    last_close = _to_float(
+        continuation.iloc[-1]["close"]
+    )
+
+    if last_close is None:
+        return False
+
+    if last_close >= opening:
+        return False
+
+    # --------------------------------------------------------
+    # Confirmación de avance
+    # --------------------------------------------------------
+
+    if len(continuation) >= 2:
+
+        previous_close = _to_float(
+            continuation.iloc[-2]["close"]
+        )
+
+        current_close = _to_float(
+            continuation.iloc[-1]["close"]
+        )
+
+        if (
+            previous_close is None
+            or current_close is None
+        ):
+            return False
+
+        if current_close >= previous_close:
+            return False
 
     return True
 
@@ -495,13 +580,6 @@ def analyze_minute(
     candle_1m: pd.Series,
     candles_5s: pd.DataFrame,
 ) -> Dict[str, Any]:
-    """
-    Analiza una vela 1M cerrada utilizando sus microvelas 5S.
-
-    La lógica original se mantiene.
-
-    Se añade únicamente la confirmación final de dominancia.
-    """
 
     result: Dict[str, Any] = {
 
@@ -523,14 +601,7 @@ def analyze_minute(
 
         "pullback_count": 0,
 
-        # ----------------------------------------------------
-        # Información adicional del filtro
-        # ----------------------------------------------------
-
-        "dominance_confirmed": False,
-
-        "dominance": None,
-
+        "continuity_confirmed": False,
     }
 
     # ========================================================
@@ -556,7 +627,7 @@ def analyze_minute(
     if opening is None:
 
         result["reason"] = (
-            "apertura de vela 1M inválida"
+            "apertura 1M inválida"
         )
 
         return result
@@ -564,96 +635,72 @@ def analyze_minute(
     if closing is None:
 
         result["reason"] = (
-            "cierre de vela 1M inválido"
+            "cierre 1M inválido"
         )
 
         return result
 
     result["minute_open"] = opening
-
     result["minute_close"] = closing
 
     # ========================================================
-    # TIMESTAMP
+    # TIMESTAMP 1M
     # ========================================================
 
     if "from" in candle_1m.index:
 
         try:
 
-            result[
-                "minute_timestamp"
-            ] = int(
+            result["minute_timestamp"] = int(
                 float(
                     candle_1m["from"]
                 )
             )
 
-        except (
-            TypeError,
-            ValueError,
-        ):
+        except (TypeError, ValueError):
 
             result[
                 "minute_timestamp"
             ] = None
 
     # ========================================================
-    # NORMALIZAR 5S
+    # OBTENER MICROVELAS
     # ========================================================
 
-    micro = _normalize_5s(
-        candles_5s
+    micro = _get_minute_micro_candles(
+        candle_1m,
+        candles_5s,
     )
 
     if micro.empty:
 
         result["reason"] = (
-            "no hay microvelas de 5 segundos"
+            "no hay microvelas 5s"
         )
 
         return result
 
     # ========================================================
-    # FILTRAR MICROVELAS DEL MISMO MINUTO
+    # VALIDACIÓN DE SECUENCIA
     # ========================================================
 
-    minute_timestamp = result[
-        "minute_timestamp"
-    ]
+    if not _validate_5s_sequence(micro):
 
-    if (
-        minute_timestamp is not None
-        and "from" in micro.columns
-    ):
-
-        start_time = (
-            minute_timestamp
+        result["reason"] = (
+            "secuencia 5s inválida: "
+            "hay huecos o timestamps incorrectos"
         )
 
-        end_time = (
-            minute_timestamp + 60
-        )
-
-        micro = micro[
-            (micro["from"] >= start_time)
-            &
-            (micro["from"] < end_time)
-        ].copy()
-
-        micro.reset_index(
-            drop=True,
-            inplace=True,
-        )
+        return result
 
     # ========================================================
-    # MÍNIMO DE MICROVELAS
+    # NECESITAMOS AL MENOS 2 MICROVELAS
     # ========================================================
 
     if len(micro) < 2:
 
         result["reason"] = (
-            "faltan microvelas 5S del minuto"
+            "faltan microvelas 5s"
         )
 
         return result
@@ -664,49 +711,40 @@ def analyze_minute(
 
     first_5s = micro.iloc[0]
 
-    first_5s_open = _to_float(
+    first_open = _to_float(
         first_5s["open"]
     )
 
-    first_5s_close = _to_float(
+    first_close = _to_float(
         first_5s["close"]
     )
 
-    if first_5s_open is None:
+    if first_open is None:
 
         result["reason"] = (
-            "apertura de primera 5S inválida"
+            "apertura primera 5s inválida"
         )
 
         return result
 
-    if first_5s_close is None:
+    if first_close is None:
 
         result["reason"] = (
-            "cierre de primera 5S inválido"
+            "cierre primera 5s inválido"
         )
 
         return result
 
-    result[
-        "first_5s_open"
-    ] = first_5s_open
-
-    result[
-        "first_5s_close"
-    ] = first_5s_close
+    result["first_5s_open"] = first_open
+    result["first_5s_close"] = first_close
 
     # ========================================================
     # CALL
     # ========================================================
 
-    if first_5s_close > opening:
+    if first_close > opening:
 
         rest = micro.iloc[1:]
-
-        # ----------------------------------------------------
-        # RETROCESOS
-        # ----------------------------------------------------
 
         pullback_mask = (
             rest["close"] < opening
@@ -716,120 +754,68 @@ def analyze_minute(
             pullback_mask.sum()
         )
 
-        result[
-            "pullback_count"
-        ] = pullback_count
-
-        # Guardamos las posiciones absolutas dentro de
-        # micro para el filtro de dominancia.
-        pullback_indexes = [
-            int(index)
-            for index in rest.index[
-                pullback_mask
-            ].tolist()
-        ]
-
-        # ----------------------------------------------------
-        # CIERRE 1M VERDE
-        # ----------------------------------------------------
-
-        minute_is_green = (
-            closing > opening
+        result["pullback_count"] = (
+            pullback_count
         )
 
-        if (
-            pullback_count > 0
-            and minute_is_green
-        ):
-
-            # =================================================
-            # NUEVO FILTRO
-            # =================================================
-
-            dominance_ok = (
-                _confirm_buyer_continuity(
-                    micro,
-                    opening,
-                    pullback_indexes,
-                )
-            )
-
-            if not dominance_ok:
-
-                result[
-                    "reason"
-                ] = (
-                    "CALL original confirmada, "
-                    "pero sin continuidad compradora"
-                )
-
-                result[
-                    "dominance"
-                ] = "buyers"
-
-                result[
-                    "dominance_confirmed"
-                ] = False
-
-                return result
-
-            # ------------------------------------------------
-            # CALL FINAL
-            # ------------------------------------------------
-
-            result[
-                "signal"
-            ] = "call"
-
-            result[
-                "valid"
-            ] = True
-
-            result[
-                "dominance"
-            ] = "buyers"
-
-            result[
-                "dominance_confirmed"
-            ] = True
-
-            result[
-                "reason"
-            ] = (
-                "CALL confirmada: "
-                "primera 5S por encima de apertura; "
-                "retroceso por debajo de apertura; "
-                "vela 1M verde; "
-                "continuidad compradora confirmada"
-            )
-
-            return result
-
         # ----------------------------------------------------
-        # SIN RETROCESO
+        # LOGICA ORIGINAL
         # ----------------------------------------------------
 
-        if pullback_count == 0:
+        if pullback_count <= 0:
 
-            result[
-                "reason"
-            ] = (
+            result["reason"] = (
                 "CALL no válida: "
-                "no hubo retroceso con cierre 5S "
-                "por debajo de apertura 1M"
+                "no hubo retroceso"
+            )
+
+            return result
+
+        if closing <= opening:
+
+            result["reason"] = (
+                "CALL no válida: "
+                "vela 1M no cerró verde"
             )
 
             return result
 
         # ----------------------------------------------------
-        # 1M NO VERDE
+        # FILTRO DOMINANTE COMPRADOR
         # ----------------------------------------------------
+
+        continuity = (
+            _buyer_continuity_confirmed(
+                micro,
+                opening,
+            )
+        )
+
+        if not continuity:
+
+            result["reason"] = (
+                "CALL bloqueada: "
+                "no hubo continuidad compradora"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # CALL CONFIRMADA
+        # ----------------------------------------------------
+
+        result["signal"] = "call"
+
+        result["valid"] = True
 
         result[
-            "reason"
-        ] = (
-            "CALL no válida: "
-            "vela 1M no cerró verde"
+            "continuity_confirmed"
+        ] = True
+
+        result["reason"] = (
+            "CALL confirmada: "
+            "patrón original completo + "
+            "continuidad compradora"
         )
 
         return result
@@ -838,13 +824,9 @@ def analyze_minute(
     # PUT
     # ========================================================
 
-    if first_5s_close < opening:
+    if first_close < opening:
 
         rest = micro.iloc[1:]
-
-        # ----------------------------------------------------
-        # RETROCESOS
-        # ----------------------------------------------------
 
         pullback_mask = (
             rest["close"] > opening
@@ -854,122 +836,68 @@ def analyze_minute(
             pullback_mask.sum()
         )
 
-        result[
-            "pullback_count"
-        ] = pullback_count
-
-        # ----------------------------------------------------
-        # Índices de retroceso
-        # ----------------------------------------------------
-
-        pullback_indexes = [
-            int(index)
-            for index in rest.index[
-                pullback_mask
-            ].tolist()
-        ]
-
-        # ----------------------------------------------------
-        # CIERRE 1M ROJO
-        # ----------------------------------------------------
-
-        minute_is_red = (
-            closing < opening
+        result["pullback_count"] = (
+            pullback_count
         )
 
-        if (
-            pullback_count > 0
-            and minute_is_red
-        ):
-
-            # =================================================
-            # NUEVO FILTRO
-            # =================================================
-
-            dominance_ok = (
-                _confirm_seller_continuity(
-                    micro,
-                    opening,
-                    pullback_indexes,
-                )
-            )
-
-            if not dominance_ok:
-
-                result[
-                    "reason"
-                ] = (
-                    "PUT original confirmada, "
-                    "pero sin continuidad vendedora"
-                )
-
-                result[
-                    "dominance"
-                ] = "sellers"
-
-                result[
-                    "dominance_confirmed"
-                ] = False
-
-                return result
-
-            # ------------------------------------------------
-            # PUT FINAL
-            # ------------------------------------------------
-
-            result[
-                "signal"
-            ] = "put"
-
-            result[
-                "valid"
-            ] = True
-
-            result[
-                "dominance"
-            ] = "sellers"
-
-            result[
-                "dominance_confirmed"
-            ] = True
-
-            result[
-                "reason"
-            ] = (
-                "PUT confirmada: "
-                "primera 5S por debajo de apertura; "
-                "retroceso por encima de apertura; "
-                "vela 1M roja; "
-                "continuidad vendedora confirmada"
-            )
-
-            return result
-
         # ----------------------------------------------------
-        # SIN RETROCESO
+        # LOGICA ORIGINAL
         # ----------------------------------------------------
 
-        if pullback_count == 0:
+        if pullback_count <= 0:
 
-            result[
-                "reason"
-            ] = (
+            result["reason"] = (
                 "PUT no válida: "
-                "no hubo retroceso con cierre 5S "
-                "por encima de apertura 1M"
+                "no hubo retroceso"
+            )
+
+            return result
+
+        if closing >= opening:
+
+            result["reason"] = (
+                "PUT no válida: "
+                "vela 1M no cerró roja"
             )
 
             return result
 
         # ----------------------------------------------------
-        # 1M NO ROJA
+        # FILTRO DOMINANTE VENDEDOR
         # ----------------------------------------------------
+
+        continuity = (
+            _seller_continuity_confirmed(
+                micro,
+                opening,
+            )
+        )
+
+        if not continuity:
+
+            result["reason"] = (
+                "PUT bloqueada: "
+                "no hubo continuidad vendedora"
+            )
+
+            return result
+
+        # ----------------------------------------------------
+        # PUT CONFIRMADA
+        # ----------------------------------------------------
+
+        result["signal"] = "put"
+
+        result["valid"] = True
 
         result[
-            "reason"
-        ] = (
-            "PUT no válida: "
-            "vela 1M no cerró roja"
+            "continuity_confirmed"
+        ] = True
+
+        result["reason"] = (
+            "PUT confirmada: "
+            "patrón original completo + "
+            "continuidad vendedora"
         )
 
         return result
@@ -978,11 +906,9 @@ def analyze_minute(
     # NEUTRAL
     # ========================================================
 
-    result[
-        "reason"
-    ] = (
-        "primera vela 5S cerró exactamente "
-        "en la apertura de la vela 1M"
+    result["reason"] = (
+        "primera 5s cerró exactamente "
+        "en la apertura 1M"
     )
 
     return result
@@ -996,9 +922,6 @@ def analyze_market(
     candle_1m: pd.Series,
     candles_5s: pd.DataFrame,
 ) -> Dict[str, Any]:
-    """
-    Función principal utilizada por bot.py.
-    """
 
     return analyze_minute(
         candle_1m,
@@ -1014,13 +937,6 @@ def get_signal(
     candle_1m: pd.Series,
     candles_5s: pd.DataFrame,
 ) -> Optional[str]:
-    """
-    Devuelve:
-
-        "call"
-        "put"
-        None
-    """
 
     result = analyze_market(
         candle_1m,
@@ -1040,9 +956,6 @@ def signal(
     candle_1m: pd.Series,
     candles_5s: pd.DataFrame,
 ) -> Optional[str]:
-    """
-    Alias de compatibilidad.
-    """
 
     return get_signal(
         candle_1m,
@@ -1061,14 +974,13 @@ if __name__ == "__main__":
     )
 
     print(
-        "Estrategia:"
+        "Estrategia: 1M + microvelas 5S"
     )
 
     print(
-        "1 minuto + microvelas de 5 segundos"
+        "Lógica original conservada."
     )
 
     print(
-        "Lógica original + confirmación de "
-        "dominancia y continuidad."
+        "Filtro de continuidad dominante activo."
         )
