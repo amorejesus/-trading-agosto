@@ -8,7 +8,7 @@ import strategy
 
 
 PAIR = "EURUSD-OTC"
-AMOUNT = 1700
+AMOUNT = 6000
 EXPIRATION = 1
 
 TIMEFRAME_5S = 5
