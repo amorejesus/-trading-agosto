@@ -13,17 +13,17 @@ import strategy
 # ============================================================
 
 PAIRS = [
-    "EURUSD",
-    "AUDCHF",
-    "AUDUSD",
-    "EURGBP",
-    "EURNZD",
-    "GBPAUD",
-    "GBPCAD",
-    "GBPJPY",
-    "GBPNZD",
-    "GBPUSD",
-    "NZDUSD",
+    "EURUSD-OTC",
+    "AUDCHF-OTC",
+    "AUDUSD-OTC",
+    "EURGBP-OTC",
+    "EURNZD-OTC",
+    "GBPAUD-OTC",
+    "GBPCAD-OTC",
+    "GBPJPY-OTC",
+    "GBPNZD-OTC",
+    "GBPUSD-OTC",
+    "NZDUSD-OTC",
 ]
 
 AMOUNT = 9230
