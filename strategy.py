@@ -10,165 +10,209 @@ import pandas as pd
 #
 # ESTRATEGIA:
 #
-#   VELAS 1-6 = ESTRUCTURA
-#   VELA 7    = N+1 / ENTRADA
+# SOPORTE M5 / RESISTENCIA M5
+# + 6 VELAS DE 5 SEGUNDOS
+# + ENTRADA N+1
 #
-# REGLA:
+# REGLAS:
 #
-#   SOPORTE    -> CALL
-#   RESISTENCIA -> PUT
+# 1. La primera vela del bloque toca o rompe SOPORTE M5
+#    -> CALL
 #
-# LA ENTRADA SE DETERMINA ÚNICAMENTE CON LA UBICACIÓN
-# DE LA APERTURA DE LA VELA 7 RESPECTO A LA ESTRUCTURA
-# FORMADA POR LAS 6 VELAS ANTERIORES.
+# 2. La primera vela del bloque toca o rompe RESISTENCIA M5
+#    -> PUT
+#
+# 3. Se esperan exactamente 6 velas cerradas.
+#
+# 4. NO importa cómo termine la sexta vela.
+#
+# 5. La sexta vela solamente confirma que terminó el periodo
+#    de espera.
+#
+# 6. La entrada corresponde a N+1.
+#
+# NO SE UTILIZA:
+# - 12 velas 5S
+# - M1
+# - dominancia
+# - eficiencia
+# - pesos
+# - mayoría
+# - color obligatorio
+# - patrón obligatorio de la sexta vela
 # ============================================================
 
 
-STRUCTURE_CANDLES_REQUIRED = 6
-ENTRY_CANDLE_REQUIRED = 7
-
-# Tolerancia máxima para considerar que la apertura N+1
-# está suficientemente cerca de soporte/resistencia.
-#
-# Se calcula dinámicamente utilizando el rango de las
-# primeras 6 velas.
-#
-# Ejemplo:
-#
-#   rango estructura = 0.00020
-#   tolerancia       = 0.00004
-#
-# La apertura N+1 debe estar dentro de esa zona.
-#
-SUPPORT_RESISTANCE_TOLERANCE = 0.20
+MICRO_CANDLES_REQUIRED = 6
 
 
 # ============================================================
-# UTILIDADES
+# CONVERSIÓN NUMÉRICA
 # ============================================================
 
 def _to_float(value: Any) -> Optional[float]:
     try:
-        return float(value)
+        if value is None:
+            return None
+
+        result = float(value)
+
+        if pd.isna(result):
+            return None
+
+        return result
+
     except (TypeError, ValueError):
         return None
 
 
-def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
+# ============================================================
+# NORMALIZAR VELAS 5S
+# ============================================================
 
-    if df is None:
+def _normalize_5s(
+    candles_5s: Any,
+) -> pd.DataFrame:
+
+    if candles_5s is None:
         return pd.DataFrame()
 
-    if not isinstance(df, pd.DataFrame):
+    try:
+        if isinstance(
+            candles_5s,
+            pd.DataFrame,
+        ):
+            df = candles_5s.copy()
+
+        else:
+            df = pd.DataFrame(
+                list(candles_5s)
+            )
+
+    except Exception:
         return pd.DataFrame()
 
     if df.empty:
         return pd.DataFrame()
 
-    out = df.copy()
-
     rename = {}
 
-    if "max" in out.columns and "high" not in out.columns:
-        rename["max"] = "high"
+    if "max" in df.columns:
+        if "high" not in df.columns:
+            rename["max"] = "high"
 
-    if "min" in out.columns and "low" not in out.columns:
-        rename["min"] = "low"
+    if "min" in df.columns:
+        if "low" not in df.columns:
+            rename["min"] = "low"
 
-    if "Open" in out.columns and "open" not in out.columns:
-        rename["Open"] = "open"
+    if "Open" in df.columns:
+        if "open" not in df.columns:
+            rename["Open"] = "open"
 
-    if "High" in out.columns and "high" not in out.columns:
-        rename["High"] = "high"
+    if "High" in df.columns:
+        if "high" not in df.columns:
+            rename["High"] = "high"
 
-    if "Low" in out.columns and "low" not in out.columns:
-        rename["Low"] = "low"
+    if "Low" in df.columns:
+        if "low" not in df.columns:
+            rename["Low"] = "low"
 
-    if "Close" in out.columns and "close" not in out.columns:
-        rename["Close"] = "close"
+    if "Close" in df.columns:
+        if "close" not in df.columns:
+            rename["Close"] = "close"
 
     if rename:
-        out.rename(
+        df.rename(
             columns=rename,
-            inplace=True
+            inplace=True,
         )
 
-    required = [
+    required = (
         "open",
         "close",
-    ]
+    )
 
     for column in required:
-        if column not in out.columns:
+        if column not in df.columns:
             return pd.DataFrame()
 
-    out["open"] = pd.to_numeric(
-        out["open"],
-        errors="coerce"
+    df["open"] = pd.to_numeric(
+        df["open"],
+        errors="coerce",
     )
 
-    out["close"] = pd.to_numeric(
-        out["close"],
-        errors="coerce"
+    df["close"] = pd.to_numeric(
+        df["close"],
+        errors="coerce",
     )
 
-    if "high" in out.columns:
-        out["high"] = pd.to_numeric(
-            out["high"],
-            errors="coerce"
+    if "high" in df.columns:
+        df["high"] = pd.to_numeric(
+            df["high"],
+            errors="coerce",
         )
 
-    if "low" in out.columns:
-        out["low"] = pd.to_numeric(
-            out["low"],
-            errors="coerce"
+    if "low" in df.columns:
+        df["low"] = pd.to_numeric(
+            df["low"],
+            errors="coerce",
         )
 
-    if "from" in out.columns:
-
-        out["from"] = pd.to_numeric(
-            out["from"],
-            errors="coerce"
+    if "from" in df.columns:
+        df["from"] = pd.to_numeric(
+            df["from"],
+            errors="coerce",
         )
 
-        out.dropna(
+        df.dropna(
             subset=["from"],
-            inplace=True
+            inplace=True,
         )
 
-        out.sort_values(
+        df["from"] = df["from"].astype(int)
+
+        df.sort_values(
             "from",
-            inplace=True
+            inplace=True,
         )
 
-    out.dropna(
-        subset=["open", "close"],
-        inplace=True
+        df.drop_duplicates(
+            subset=["from"],
+            keep="last",
+            inplace=True,
+        )
+
+    df.dropna(
+        subset=[
+            "open",
+            "close",
+        ],
+        inplace=True,
     )
 
-    out.reset_index(
+    df.reset_index(
         drop=True,
-        inplace=True
+        inplace=True,
     )
 
-    return out
+    return df
 
 
 # ============================================================
-# VALIDAR SECUENCIA
+# VALIDAR SECUENCIA DE 5 SEGUNDOS
 # ============================================================
 
-def _validate_5s_sequence(
-    candles: pd.DataFrame
+def _validate_sequence(
+    candles: pd.DataFrame,
 ) -> bool:
-
-    if candles is None:
-        return False
 
     if candles.empty:
         return False
 
     if "from" not in candles.columns:
+        return True
+
+    if len(candles) < 2:
         return False
 
     timestamps = (
@@ -177,10 +221,10 @@ def _validate_5s_sequence(
         .tolist()
     )
 
-    if len(timestamps) < 2:
-        return True
-
-    for i in range(1, len(timestamps)):
+    for i in range(
+        1,
+        len(timestamps),
+    ):
 
         difference = (
             timestamps[i]
@@ -194,797 +238,621 @@ def _validate_5s_sequence(
 
 
 # ============================================================
-# OBTENER RANGO DE UNA VELA
+# OBTENER OHLC DE UNA VELA
 # ============================================================
 
-def _candle_high(
-    candle: pd.Series
-) -> Optional[float]:
+def _get_ohlc(
+    candle: pd.Series,
+) -> Optional[Dict[str, float]]:
 
     if candle is None:
         return None
+
+    opening = _to_float(
+        candle.get("open")
+    )
+
+    closing = _to_float(
+        candle.get("close")
+    )
 
     high = _to_float(
         candle.get("high")
     )
 
-    if high is not None:
-        return high
-
-    opening = _to_float(
-        candle.get("open")
-    )
-
-    closing = _to_float(
-        candle.get("close")
-    )
-
-    if opening is None or closing is None:
-        return None
-
-    return max(
-        opening,
-        closing
-    )
-
-
-def _candle_low(
-    candle: pd.Series
-) -> Optional[float]:
-
-    if candle is None:
-        return None
-
     low = _to_float(
         candle.get("low")
     )
 
-    if low is not None:
-        return low
-
-    opening = _to_float(
-        candle.get("open")
-    )
-
-    closing = _to_float(
-        candle.get("close")
-    )
-
-    if opening is None or closing is None:
+    if opening is None:
         return None
 
-    return min(
-        opening,
-        closing
-    )
+    if closing is None:
+        return None
 
+    # Si API no proporciona high/low,
+    # se construyen con open/close.
+    if high is None:
+        high = max(
+            opening,
+            closing,
+        )
 
-# ============================================================
-# ESTRUCTURA DE LAS PRIMERAS 6 VELAS
-# ============================================================
+    if low is None:
+        low = min(
+            opening,
+            closing,
+        )
 
-def _calculate_structure(
-    structure: pd.DataFrame
-) -> Dict[str, Any]:
-
-    result = {
-        "support": None,
-        "resistance": None,
-        "structure_range": None,
-        "tolerance": None,
-        "structure_valid": False,
+    return {
+        "open": opening,
+        "close": closing,
+        "high": high,
+        "low": low,
     }
 
-    if structure is None:
-        return result
-
-    if len(structure) != STRUCTURE_CANDLES_REQUIRED:
-        return result
-
-    highs = []
-    lows = []
-
-    for _, candle in structure.iterrows():
-
-        high = _candle_high(candle)
-        low = _candle_low(candle)
-
-        if high is None or low is None:
-            return result
-
-        highs.append(high)
-        lows.append(low)
-
-    if not highs or not lows:
-        return result
-
-    resistance = max(highs)
-    support = min(lows)
-
-    if resistance <= support:
-        return result
-
-    structure_range = (
-        resistance
-        - support
-    )
-
-    tolerance = (
-        structure_range
-        * SUPPORT_RESISTANCE_TOLERANCE
-    )
-
-    result["support"] = support
-    result["resistance"] = resistance
-    result["structure_range"] = structure_range
-    result["tolerance"] = tolerance
-    result["structure_valid"] = True
-
-    return result
-
 
 # ============================================================
-# ANALIZAR UBICACIÓN DE LA APERTURA N+1
+# DETECTAR TOQUE / RUPTURA SOPORTE
 # ============================================================
 
-def _analyze_entry_location(
-    entry_open: float,
+def _touches_support(
+    candle: pd.Series,
     support: float,
-    resistance: float,
-    tolerance: float,
-) -> Dict[str, Any]:
+) -> bool:
 
-    result = {
-        "location": "neutral",
-        "distance_support": None,
-        "distance_resistance": None,
-        "support_distance_ratio": None,
-        "resistance_distance_ratio": None,
-        "support_ok": False,
-        "resistance_ok": False,
-    }
-
-    distance_support = abs(
-        entry_open
-        - support
+    data = _get_ohlc(
+        candle
     )
 
-    distance_resistance = abs(
-        resistance
-        - entry_open
-    )
+    if data is None:
+        return False
 
-    result["distance_support"] = (
-        distance_support
-    )
+    low = data["low"]
+    high = data["high"]
 
-    result["distance_resistance"] = (
-        distance_resistance
-    )
-
-    if tolerance <= 0:
-        return result
-
-    support_ratio = (
-        distance_support
-        / tolerance
-    )
-
-    resistance_ratio = (
-        distance_resistance
-        / tolerance
-    )
-
-    result["support_distance_ratio"] = (
-        support_ratio
-    )
-
-    result["resistance_distance_ratio"] = (
-        resistance_ratio
-    )
-
-    support_ok = (
-        distance_support
-        <= tolerance
-    )
-
-    resistance_ok = (
-        distance_resistance
-        <= tolerance
-    )
-
-    result["support_ok"] = support_ok
-    result["resistance_ok"] = resistance_ok
-
-    # ========================================================
-    # PRIORIDAD
+    # La vela toca o atraviesa el soporte.
     #
-    # Si por una estructura extremadamente pequeña el precio
-    # queda simultáneamente cerca de ambos extremos,
-    # no se fuerza una operación.
-    # ========================================================
+    # Si el mínimo llega al nivel:
+    #    low <= support
+    #
+    # Si atraviesa el soporte:
+    #    low < support
+    #
+    # Ambas situaciones quedan cubiertas.
+    if low <= support:
+        return True
 
-    if support_ok and resistance_ok:
+    # Protección adicional por si la vela
+    # contiene completamente el nivel.
+    if low <= support <= high:
+        return True
 
-        result["location"] = "neutral"
-
-        return result
-
-    if support_ok:
-
-        result["location"] = "support"
-
-        return result
-
-    if resistance_ok:
-
-        result["location"] = "resistance"
-
-        return result
-
-    result["location"] = "neutral"
-
-    return result
+    return False
 
 
 # ============================================================
-# ANALIZAR LAS 6 VELAS DE ESTRUCTURA
+# DETECTAR TOQUE / RUPTURA RESISTENCIA
 # ============================================================
 
-def _analyze_structure_behavior(
-    structure: pd.DataFrame
-) -> Dict[str, Any]:
+def _touches_resistance(
+    candle: pd.Series,
+    resistance: float,
+) -> bool:
 
-    result = {
-        "green_count": 0,
-        "red_count": 0,
-        "doji_count": 0,
-        "net_movement": 0.0,
-        "total_body": 0.0,
-        "structure_direction": "neutral",
-    }
-
-    if structure is None:
-        return result
-
-    if len(structure) != STRUCTURE_CANDLES_REQUIRED:
-        return result
-
-    first_open = _to_float(
-        structure.iloc[0]["open"]
+    data = _get_ohlc(
+        candle
     )
 
-    last_close = _to_float(
-        structure.iloc[-1]["close"]
-    )
+    if data is None:
+        return False
 
-    if first_open is None or last_close is None:
-        return result
+    high = data["high"]
+    low = data["low"]
 
-    total_body = 0.0
+    # La vela toca o atraviesa la resistencia.
+    #
+    # Si el máximo llega al nivel:
+    #    high >= resistance
+    #
+    # Si atraviesa la resistencia:
+    #    high > resistance
+    #
+    # Ambas situaciones quedan cubiertas.
+    if high >= resistance:
+        return True
 
-    green_count = 0
-    red_count = 0
-    doji_count = 0
+    # Protección adicional por si la vela
+    # contiene completamente el nivel.
+    if low <= resistance <= high:
+        return True
 
-    for _, candle in structure.iterrows():
+    return False
+
+
+# ============================================================
+# COLOR DE VELA
+# ============================================================
+
+def get_candle_color(
+    candle: Any,
+) -> str:
+
+    if isinstance(
+        candle,
+        pd.Series,
+    ):
 
         opening = _to_float(
-            candle["open"]
+            candle.get("open")
         )
 
         closing = _to_float(
-            candle["close"]
+            candle.get("close")
         )
 
-        if opening is None or closing is None:
-            return result
+    elif isinstance(
+        candle,
+        dict,
+    ):
 
-        movement = (
-            closing
-            - opening
+        opening = _to_float(
+            candle.get("open")
         )
 
-        total_body += abs(
-            movement
+        closing = _to_float(
+            candle.get("close")
         )
 
-        if movement > 0:
-            green_count += 1
+    else:
+        return "doji"
 
-        elif movement < 0:
-            red_count += 1
+    if opening is None or closing is None:
+        return "doji"
 
-        else:
-            doji_count += 1
+    if closing > opening:
+        return "verde"
 
-    net_movement = (
-        last_close
-        - first_open
+    if closing < opening:
+        return "rojo"
+
+    return "doji"
+
+
+# ============================================================
+# ANALIZAR SEXTA VELA
+#
+# IMPORTANTE:
+#
+# NO SE UTILIZA SU COLOR PARA DECIDIR.
+#
+# Esta función solamente describe cómo terminó.
+# ============================================================
+
+def _analyze_final_candle(
+    candle: pd.Series,
+) -> Dict[str, Any]:
+
+    data = _get_ohlc(
+        candle
     )
 
-    result["green_count"] = green_count
-    result["red_count"] = red_count
-    result["doji_count"] = doji_count
-    result["net_movement"] = net_movement
-    result["total_body"] = total_body
+    result = {
+        "color": "doji",
+        "open": None,
+        "close": None,
+        "high": None,
+        "low": None,
+        "body": 0.0,
+        "range": 0.0,
+        "body_ratio": 0.0,
+        "classification": "indecision",
+    }
 
-    if net_movement > 0:
-        result["structure_direction"] = "call"
+    if data is None:
+        return result
 
-    elif net_movement < 0:
-        result["structure_direction"] = "put"
+    opening = data["open"]
+    closing = data["close"]
+    high = data["high"]
+    low = data["low"]
+
+    body = abs(
+        closing - opening
+    )
+
+    candle_range = (
+        high - low
+    )
+
+    if candle_range > 0:
+        body_ratio = (
+            body / candle_range
+        )
+
+    else:
+        body_ratio = 0.0
+
+    result["color"] = (
+        get_candle_color(
+            candle
+        )
+    )
+
+    result["open"] = opening
+    result["close"] = closing
+    result["high"] = high
+    result["low"] = low
+    result["body"] = body
+    result["range"] = candle_range
+    result["body_ratio"] = body_ratio
+
+    # Esta clasificación NO bloquea la operación.
+    if candle_range <= 0:
+        classification = "doji"
+
+    elif body_ratio <= 0.20:
+        classification = "indecision"
+
+    elif body_ratio >= 0.70:
+        classification = "fuerza"
+
+    elif body_ratio >= 0.45:
+        classification = "continuidad"
+
+    else:
+        classification = "agotamiento"
+
+    result["classification"] = (
+        classification
+    )
 
     return result
 
 
 # ============================================================
-# ANALISIS PRINCIPAL
+# ANALIZAR SNIPER
 # ============================================================
 
-def analyze_n_plus_1(
-    candles_5s: Any
+def analyze_sniper(
+    candles_5s: Any,
+    support: Any = None,
+    resistance: Any = None,
 ) -> Dict[str, Any]:
 
     result: Dict[str, Any] = {
-
         "signal": None,
-
         "valid": False,
-
         "reason": "sin señal",
 
-        "candles_received": 0,
-
-        "structure_candles": STRUCTURE_CANDLES_REQUIRED,
-
-        "entry_candle": ENTRY_CANDLE_REQUIRED,
-
         "support": None,
-
         "resistance": None,
 
-        "structure_range": None,
+        "candles_count": 0,
 
-        "tolerance": None,
+        "trigger": None,
+        "trigger_type": None,
 
-        "entry_open": None,
+        "final_candle": None,
+        "final_candle_color": None,
+        "final_candle_classification": None,
 
-        "location": "neutral",
-
-        "distance_support": None,
-
-        "distance_resistance": None,
-
-        "support_distance_ratio": None,
-
-        "resistance_distance_ratio": None,
-
-        "support_ok": False,
-
-        "resistance_ok": False,
-
-        "green_count": 0,
-
-        "red_count": 0,
-
-        "doji_count": 0,
-
-        "net_movement": 0.0,
-
-        "total_body": 0.0,
-
-        "structure_direction": "neutral",
-
-        "quality_checks": {
-
-            "seven_candles": False,
-
-            "sequence_ok": False,
-
-            "structure_ok": False,
-
-            "support_ok": False,
-
-            "resistance_ok": False,
-
-        },
+        "ready_for_n1": False,
     }
 
-    # ========================================================
-    # CONVERTIR DATOS
-    # ========================================================
+    # --------------------------------------------------------
+    # NORMALIZAR NIVELES
+    # --------------------------------------------------------
 
-    if candles_5s is None:
+    support_value = _to_float(
+        support
+    )
 
-        result["reason"] = (
-            "no se recibieron velas 5S"
-        )
+    resistance_value = _to_float(
+        resistance
+    )
 
-        return result
+    result["support"] = (
+        support_value
+    )
 
-    if isinstance(
-        candles_5s,
-        pd.DataFrame
+    result["resistance"] = (
+        resistance_value
+    )
+
+    if (
+        support_value is None
+        and resistance_value is None
     ):
-
-        df = candles_5s.copy()
-
-    else:
-
-        try:
-
-            df = pd.DataFrame(
-                list(candles_5s)
-            )
-
-        except Exception:
-
-            result["reason"] = (
-                "datos 5S inválidos"
-            )
-
-            return result
-
-    df = _normalize_5s(df)
-
-    if df.empty:
-
         result["reason"] = (
-            "DataFrame 5S vacío"
+            "faltan soporte y resistencia M5"
         )
-
         return result
 
-    df.sort_values(
-        "from",
-        inplace=True
+    # --------------------------------------------------------
+    # NORMALIZAR VELAS
+    # --------------------------------------------------------
+
+    micro = _normalize_5s(
+        candles_5s
     )
 
-    df.drop_duplicates(
-        subset=["from"],
-        keep="last",
-        inplace=True
+    if micro.empty:
+        result["reason"] = (
+            "no hay velas 5S"
+        )
+        return result
+
+    result["candles_count"] = len(
+        micro
     )
 
-    df.reset_index(
-        drop=True,
-        inplace=True
-    )
+    # --------------------------------------------------------
+    # EXACTAMENTE 6 VELAS
+    # --------------------------------------------------------
 
-    result["candles_received"] = len(df)
-
-    # ========================================================
-    # NECESITAMOS EXACTAMENTE 7 VELAS
-    #
-    # 1-6 = estructura
-    # 7   = entrada
-    # ========================================================
-
-    if len(df) != ENTRY_CANDLE_REQUIRED:
-
+    if len(micro) != MICRO_CANDLES_REQUIRED:
         result["reason"] = (
             "se requieren exactamente "
-            "7 velas de 5S: "
-            "6 de estructura + 1 de entrada"
+            f"{MICRO_CANDLES_REQUIRED} "
+            "velas 5S cerradas"
         )
-
         return result
 
-    result["quality_checks"][
-        "seven_candles"
-    ] = True
-
-    # ========================================================
+    # --------------------------------------------------------
     # VALIDAR SECUENCIA
-    # ========================================================
+    # --------------------------------------------------------
 
-    if not _validate_5s_sequence(df):
-
+    if not _validate_sequence(
+        micro
+    ):
         result["reason"] = (
             "secuencia 5S inválida"
         )
-
         return result
 
-    result["quality_checks"][
-        "sequence_ok"
-    ] = True
-
-    # ========================================================
-    # SEPARAR ESTRUCTURA Y ENTRADA
-    # ========================================================
-
-    structure = df.iloc[
-        :STRUCTURE_CANDLES_REQUIRED
-    ].copy()
-
-    entry_candle = df.iloc[
-        ENTRY_CANDLE_REQUIRED - 1
-    ]
-
-    # ========================================================
-    # CALCULAR SOPORTE / RESISTENCIA
-    # ========================================================
-
-    structure_data = _calculate_structure(
-        structure
-    )
-
-    if not structure_data[
-        "structure_valid"
-    ]:
-
-        result["reason"] = (
-            "estructura de 6 velas inválida"
-        )
-
-        return result
-
-    result["quality_checks"][
-        "structure_ok"
-    ] = True
-
-    support = structure_data[
-        "support"
-    ]
-
-    resistance = structure_data[
-        "resistance"
-    ]
-
-    structure_range = structure_data[
-        "structure_range"
-    ]
-
-    tolerance = structure_data[
-        "tolerance"
-    ]
-
-    result["support"] = support
-    result["resistance"] = resistance
-    result["structure_range"] = (
-        structure_range
-    )
-    result["tolerance"] = tolerance
-
-    # ========================================================
-    # APERTURA DE LA VELA 7
-    # ========================================================
-
-    entry_open = _to_float(
-        entry_candle["open"]
-    )
-
-    if entry_open is None:
-
-        result["reason"] = (
-            "apertura de vela 7 inválida"
-        )
-
-        return result
-
-    result["entry_open"] = entry_open
-
-    # ========================================================
-    # ANALIZAR ESTRUCTURA
-    # ========================================================
-
-    behavior = (
-        _analyze_structure_behavior(
-            structure
-        )
-    )
-
-    result["green_count"] = (
-        behavior["green_count"]
-    )
-
-    result["red_count"] = (
-        behavior["red_count"]
-    )
-
-    result["doji_count"] = (
-        behavior["doji_count"]
-    )
-
-    result["net_movement"] = (
-        behavior["net_movement"]
-    )
-
-    result["total_body"] = (
-        behavior["total_body"]
-    )
-
-    result["structure_direction"] = (
-        behavior["structure_direction"]
-    )
-
-    # ========================================================
-    # UBICACIÓN N+1
-    # ========================================================
-
-    location = _analyze_entry_location(
-        entry_open,
-        support,
-        resistance,
-        tolerance,
-    )
-
-    result["location"] = (
-        location["location"]
-    )
-
-    result["distance_support"] = (
-        location["distance_support"]
-    )
-
-    result["distance_resistance"] = (
-        location["distance_resistance"]
-    )
-
-    result["support_distance_ratio"] = (
-        location["support_distance_ratio"]
-    )
-
-    result["resistance_distance_ratio"] = (
-        location["resistance_distance_ratio"]
-    )
-
-    result["support_ok"] = (
-        location["support_ok"]
-    )
-
-    result["resistance_ok"] = (
-        location["resistance_ok"]
-    )
-
-    result["quality_checks"][
-        "support_ok"
-    ] = location["support_ok"]
-
-    result["quality_checks"][
-        "resistance_ok"
-    ] = location["resistance_ok"]
-
-    # ========================================================
-    # REGLA PRINCIPAL
+    # --------------------------------------------------------
+    # PRIMERA VELA DEL BLOQUE
     #
-    # SOPORTE     -> CALL
-    # RESISTENCIA -> PUT
-    # ========================================================
+    # Esta es la vela que toca/rompe
+    # soporte o resistencia.
+    # --------------------------------------------------------
 
-    if location["location"] == "support":
+    trigger_candle = micro.iloc[0]
+
+    support_touch = False
+    resistance_touch = False
+
+    if support_value is not None:
+        support_touch = (
+            _touches_support(
+                trigger_candle,
+                support_value,
+            )
+        )
+
+    if resistance_value is not None:
+        resistance_touch = (
+            _touches_resistance(
+                trigger_candle,
+                resistance_value,
+            )
+        )
+
+    # --------------------------------------------------------
+    # EVITAR AMBIGÜEDAD
+    # --------------------------------------------------------
+
+    if (
+        support_touch
+        and resistance_touch
+    ):
+        result["reason"] = (
+            "la misma vela toca soporte "
+            "y resistencia M5"
+        )
+        return result
+
+    # --------------------------------------------------------
+    # NO HUBO TOQUE
+    # --------------------------------------------------------
+
+    if not support_touch and not resistance_touch:
+        result["reason"] = (
+            "la primera vela no tocó "
+            "soporte ni resistencia M5"
+        )
+        return result
+
+    # --------------------------------------------------------
+    # SEXTA VELA
+    #
+    # SU FORMA NO BLOQUEA.
+    # --------------------------------------------------------
+
+    final_candle = micro.iloc[-1]
+
+    final_analysis = (
+        _analyze_final_candle(
+            final_candle
+        )
+    )
+
+    result["final_candle"] = (
+        final_analysis
+    )
+
+    result["final_candle_color"] = (
+        final_analysis["color"]
+    )
+
+    result[
+        "final_candle_classification"
+    ] = final_analysis[
+        "classification"
+    ]
+
+    # --------------------------------------------------------
+    # SOPORTE -> CALL
+    # --------------------------------------------------------
+
+    if support_touch:
+
+        result["trigger"] = "support"
+        result["trigger_type"] = (
+            "touch_or_break"
+        )
 
         result["signal"] = "call"
-
         result["valid"] = True
+        result["ready_for_n1"] = True
 
         result["reason"] = (
-            "CALL N+1: apertura de vela 7 "
-            "en zona de SOPORTE de la estructura "
-            "formada por las primeras 6 velas"
+            "soporte M5 tocado o roto + "
+            "6 velas cerradas + "
+            "sexta vela confirmada; "
+            "su forma no bloquea CALL"
         )
 
         return result
 
-    if location["location"] == "resistance":
+    # --------------------------------------------------------
+    # RESISTENCIA -> PUT
+    # --------------------------------------------------------
+
+    if resistance_touch:
+
+        result["trigger"] = "resistance"
+        result["trigger_type"] = (
+            "touch_or_break"
+        )
 
         result["signal"] = "put"
-
         result["valid"] = True
+        result["ready_for_n1"] = True
 
         result["reason"] = (
-            "PUT N+1: apertura de vela 7 "
-            "en zona de RESISTENCIA de la estructura "
-            "formada por las primeras 6 velas"
+            "resistencia M5 tocada o rota + "
+            "6 velas cerradas + "
+            "sexta vela confirmada; "
+            "su forma no bloquea PUT"
         )
 
         return result
 
     result["reason"] = (
-        "SIN OPERACIÓN: apertura de vela 7 "
-        "no está suficientemente cerca "
-        "de soporte ni resistencia"
+        "sin señal"
     )
 
     return result
 
 
 # ============================================================
-# COMPATIBILIDAD CON BOT.PY
+# FUNCIÓN PRINCIPAL DE SEÑAL
 # ============================================================
 
-def check_pattern(
-    candles_5s: Any
+def get_signal(
+    candles_5s: Any,
+    support: Any = None,
+    resistance: Any = None,
 ) -> Optional[str]:
 
-    result = analyze_n_plus_1(
-        candles_5s
+    analysis = analyze_sniper(
+        candles_5s,
+        support,
+        resistance,
     )
 
-    return result.get(
+    if not analysis.get(
+        "valid",
+        False,
+    ):
+        return None
+
+    signal_value = analysis.get(
         "signal"
     )
 
+    if signal_value in (
+        "call",
+        "put",
+    ):
+        return signal_value
 
-def get_signal(
-    candles_5s: Any
+    return None
+
+
+# ============================================================
+# COMPATIBILIDAD check_pattern
+# ============================================================
+
+def check_pattern(
+    candles_5s: Any,
+    support: Any = None,
+    resistance: Any = None,
 ) -> Optional[str]:
 
-    return check_pattern(
-        candles_5s
-    )
-
-
-def signal(
-    candles_5s: Any
-) -> Optional[str]:
-
-    return check_pattern(
-        candles_5s
+    return get_signal(
+        candles_5s,
+        support,
+        resistance,
     )
 
 
 # ============================================================
-# DIRECCIÓN M1
+# COMPATIBILIDAD signal()
+# ============================================================
+
+def signal(
+    candles_5s: Any,
+    support: Any = None,
+    resistance: Any = None,
+) -> Optional[str]:
+
+    return get_signal(
+        candles_5s,
+        support,
+        resistance,
+    )
+
+
+# ============================================================
+# COMPATIBILIDAD get_m1_direction
 #
-# Se mantiene para compatibilidad.
+# Se mantiene para que bot.py no falle al importar.
 #
-# IMPORTANTE:
-# Esta función NO decide la entrada N+1.
-# La entrada real utiliza soporte/resistencia.
+# Ya NO se utiliza M1 para determinar la señal.
 # ============================================================
 
 def get_m1_direction(
-    candles_5s: Any
+    candles_5s: Any,
 ) -> Optional[str]:
 
-    if candles_5s is None:
-        return None
-
-    if isinstance(
-        candles_5s,
-        pd.DataFrame
-    ):
-
-        df = candles_5s.copy()
-
-    else:
-
-        try:
-
-            df = pd.DataFrame(
-                list(candles_5s)
-            )
-
-        except Exception:
-
-            return None
-
-    df = _normalize_5s(df)
-
-    if df.empty:
-        return None
-
-    if len(df) < 2:
-        return None
-
-    opening = _to_float(
-        df.iloc[0]["open"]
+    micro = _normalize_5s(
+        candles_5s
     )
 
-    closing = _to_float(
-        df.iloc[-1]["close"]
-    )
-
-    if opening is None or closing is None:
+    if micro.empty:
         return None
 
-    if closing > opening:
+    if len(micro) < 1:
+        return None
+
+    first = _get_ohlc(
+        micro.iloc[0]
+    )
+
+    last = _get_ohlc(
+        micro.iloc[-1]
+    )
+
+    if first is None or last is None:
+        return None
+
+    if last["close"] > first["open"]:
         return "call"
 
-    if closing < opening:
+    if last["close"] < first["open"]:
         return "put"
 
     return None
@@ -995,54 +863,121 @@ def get_m1_direction(
 # ============================================================
 
 def get_strategy_analysis(
-    candles_5s: Any
+    candles_5s: Any,
+    support: Any = None,
+    resistance: Any = None,
 ) -> Optional[Dict[str, Any]]:
 
-    if candles_5s is None:
-        return None
-
-    return analyze_n_plus_1(
-        candles_5s
+    return analyze_sniper(
+        candles_5s,
+        support,
+        resistance,
     )
 
+
+# ============================================================
+# analyze_market
+# ============================================================
 
 def analyze_market(
-    candle_1m: Any,
     candles_5s: Any,
-    previous_m1: Optional[
-        pd.DataFrame
-    ] = None,
+    support: Any = None,
+    resistance: Any = None,
 ) -> Dict[str, Any]:
 
-    # --------------------------------------------------------
-    # Compatibilidad con versiones anteriores de bot.py.
-    #
-    # La nueva estrategia NO utiliza previous_m1.
-    # La decisión se basa únicamente en:
-    #
-    #   6 velas de estructura
-    #   +
-    #   apertura de vela 7
-    # --------------------------------------------------------
-
-    return analyze_n_plus_1(
-        candles_5s
-    )
-
-
-def analyze_minute(
-    candle_1m: Any,
-    candles_5s: Any,
-    previous_m1: Optional[
-        pd.DataFrame
-    ] = None,
-) -> Dict[str, Any]:
-
-    return analyze_market(
-        candle_1m,
+    return analyze_sniper(
         candles_5s,
-        previous_m1,
+        support,
+        resistance,
     )
+
+
+# ============================================================
+# UTILIDAD:
+# OBTENER SOPORTE M5
+#
+# Recibe una vela M5 y devuelve su mínimo.
+# ============================================================
+
+def get_m5_support(
+    candle_m5: Any,
+) -> Optional[float]:
+
+    if candle_m5 is None:
+        return None
+
+    if isinstance(
+        candle_m5,
+        pd.Series,
+    ):
+
+        return _to_float(
+            candle_m5.get("low")
+        )
+
+    if isinstance(
+        candle_m5,
+        dict,
+    ):
+
+        value = candle_m5.get(
+            "low"
+        )
+
+        if value is None:
+            value = candle_m5.get(
+                "min"
+            )
+
+        return _to_float(
+            value
+        )
+
+    return None
+
+
+# ============================================================
+# UTILIDAD:
+# OBTENER RESISTENCIA M5
+#
+# Recibe una vela M5 y devuelve su máximo.
+# ============================================================
+
+def get_m5_resistance(
+    candle_m5: Any,
+) -> Optional[float]:
+
+    if candle_m5 is None:
+        return None
+
+    if isinstance(
+        candle_m5,
+        pd.Series,
+    ):
+
+        return _to_float(
+            candle_m5.get("high")
+        )
+
+    if isinstance(
+        candle_m5,
+        dict,
+    ):
+
+        value = candle_m5.get(
+            "high"
+        )
+
+        if value is None:
+            value = candle_m5.get(
+                "max"
+            )
+
+        return _to_float(
+            value
+        )
+
+    return None
 
 
 # ============================================================
@@ -1052,78 +987,83 @@ def analyze_minute(
 def strategy_info() -> Dict[str, Any]:
 
     return {
+        "micro_candles_required": (
+            MICRO_CANDLES_REQUIRED
+        ),
 
-        "structure_candles":
-            STRUCTURE_CANDLES_REQUIRED,
+        "uses_m1": False,
 
-        "entry_candle":
-            ENTRY_CANDLE_REQUIRED,
+        "uses_12_candles": False,
 
-        "entry_mode":
-            "N+1",
+        "uses_weights": False,
 
-        "support_signal":
-            "call",
+        "uses_dominance": False,
 
-        "resistance_signal":
-            "put",
+        "uses_efficiency": False,
 
-        "tolerance":
-            SUPPORT_RESISTANCE_TOLERANCE,
+        "support_action": "call",
 
-        "description":
-            (
-                "Las primeras 6 velas construyen "
-                "la estructura. La apertura de la "
-                "vela 7 determina si el precio está "
-                "en soporte o resistencia. "
-                "Soporte = CALL. "
-                "Resistencia = PUT."
-            ),
+        "resistance_action": "put",
+
+        "final_candle_color_required": False,
+
+        "final_candle_pattern_required": False,
+
+        "entry": "N+1",
     }
 
 
 # ============================================================
-# PRUEBA DIRECTA
+# PRUEBA
 # ============================================================
 
 if __name__ == "__main__":
 
     print(
-        "=========================================="
+        "======================================"
     )
 
     print(
-        "STRATEGY.PY CARGADO CORRECTAMENTE"
+        "STRATEGY.PY CARGADO"
     )
 
     print(
-        "=========================================="
+        "======================================"
     )
 
     print(
-        "Estructura : "
-        f"{STRUCTURE_CANDLES_REQUIRED} velas de 5S"
+        "Modo: SNIPER M5"
     )
 
     print(
-        "Entrada     : "
-        f"vela {ENTRY_CANDLE_REQUIRED} / N+1"
+        "Velas requeridas: "
+        f"{MICRO_CANDLES_REQUIRED} x 5S"
     )
 
     print(
-        "Soporte     : CALL"
+        "Soporte M5 -> CALL"
     )
 
     print(
-        "Resistencia : PUT"
+        "Resistencia M5 -> PUT"
     )
 
     print(
-        "Tolerancia  : "
-        f"{SUPPORT_RESISTANCE_TOLERANCE:.0%}"
+        "Sexta vela: cualquier cierre"
     )
 
     print(
-        "=========================================="
+        "Entrada: N+1"
+    )
+
+    print(
+        "M1: NO UTILIZADO"
+    )
+
+    print(
+        "12 velas 5S: NO UTILIZADAS"
+    )
+
+    print(
+        "======================================"
     )
