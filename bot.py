@@ -1,69 +1,23 @@
+# ============================================================
 # bot.py
-# ============================================================
-# IQ OPTION BOT
-# ============================================================
-#
-# REGLA PRINCIPAL:
-#
-#   N = vela M1 que se está formando
-#   N cierra en :00
-#        ↓
-#   ANALIZAR N COMPLETA
-#        ↓
-#   Fuerza
-#   Continuidad
-#   Reversión
-#   Indecisión
-#   Debilidad
-#   Doji
-#   Dirección
-#   Cuerpo
-#   Mechas
-#   Posición del cierre
-#        ↓
-#   DECIDIR CALL / PUT
-#        ↓
-#   N+1 = EJECUCIÓN
-#
-# IMPORTANTE:
-#   - NO decide en el segundo 20.
-#   - NO decide en el segundo 30.
-#   - NO decide antes del cierre.
-#   - NO usa datos parciales de N.
-#   - NO usa datos de N+1 para decidir N+1.
-#   - NO usa velas de 5 segundos.
-#   - NO usa patrones de 6 o 12 velas de 5s.
-#   - Si no existe una señal válida, NO OPERA.
-#
+# IQ OPTION - ESTRATEGIA M1 + 12 VELAS DE 5 SEGUNDOS
 # ============================================================
 
 import os
 import time
 import requests
+from datetime import datetime
 
 from iqoptionapi.stable_api import IQ_Option
-
-from strategy import (
-    build_n1_signal,
-    format_analysis,
-)
+import strategy
 
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
-PAIRS = [
-    "EURUSD-OTC",
-    "EURJPY-OTC",
-    "EURGBP-OTC",
-    "GBPUSD-OTC",
-]
-
-AMOUNT = 32
+PAIR = "EURUSD-OTC"
+AMOUNT = 55
 EXPIRATION = 1
 
-TIMEFRAME = 60
+TIMEFRAME_5S = 5
+CANDLES_PER_M1 = 12
 
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
@@ -72,718 +26,646 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-# ============================================================
-# VARIABLES DE CONTROL
-# ============================================================
-
-iq = None
-
-# Última vela M1 cerrada procesada por cada par.
-last_processed_candle = {}
-
-# Evita ejecutar dos veces el mismo par en la misma vela N+1.
-last_trade_candle = {}
-
-# Guarda la conexión.
-connected = False
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
 def send_telegram(message):
-    """
-    Envía mensaje a Telegram si las variables están configuradas.
-    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     try:
         url = (
-            "https://api.telegram.org/bot"
+            f"https://api.telegram.org/bot"
             f"{TELEGRAM_TOKEN}/sendMessage"
         )
 
-        requests.post(
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
+                "text": str(message),
             },
             timeout=10,
         )
+
+        if not response.ok:
+            print(
+                f"[TELEGRAM] HTTP {response.status_code}"
+            )
 
     except Exception as e:
         print(f"[TELEGRAM] Error: {e}")
 
 
-# ============================================================
-# CONEXIÓN IQ OPTION
-# ============================================================
+def verify_strategy():
+    print("\n======================================")
+    print("VERIFICANDO STRATEGY.PY")
+    print("======================================")
+    print(
+        f"Archivo: "
+        f"{getattr(strategy, '__file__', 'desconocido')}"
+    )
+
+    required = (
+        "check_pattern",
+        "get_m1_direction",
+        "get_strategy_analysis",
+    )
+
+    for name in required:
+        if not callable(getattr(strategy, name, None)):
+            raise RuntimeError(
+                f"strategy.py no contiene la función '{name}'."
+            )
+        print(f"✓ {name}() encontrada")
+
+    print("✓ STRATEGY.PY COMPATIBLE")
+    print("======================================\n")
+
 
 def connect_iq():
-    """
-    Conecta y mantiene una instancia global de IQ Option.
-    """
-
-    global iq
-    global connected
-
     if not EMAIL:
-        print("[ERROR] Falta IQ_EMAIL.")
-        return False
+        raise RuntimeError(
+            "Falta la variable de entorno IQ_EMAIL"
+        )
 
     if not PASSWORD:
-        print("[ERROR] Falta IQ_PASSWORD.")
-        return False
-
-    try:
-        print("[IQ] Conectando...")
-
-        iq = IQ_Option(
-            EMAIL,
-            PASSWORD
+        raise RuntimeError(
+            "Falta la variable de entorno IQ_PASSWORD"
         )
 
-        check, reason = iq.connect()
-
-        if not check:
-            connected = False
-
-            print(
-                f"[IQ] Error de conexión: {reason}"
-            )
-
-            return False
-
-        connected = True
-
-        print("[IQ] Conectado correctamente.")
-
+    while True:
         try:
-            iq.change_balance("PRACTICE")
-            print("[IQ] Cuenta PRACTICE seleccionada.")
+            print("\n======================================")
+            print("CONECTANDO A IQ OPTION")
+            print("======================================")
+
+            iq = IQ_Option(EMAIL, PASSWORD)
+            check, reason = iq.connect()
+
+            if check:
+                print("✓ CONEXIÓN EXITOSA")
+
+                try:
+                    iq.change_balance("PRACTICE")
+                    print("✓ CUENTA PRACTICE")
+                except Exception as e:
+                    print(
+                        f"⚠ No se pudo cambiar a PRACTICE: {e}"
+                    )
+
+                send_telegram(
+                    "🤖 BOT CONECTADO\n"
+                    f"Activo: {PAIR}\n"
+                    "Cuenta: PRACTICE"
+                )
+
+                return iq
+
+            print(f"✗ Error de conexión: {reason}")
+
         except Exception as e:
-            print(
-                f"[IQ] No se pudo cambiar a PRACTICE: {e}"
-            )
+            print(f"✗ Error conectando: {e}")
 
-        return True
-
-    except Exception as e:
-        connected = False
-
-        print(
-            f"[IQ] Excepción conectando: {e}"
-        )
-
-        return False
+        print("Reintentando en 5 segundos...")
+        time.sleep(5)
 
 
-# ============================================================
-# COMPROBAR CONEXIÓN
-# ============================================================
-
-def ensure_connection():
-    """
-    Comprueba la conexión y reconecta si es necesario.
-    """
-
-    global connected
-
+def ensure_connection(iq):
     try:
-        if iq is not None and iq.check_connect():
-            connected = True
+        if iq.check_connect():
             return True
     except Exception:
         pass
 
-    connected = False
-
-    print("[IQ] Conexión perdida. Reconectando...")
-
-    return connect_iq()
-
-
-# ============================================================
-# TIEMPO DEL SERVIDOR
-# ============================================================
-
-def get_server_time():
-    """
-    Obtiene el tiempo del servidor IQ Option.
-
-    Si no está disponible, usa time.time().
-    """
+    print("\n⚠ CONEXIÓN PERDIDA")
 
     try:
-        if iq is not None:
-            server_time = iq.get_server_timestamp()
+        check, reason = iq.connect()
 
-            if server_time:
-                return float(server_time)
+        if check:
+            print("✓ CONEXIÓN RESTAURADA")
+            return True
 
-    except Exception:
-        pass
-
-    return time.time()
-
-
-# ============================================================
-# INICIO DE VELA M1
-# ============================================================
-
-def current_minute_start(timestamp):
-    """
-    Devuelve el inicio del minuto correspondiente.
-    """
-
-    return int(timestamp // 60) * 60
-
-
-# ============================================================
-# OBTENER VELA M1 CERRADA
-# ============================================================
-
-def get_closed_m1_candles(pair):
-    """
-    Obtiene las últimas velas M1 y selecciona únicamente
-    las velas que ya están COMPLETAMENTE CERRADAS.
-
-    Devuelve:
-
-        current_closed
-        previous_closed
-
-    donde:
-
-        current_closed  = N
-        previous_closed = N-1
-
-    La vela actual que todavía se está formando jamás
-    se entrega como vela cerrada.
-    """
-
-    try:
-        now = get_server_time()
-
-        current_minute = current_minute_start(now)
-
-        candles = iq.get_candles(
-            pair,
-            TIMEFRAME,
-            4,
-            now,
-        )
-
-        if not candles:
-            print(
-                f"[{pair}] API no devolvió velas M1."
-            )
-
-            return None, None
-
-        closed = []
-
-        for candle in candles:
-
-            if not isinstance(candle, dict):
-                continue
-
-            candle_time = candle.get("from")
-
-            if candle_time is None:
-                continue
-
-            candle_time = int(candle_time)
-
-            # ------------------------------------------------
-            # Solo velas cuyo inicio está antes del minuto
-            # actual. La vela del minuto actual todavía está
-            # abierta y NO se analiza.
-            # ------------------------------------------------
-            if candle_time < current_minute:
-                closed.append(candle)
-
-        if len(closed) < 2:
-            print(
-                f"[{pair}] Esperando 2 velas M1 cerradas..."
-            )
-
-            return None, None
-
-        closed.sort(
-            key=lambda x: int(x.get("from", 0))
-        )
-
-        current_closed = closed[-1]
-        previous_closed = closed[-2]
-
-        return (
-            current_closed,
-            previous_closed,
-        )
+        print(f"✗ No se pudo reconectar: {reason}")
 
     except Exception as e:
+        print(f"✗ Error reconectando: {e}")
 
-        print(
-            f"[{pair}] Error obteniendo M1: {e}"
-        )
-
-        return None, None
+    return False
 
 
-# ============================================================
-# VALIDAR QUE LA VELA REALMENTE CERRÓ
-# ============================================================
+def get_current_minute():
+    now = int(time.time())
+    return now - (now % 60)
 
-def candle_is_closed(candle):
-    """
-    Comprueba que la vela haya terminado completamente.
-    """
 
-    if not candle:
-        return False
+def wait_for_new_m1(last_m1=None):
+    while True:
+        current_m1 = get_current_minute()
+
+        if last_m1 is None:
+            return current_m1 - 60
+
+        if current_m1 > last_m1:
+            return current_m1 - 60
+
+        time.sleep(0.2)
+
+
+def get_m1_5s_candles(iq, m1_start):
+    m1_end = m1_start + 60
 
     try:
-        now = get_server_time()
+        candles = iq.get_candles(
+            PAIR,
+            TIMEFRAME_5S,
+            20,
+            m1_end,
+        )
+    except Exception as e:
+        print(f"[CANDLES] Error: {e}")
+        return None
 
-        candle_from = int(
-            candle.get("from")
+    if not candles:
+        print("[CANDLES] API no devolvió datos.")
+        return None
+
+    valid = []
+
+    for candle in candles:
+        try:
+            timestamp = int(candle.get("from"))
+        except Exception:
+            continue
+
+        if m1_start <= timestamp < m1_end:
+            valid.append(candle)
+
+    try:
+        valid.sort(key=lambda x: int(x["from"]))
+    except Exception:
+        return None
+
+    if len(valid) != CANDLES_PER_M1:
+        print(
+            f"[M1] Velas encontradas: "
+            f"{len(valid)}/{CANDLES_PER_M1}"
+        )
+        return None
+
+    timestamps = []
+
+    for candle in valid:
+        try:
+            timestamps.append(int(candle["from"]))
+        except Exception:
+            return None
+
+    for i in range(1, len(timestamps)):
+        difference = timestamps[i] - timestamps[i - 1]
+
+        if difference != TIMEFRAME_5S:
+            print(
+                "[M1] SECUENCIA INVALIDA: "
+                f"diferencia={difference}s"
+            )
+            return None
+
+    return valid
+
+
+def print_m1_candles(candles):
+    print("\n--------------------------------------")
+    print("12 VELAS DE 5S")
+    print("--------------------------------------")
+
+    for index, candle in enumerate(candles, start=1):
+        try:
+            timestamp = int(candle["from"])
+            dt = datetime.fromtimestamp(timestamp)
+
+            open_price = float(candle["open"])
+            close_price = float(candle["close"])
+
+        except Exception:
+            print(f"{index:02d} | VELA INVALIDA")
+            continue
+
+        if close_price > open_price:
+            direction = "VERDE"
+            symbol = "🟢"
+        elif close_price < open_price:
+            direction = "ROJA"
+            symbol = "🔴"
+        else:
+            direction = "DOJI"
+            symbol = "⚪"
+
+        print(
+            f"{index:02d} | "
+            f"{dt.strftime('%H:%M:%S')} | "
+            f"{symbol} {direction} | "
+            f"O={open_price} | C={close_price}"
         )
 
-        candle_end = candle_from + TIMEFRAME
-
-        return now >= candle_end
-
-    except Exception:
-        return False
+    print("--------------------------------------")
 
 
-# ============================================================
-# EJECUCIÓN DE OPERACIÓN
-# ============================================================
+def analyze_strategy(candles):
+    try:
+        return strategy.check_pattern(candles)
+    except Exception as e:
+        print(f"[STRATEGY] Error: {e}")
+        return None
 
-def execute_trade(pair, signal):
-    """
-    Ejecuta la operación para N+1.
 
-    CALL -> call
-    PUT  -> put
+def get_full_analysis(candles):
+    try:
+        return strategy.get_strategy_analysis(candles)
+    except Exception as e:
+        print(f"[ANALYSIS] Error: {e}")
+        return None
 
-    EXPIRACIÓN = 1 minuto
-    IMPORTE = 30
-    """
 
-    if signal not in ("CALL", "PUT"):
-        return False, None
+def normalize_signal(signal):
+    if not isinstance(signal, str):
+        return None
 
-    if not ensure_connection():
-        return False, None
+    signal = signal.strip().lower()
 
-    action = (
-        "call"
-        if signal == "CALL"
-        else "put"
+    if signal in ("call", "put"):
+        return signal
+
+    return None
+
+
+def print_analysis(analysis):
+    if analysis is None:
+        return
+
+    print("\n========================================")
+    print("       ANALISIS MATEMATICO")
+    print("========================================")
+
+    dominant = analysis.get("dominant")
+
+    print(
+        f"Dominante              : "
+        f"{str(dominant).upper() if dominant else 'NINGUNO'}"
     )
 
+    print(
+        f"Fuerza verde           : "
+        f"{analysis.get('green_force', 0):.8f}"
+    )
+
+    print(
+        f"Fuerza roja            : "
+        f"{analysis.get('red_force', 0):.8f}"
+    )
+
+    print(
+        f"Ratio verde            : "
+        f"{analysis.get('green_ratio', 0):.4f}"
+    )
+
+    print(
+        f"Ratio rojo             : "
+        f"{analysis.get('red_ratio', 0):.4f}"
+    )
+
+    print(
+        f"Margen dominante       : "
+        f"{analysis.get('dominance_margin', 0):.4f}"
+    )
+
+    print(
+        f"Desplazamiento         : "
+        f"{analysis.get('displacement_ratio', 0):.4f}"
+    )
+
+    print(
+        f"Posicion cierre        : "
+        f"{analysis.get('close_position', 0.5):.4f}"
+    )
+
+    print(
+        f"Fuerza final dominante : "
+        f"{analysis.get('final_dominant_ratio', 0):.4f}"
+    )
+
+    print("----------------------------------------")
+
+    print(
+        f"Dominancia OK          : "
+        f"{analysis.get('dominance_ok', False)}"
+    )
+
+    print(
+        f"Desplazamiento OK      : "
+        f"{analysis.get('displacement_ok', False)}"
+    )
+
+    print(
+        f"Cierre OK              : "
+        f"{analysis.get('close_ok', False)}"
+    )
+
+    print(
+        f"Fuerza final OK        : "
+        f"{analysis.get('final_strength_ok', False)}"
+    )
+
+    print("----------------------------------------")
+
+    print(
+        f"MARKET OK              : "
+        f"{analysis.get('market_ok', False)}"
+    )
+
+    print(
+        f"MOTIVO                 : "
+        f"{analysis.get('reason', 'DESCONOCIDO')}"
+    )
+
+    print("========================================")
+
+
+def execute_trade(iq, signal):
+    signal = normalize_signal(signal)
+
+    if signal not in ("call", "put"):
+        print("[TRADE] Sin señal válida.")
+        return False, None
+
+    print("\n======================================")
+    print("SEÑAL CONFIRMADA")
+    print("======================================")
+    print(f"Dirección  : {signal.upper()}")
+    print(f"Activo     : {PAIR}")
+    print(f"Monto      : {AMOUNT}")
+    print(f"Expiración : {EXPIRATION}M")
+    print("======================================")
+
     try:
-
-        print(
-            f"[{pair}] EJECUTANDO {signal} "
-            f"N+1 | IMPORTE={AMOUNT} | "
-            f"EXPIRACION={EXPIRATION}M"
-        )
-
-        check, order_id = iq.buy(
+        success, order_id = iq.buy(
             AMOUNT,
-            action,
-            pair,
+            PAIR,
+            signal,
             EXPIRATION,
         )
 
-        if check:
-
+        if success:
             print(
-                f"[{pair}] OPERACIÓN EJECUTADA "
-                f"ID={order_id}"
+                f"✓ OPERACIÓN ABIERTA ID={order_id}"
             )
 
             send_telegram(
-                f"🎯 ENTRADA N+1\n"
-                f"{pair} → {signal}\n"
-                f"💰 Importe: {AMOUNT}\n"
-                f"⏱ Expiración: {EXPIRATION} minuto"
+                "📊 OPERACIÓN ABIERTA\n\n"
+                f"Activo: {PAIR}\n"
+                f"Dirección: {signal.upper()}\n"
+                f"Monto: {AMOUNT}\n"
+                f"Expiración: {EXPIRATION}M"
             )
 
             return True, order_id
 
-        print(
-            f"[{pair}] ERROR AL EJECUTAR: "
-            f"{order_id}"
-        )
-
-        return False, order_id
+        print("✗ IQ Option rechazó la operación.")
+        return False, None
 
     except Exception as e:
-
-        print(
-            f"[{pair}] Excepción ejecutando: {e}"
-        )
-
+        print(f"✗ Error ejecutando operación: {e}")
         return False, None
 
 
-# ============================================================
-# PROCESAR UNA VELA M1
-# ============================================================
+def get_trade_result(iq, order_id):
+    if not order_id:
+        return None
 
-def process_closed_candle(
-    pair,
-    closed_candle,
-    previous_candle,
-):
-    """
-    Procesa una única vela M1 ya cerrada.
+    wait_seconds = EXPIRATION * 60 + 5
 
-    AQUÍ ESTÁ LA REGLA CRÍTICA:
-
-        N CIERRA
-           ↓
-        ANALIZAR N
-           ↓
-        SEÑAL PARA N+1
-           ↓
-        EJECUTAR N+1
-
-    Nunca procesa una vela antes de cerrar.
-    """
-
-    if not candle_is_closed(closed_candle):
-
-        print(
-            f"[{pair}] Vela todavía no cerrada."
-        )
-
-        return
-
-    candle_id = int(
-        closed_candle.get("from")
-    )
-
-    # --------------------------------------------------------
-    # Evitar analizar nuevamente la misma vela.
-    # --------------------------------------------------------
-    if last_processed_candle.get(pair) == candle_id:
-
-        return
-
-    # --------------------------------------------------------
-    # MARCAR COMO PROCESADA ANTES DEL ANÁLISIS.
-    # --------------------------------------------------------
-    last_processed_candle[pair] = candle_id
-
-    print()
-    print("=" * 60)
     print(
-        f"[{pair}] VELA M1 CERRADA"
+        f"\nEsperando resultado ({wait_seconds}s)..."
     )
-    print(
-        f"[{pair}] N = {candle_id}"
-    )
-    print(
-        f"[{pair}] AHORA SE ANALIZA N "
-        f"PARA DECIDIR N+1"
-    )
-    print("=" * 60)
 
-    # ========================================================
-    # ANÁLISIS
-    # ========================================================
+    time.sleep(wait_seconds)
 
     try:
+        result = iq.check_win_v4(order_id)
 
-        result = build_n1_signal(
-            closed_candle,
-            previous_candle,
-        )
+        if result is not None:
+            return float(result)
 
     except Exception as e:
+        print(f"[RESULTADO] Error: {e}")
 
-        print(
-            f"[{pair}] ERROR EN STRATEGY: {e}"
-        )
+    return None
 
+
+def print_result(result):
+    if result is None:
+        print("\n⚠ RESULTADO NO DISPONIBLE")
         return
 
-    # ========================================================
-    # MOSTRAR TODAS LAS CONFIRMACIONES
-    # ========================================================
-
-    print(
-        format_analysis(result)
-    )
-
-    signal = result.get(
-        "signal_n1"
-    )
-
-    # ========================================================
-    # SIN SEÑAL = NO OPERAR
-    # ========================================================
-
-    if signal not in ("CALL", "PUT"):
-
-        print(
-            f"[{pair}] ⚪ SIN SEÑAL "
-            f"VALIDA PARA N+1"
-        )
-
+    if result > 0:
+        print("\n🟢 WIN")
+        print(f"Resultado: +{result}")
         send_telegram(
-            f"⚪ {pair}\n"
-            f"Sin señal válida para N+1.\n"
-            f"No se ejecuta operación."
+            "🟢 WIN\n"
+            f"Resultado: +{result}"
         )
 
-        return
-
-    # ========================================================
-    # IDENTIFICADOR DE N+1
-    # ========================================================
-
-    next_candle_id = candle_id + TIMEFRAME
-
-    # --------------------------------------------------------
-    # Evitar doble operación sobre la misma N+1.
-    # --------------------------------------------------------
-    if last_trade_candle.get(pair) == next_candle_id:
-
-        print(
-            f"[{pair}] N+1 ya fue operada."
-        )
-
-        return
-
-    # ========================================================
-    # SEÑAL CONFIRMADA
-    # ========================================================
-
-    print()
-    print("=" * 60)
-    print(
-        f"🎯 SEÑAL CONFIRMADA PARA N+1"
-    )
-    print(
-        f"{pair} → {signal}"
-    )
-    print(
-        f"N cerrada     : {candle_id}"
-    )
-    print(
-        f"N+1 apertura  : {next_candle_id}"
-    )
-    print("=" * 60)
-
-    send_telegram(
-        f"🎯 SEÑAL CONFIRMADA N+1\n"
-        f"{pair} → {signal}\n"
-        f"N cerrada correctamente."
-    )
-
-    # ========================================================
-    # ESPERAR LA APERTURA EXACTA DE N+1
-    # ========================================================
-    #
-    # La decisión ya está tomada.
-    #
-    # No volvemos a analizar el precio.
-    # No cambiamos CALL por PUT.
-    # No miramos la vela N+1.
-    #
-    # Solo esperamos hasta el comienzo de N+1.
-    # ========================================================
-
-    wait_until = next_candle_id
-
-    print(
-        f"[{pair}] Esperando apertura de N+1..."
-    )
-
-    while True:
-
-        now = get_server_time()
-
-        remaining = wait_until - now
-
-        if remaining <= 0:
-            break
-
-        # ----------------------------------------------------
-        # Espera corta para intentar ejecutar lo más cerca
-        # posible de la apertura.
-        # ----------------------------------------------------
-        if remaining > 0.20:
-            time.sleep(
-                min(
-                    remaining - 0.10,
-                    0.10,
-                )
-            )
-        else:
-            time.sleep(0.01)
-
-    # ========================================================
-    # APERTURA N+1
-    # ========================================================
-
-    print(
-        f"[{pair}] 🚀 APERTURA N+1"
-    )
-
-    print(
-        f"[{pair}] Ejecutando "
-        f"{signal}..."
-    )
-
-    success, order_id = execute_trade(
-        pair,
-        signal,
-    )
-
-    if success:
-
-        last_trade_candle[pair] = (
-            next_candle_id
-        )
-
-        print(
-            f"[{pair}] ✅ OPERACIÓN "
-            f"ENVIADA EN N+1"
+    elif result < 0:
+        print("\n🔴 LOSS")
+        print(f"Resultado: {result}")
+        send_telegram(
+            "🔴 LOSS\n"
+            f"Resultado: {result}"
         )
 
     else:
-
-        print(
-            f"[{pair}] ❌ NO SE PUDO "
-            f"EJECUTAR LA OPERACIÓN"
+        print("\n⚪ EMPATE")
+        print(f"Resultado: {result}")
+        send_telegram(
+            "⚪ EMPATE\n"
+            f"Resultado: {result}"
         )
 
-
-# ============================================================
-# LOOP PRINCIPAL
-# ============================================================
 
 def main():
+    print("\n")
+    print("==========================================")
+    print("             BOT IQ OPTION")
+    print("        M1 + 12 VELAS DE 5S")
+    print("==========================================")
+    print(f"ACTIVO       : {PAIR}")
+    print(f"MONTO        : {AMOUNT}")
+    print(f"EXPIRACIÓN   : {EXPIRATION}M")
+    print(f"MICROVELAS   : {CANDLES_PER_M1}")
+    print("ESTRATEGIA   : strategy.py")
+    print("==========================================")
 
-    print()
-    print("=" * 60)
-    print("        IQ OPTION M1 SNIPER BOT")
-    print("=" * 60)
-    print()
-    print("Pares OTC:")
-    print(" - EURUSD-OTC")
-    print(" - EURJPY-OTC")
-    print(" - EURGBP-OTC")
-    print(" - GBPUSD-OTC")
-    print()
-    print("Importe     :", AMOUNT)
-    print("Expiración  :", EXPIRATION, "minuto")
-    print("Timeframe   :", "M1")
-    print()
-    print(
-        "REGLA: ANALIZAR SOLO AL CIERRE DE M1"
-    )
-    print(
-        "ENTRADA: APERTURA DE N+1"
-    )
-    print("=" * 60)
-    print()
+    verify_strategy()
 
-    # ========================================================
-    # CONECTAR
-    # ========================================================
+    iq = connect_iq()
 
-    while not connect_iq():
-
-        print(
-            "[IQ] Reintentando conexión "
-            "en 5 segundos..."
-        )
-
-        time.sleep(5)
-
-    # ========================================================
-    # LOOP
-    # ========================================================
+    last_processed_m1 = None
+    operation_in_progress = False
 
     while True:
-
         try:
-
-            if not ensure_connection():
-
-                time.sleep(2)
+            if not ensure_connection(iq):
+                time.sleep(5)
+                iq = connect_iq()
                 continue
 
-            # ------------------------------------------------
-            # Procesar todos los pares.
-            # ------------------------------------------------
+            m1_start = wait_for_new_m1(
+                last_processed_m1
+            )
 
-            for pair in PAIRS:
+            if last_processed_m1 == m1_start:
+                time.sleep(0.2)
+                continue
 
-                try:
+            print("\n")
+            print("======================================")
+            print("M1 CERRADA")
+            print(
+                datetime.fromtimestamp(
+                    m1_start
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            )
+            print("======================================")
 
-                    current_closed, previous_closed = (
-                        get_closed_m1_candles(pair)
+            candles = None
+
+            for attempt in range(5):
+                candles = get_m1_5s_candles(
+                    iq,
+                    m1_start
+                )
+
+                if candles is not None:
+                    break
+
+                print(
+                    f"[M1] Esperando datos... "
+                    f"intento {attempt + 1}/5"
+                )
+
+                time.sleep(1)
+
+            last_processed_m1 = m1_start
+
+            if candles is None:
+                print("\n⚠ M1 DESCARTADA")
+                print(
+                    "No se obtuvieron exactamente "
+                    "12 velas cerradas de 5s."
+                )
+
+                send_telegram(
+                    "⚠ M1 DESCARTADA\n"
+                    "Datos 5s incompletos."
+                )
+
+                continue
+
+            print_m1_candles(candles)
+
+            print(
+                "\nAnalizando las 12 velas..."
+            )
+
+            analysis = get_full_analysis(candles)
+            print_analysis(analysis)
+
+            signal = normalize_signal(
+                analyze_strategy(candles)
+            )
+
+            print("\n--------------------------------------")
+            print("RESULTADO DE STRATEGY.PY")
+            print("--------------------------------------")
+
+            if signal == "call":
+                print("🟢 DIRECCIÓN: CALL")
+            elif signal == "put":
+                print("🔴 DIRECCIÓN: PUT")
+            else:
+                print("⚪ SIN OPERACIÓN")
+
+            print("--------------------------------------")
+
+            if signal is None:
+                reason = "CONDICIONES_NO_CUMPLIDAS"
+
+                if analysis is not None:
+                    reason = analysis.get(
+                        "reason",
+                        reason
                     )
 
-                    if (
-                        current_closed is None
-                        or previous_closed is None
-                    ):
-                        continue
+                print(
+                    f"M1 descartada: {reason}"
+                )
 
-                    process_closed_candle(
-                        pair,
-                        current_closed,
-                        previous_closed,
-                    )
+                send_telegram(
+                    "⚪ SIN OPERACIÓN\n"
+                    f"Activo: {PAIR}\n"
+                    f"Motivo: {reason}"
+                )
 
-                except Exception as e:
+                continue
 
-                    print(
-                        f"[{pair}] ERROR "
-                        f"PROCESANDO PAR: {e}"
-                    )
+            if operation_in_progress:
+                print(
+                    "⚠ Ya existe una operación en progreso."
+                )
+                continue
 
-            # ------------------------------------------------
-            # Pequeña espera para no saturar API.
-            # ------------------------------------------------
+            success, order_id = execute_trade(
+                iq,
+                signal
+            )
 
-            time.sleep(0.15)
+            if not success:
+                continue
+
+            operation_in_progress = True
+
+            result = get_trade_result(
+                iq,
+                order_id
+            )
+
+            print_result(result)
+
+            operation_in_progress = False
 
         except KeyboardInterrupt:
-
-            print()
             print(
-                "[BOT] Detenido manualmente."
+                "\n\nBOT DETENIDO POR EL USUARIO."
+            )
+
+            send_telegram(
+                "🛑 BOT DETENIDO"
             )
 
             break
 
         except Exception as e:
+            print("\n======================================")
+            print("ERROR GENERAL")
+            print("======================================")
+            print(str(e))
+            print("======================================")
 
-            print(
-                f"[BOT] Error general: {e}"
+            send_telegram(
+                "⚠ ERROR EN BOT\n"
+                f"{str(e)}"
             )
 
-            time.sleep(2)
+            time.sleep(3)
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
     main()
