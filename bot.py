@@ -7,8 +7,8 @@ from iqoptionapi.stable_api import IQ_Option
 import strategy
 
 
-PAIR = "EURUSD-OTC"
-AMOUNT = 555
+PAIR = [ "EURUSD-OTC", "GBPUSD-OTC" ]
+AMOUNT = 2500
 EXPIRATION = 1
 
 TIMEFRAME_5S = 5
