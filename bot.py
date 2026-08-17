@@ -7,7 +7,7 @@ from iqoptionapi.stable_api import IQ_Option
 import strategy
 
 
-FOREX_PAIRS = [
+PAIRS = [
     "EURUSD",
     "AUDCHF",
     "AUDUSD",
