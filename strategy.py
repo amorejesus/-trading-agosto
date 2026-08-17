@@ -1,626 +1,512 @@
-import time
-
-
+# strategy.py
 # ============================================================
-# CONFIGURACIÓN
+# ESTRATEGIA M1 - DECISIÓN ÚNICAMENTE AL CIERRE DE LA VELA
+# ============================================================
+#
+# REGLA PRINCIPAL:
+#   La vela N se analiza durante su formación, pero NO se
+#   decide CALL/PUT antes de que N termine.
+#
+#   Cuando N cierra exactamente en :00:
+#       1. Se toman OHLC definitivos de N.
+#       2. Se calculan todas las características.
+#       3. Se determina la dirección.
+#       4. Se genera la señal para N+1.
+#
+#   N+1 NO participa en el análisis de su propia señal.
+#
+# NO USA:
+#   - Velas de 5 segundos
+#   - Primeras 6 velas de 5s
+#   - Conteo de 12 velas de 5s
+#   - Datos parciales para decidir CALL/PUT
+#   - Señales al segundo 20
+#   - Señales al segundo 30
+#   - Señales antes del cierre de M1
+#
 # ============================================================
 
-# La estrategia trabaja ÚNICAMENTE con velas M1.
-TIMEFRAME_SECONDS = 60
 
-# Tolerancias de clasificación de la vela.
-DOJI_BODY_RATIO = 0.10
-INDECISION_BODY_RATIO = 0.25
-FORCE_BODY_RATIO = 0.60
-
-CLOSE_EXTREME = 0.75
-LONG_WICK_RATIO = 0.30
-
-
-# ============================================================
-# UTILIDADES
-# ============================================================
-
-def _to_float(value, default=None):
+def _num(value, default=0.0):
+    """Convierte un valor a float de forma segura."""
     try:
         return float(value)
     except (TypeError, ValueError):
-        return default
+        return float(default)
 
 
-def _to_timestamp(candle):
+def _get_ohlc(candle):
+    """
+    Obtiene OHLC de una vela IQ Option.
+
+    Acepta:
+        open, close, high, low
+
+    Devuelve:
+        open_, high, low, close
+    """
     if not isinstance(candle, dict):
-        return None
+        raise ValueError("La vela debe ser un diccionario.")
 
-    for key in ("from", "timestamp", "time"):
-        value = candle.get(key)
+    open_ = _num(candle.get("open"))
+    high = _num(candle.get("max", candle.get("high")))
+    low = _num(candle.get("min", candle.get("low")))
+    close = _num(candle.get("close"))
 
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            continue
-
-    return None
+    return open_, high, low, close
 
 
-def _normalize_candle(candle):
-    if not isinstance(candle, dict):
-        return None
+def get_candle_color(candle):
+    """
+    Color de la vela M1 ya cerrada.
 
-    opening = _to_float(candle.get("open"))
-    high = _to_float(candle.get("max", candle.get("high")))
-    low = _to_float(candle.get("min", candle.get("low")))
-    closing = _to_float(candle.get("close"))
+    verde = cierre > apertura
+    rojo  = cierre < apertura
+    doji  = cierre == apertura
+    """
+    open_, _, _, close = _get_ohlc(candle)
 
-    if None in (opening, high, low, closing):
-        return None
+    if close > open_:
+        return "verde"
 
-    if high < low:
-        return None
+    if close < open_:
+        return "rojo"
 
-    if high < max(opening, closing):
-        return None
+    return "doji"
 
-    if low > min(opening, closing):
-        return None
+
+def calculate_candle_metrics(candle):
+    """
+    Calcula TODAS las características de una vela M1 cerrada.
+
+    Esta función no genera ninguna entrada.
+    Solamente analiza la vela.
+    """
+    open_, high, low, close = _get_ohlc(candle)
+
+    rango = max(high - low, 0.0)
+    cuerpo = abs(close - open_)
+
+    if rango > 0:
+        ratio_cuerpo = cuerpo / rango
+        posicion_cierre = (close - low) / rango
+    else:
+        ratio_cuerpo = 0.0
+        posicion_cierre = 0.5
+
+    mecha_superior = max(high - max(open_, close), 0.0)
+    mecha_inferior = max(min(open_, close) - low, 0.0)
+
+    if rango > 0:
+        ratio_mecha_superior = mecha_superior / rango
+        ratio_mecha_inferior = mecha_inferior / rango
+    else:
+        ratio_mecha_superior = 0.0
+        ratio_mecha_inferior = 0.0
+
+    if close > open_:
+        direccion = "BULLISH"
+    elif close < open_:
+        direccion = "BEARISH"
+    else:
+        direccion = "NEUTRAL"
 
     return {
-        "from": _to_timestamp(candle),
-        "open": opening,
+        "open": open_,
         "high": high,
         "low": low,
-        "close": closing,
+        "close": close,
+
+        "rango": rango,
+        "cuerpo": cuerpo,
+        "ratio_cuerpo": ratio_cuerpo,
+
+        "mecha_superior": mecha_superior,
+        "mecha_inferior": mecha_inferior,
+
+        "ratio_mecha_superior": ratio_mecha_superior,
+        "ratio_mecha_inferior": ratio_mecha_inferior,
+
+        "posicion_cierre": posicion_cierre,
+
+        "direccion": direccion,
+        "color": get_candle_color(candle),
     }
 
 
-def _is_closed(candle, now=None):
+def classify_candle(candle):
     """
-    Una vela M1 está cerrada únicamente cuando ha terminado
-    completamente su intervalo de 60 segundos.
+    Clasificación estructural de la vela M1.
+
+    Prioridad:
+        DOJI
+        FUERZA
+        DEBILIDAD
+        INDECISION
+
+    La clasificación se hace únicamente sobre la vela
+    COMPLETAMENTE CERRADA.
     """
+    data = calculate_candle_metrics(candle)
 
-    timestamp = _to_timestamp(candle)
+    rango = data["rango"]
+    ratio_cuerpo = data["ratio_cuerpo"]
+    posicion = data["posicion_cierre"]
 
-    if timestamp is None:
-        return False
+    if rango <= 0:
+        data["estado"] = "DOJI"
+        return data
 
-    if now is None:
-        now = time.time()
-
-    return now >= timestamp + TIMEFRAME_SECONDS
-
-
-def _direction_from_values(opening, closing):
-    if closing > opening:
-        return "bullish"
-
-    if closing < opening:
-        return "bearish"
-
-    return "neutral"
-
-
-def _signal_from_direction(direction):
-    if direction == "bullish":
-        return "call"
-
-    if direction == "bearish":
-        return "put"
-
-    return None
-
-
-# ============================================================
-# DIRECCIÓN M1
-# ============================================================
-
-def get_m1_direction(candle):
-    """
-    Devuelve la dirección de una vela M1.
-
-    bullish  = cierre > apertura
-    bearish  = cierre < apertura
-    neutral  = apertura == cierre
-    """
-
-    normalized = _normalize_candle(candle)
-
-    if normalized is None:
-        return None
-
-    return _direction_from_values(
-        normalized["open"],
-        normalized["close"],
-    )
-
-
-# ============================================================
-# ANÁLISIS DE LA VELA
-# ============================================================
-
-def _analyze_candle(candle, previous_candle=None):
-    current = _normalize_candle(candle)
-
-    if current is None:
-        return None
-
-    opening = current["open"]
-    high = current["high"]
-    low = current["low"]
-    closing = current["close"]
-
-    candle_range = high - low
-    body = abs(closing - opening)
-
-    if candle_range <= 0:
-        return {
-            "direction": "neutral",
-            "body": 0.0,
-            "range": 0.0,
-            "body_ratio": 0.0,
-            "upper_wick": 0.0,
-            "lower_wick": 0.0,
-            "close_position": 0.5,
-            "state": "DOJI",
-            "signal": None,
-            "reason": "RANGO CERO",
-        }
-
-    body_ratio = body / candle_range
-
-    upper_wick = high - max(opening, closing)
-    lower_wick = min(opening, closing) - low
-
-    close_position = (closing - low) / candle_range
-
-    direction = _direction_from_values(
-        opening,
-        closing,
-    )
-
-    upper_wick_ratio = upper_wick / candle_range
-    lower_wick_ratio = lower_wick / candle_range
-
-    # ========================================================
+    # --------------------------------------------------------
     # DOJI
-    # ========================================================
+    # --------------------------------------------------------
+    if ratio_cuerpo <= 0.10:
+        data["estado"] = "DOJI"
+        return data
 
-    if body_ratio <= DOJI_BODY_RATIO:
-        return {
-            "direction": direction,
-            "body": body,
-            "range": candle_range,
-            "body_ratio": body_ratio,
-            "upper_wick": upper_wick,
-            "lower_wick": lower_wick,
-            "close_position": close_position,
-            "state": "DOJI",
-            "signal": None,
-            "reason": "DOJI / INDECISION EXTREMA",
-        }
-
-    # ========================================================
-    # INDECISIÓN
-    # ========================================================
-
-    if body_ratio <= INDECISION_BODY_RATIO:
-        return {
-            "direction": direction,
-            "body": body,
-            "range": candle_range,
-            "body_ratio": body_ratio,
-            "upper_wick": upper_wick,
-            "lower_wick": lower_wick,
-            "close_position": close_position,
-            "state": "INDECISION",
-            "signal": None,
-            "reason": "CUERPO PEQUEÑO / INDECISIÓN",
-        }
-
-    # ========================================================
-    # REVERSIÓN
-    # ========================================================
-
-    previous = _normalize_candle(previous_candle)
-
-    if previous is not None:
-        previous_direction = _direction_from_values(
-            previous["open"],
-            previous["close"],
-        )
-
-        if (
-            previous_direction == "bearish"
-            and direction == "bullish"
-            and close_position >= CLOSE_EXTREME
-            and body_ratio >= 0.35
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "REVERSAL",
-                "signal": "call",
-                "reason": "REVERSIÓN ALCISTA",
-            }
-
-        if (
-            previous_direction == "bullish"
-            and direction == "bearish"
-            and close_position <= (1.0 - CLOSE_EXTREME)
-            and body_ratio >= 0.35
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "REVERSAL",
-                "signal": "put",
-                "reason": "REVERSIÓN BAJISTA",
-            }
-
-    # ========================================================
+    # --------------------------------------------------------
     # FUERZA
-    # ========================================================
+    # Cuerpo grande y cierre cerca del extremo.
+    # --------------------------------------------------------
+    cierre_alto = posicion >= 0.75
+    cierre_bajo = posicion <= 0.25
 
-    if body_ratio >= FORCE_BODY_RATIO:
+    if ratio_cuerpo >= 0.70 and (cierre_alto or cierre_bajo):
+        data["estado"] = "FUERZA"
+        return data
 
-        if direction == "bullish" and close_position >= CLOSE_EXTREME:
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "FUERZA",
-                "signal": "call",
-                "reason": "CUERPO ALCISTA FUERTE",
-            }
-
-        if direction == "bearish" and close_position <= (1.0 - CLOSE_EXTREME):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "FUERZA",
-                "signal": "put",
-                "reason": "CUERPO BAJISTA FUERTE",
-            }
-
-    # ========================================================
-    # CONTINUIDAD
-    # ========================================================
-
-    if previous is not None:
-        previous_direction = _direction_from_values(
-            previous["open"],
-            previous["close"],
-        )
-
-        if (
-            direction == "bullish"
-            and previous_direction == "bullish"
-            and body_ratio >= 0.35
-            and close_position >= 0.60
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "CONTINUITY",
-                "signal": "call",
-                "reason": "CONTINUIDAD ALCISTA",
-            }
-
-        if (
-            direction == "bearish"
-            and previous_direction == "bearish"
-            and body_ratio >= 0.35
-            and close_position <= 0.40
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "CONTINUITY",
-                "signal": "put",
-                "reason": "CONTINUIDAD BAJISTA",
-            }
-
-    # ========================================================
+    # --------------------------------------------------------
     # DEBILIDAD
-    # ========================================================
+    # Cuerpo relativamente pequeño con mechas importantes.
+    # --------------------------------------------------------
+    mechas = (
+        data["ratio_mecha_superior"]
+        + data["ratio_mecha_inferior"]
+    )
 
-    if direction == "bullish":
+    if ratio_cuerpo <= 0.40 and mechas >= 0.45:
+        data["estado"] = "DEBILIDAD"
+        return data
 
-        if (
-            upper_wick_ratio >= LONG_WICK_RATIO
-            and upper_wick > lower_wick
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "WEAKNESS",
-                "signal": "call",
-                "reason": "IMPULSO ALCISTA CON DEBILIDAD",
-            }
+    # --------------------------------------------------------
+    # INDECISIÓN
+    # --------------------------------------------------------
+    if ratio_cuerpo <= 0.30:
+        data["estado"] = "INDECISION"
+        return data
 
-    if direction == "bearish":
+    # --------------------------------------------------------
+    # Continuidad/reversión se determinan posteriormente
+    # comparando con la vela anterior.
+    # --------------------------------------------------------
+    data["estado"] = "NEUTRAL"
 
-        if (
-            lower_wick_ratio >= LONG_WICK_RATIO
-            and lower_wick > upper_wick
-        ):
-            return {
-                "direction": direction,
-                "body": body,
-                "range": candle_range,
-                "body_ratio": body_ratio,
-                "upper_wick": upper_wick,
-                "lower_wick": lower_wick,
-                "close_position": close_position,
-                "state": "WEAKNESS",
-                "signal": "put",
-                "reason": "IMPULSO BAJISTA CON DEBILIDAD",
-            }
+    return data
 
-    # ========================================================
-    # DEBILIDAD / ESTADO NORMAL
-    # ========================================================
 
-    if direction == "bullish":
-        signal = "call"
-        reason = "CIERRE ALCISTA"
+def analyze_continuity_reversal(current, previous):
+    """
+    Determina CONTINUIDAD o REVERSIÓN usando únicamente
+    velas M1 cerradas.
 
-    elif direction == "bearish":
-        signal = "put"
-        reason = "CIERRE BAJISTA"
+    current  = vela N cerrada
+    previous = vela M1 anterior ya cerrada
 
+    No utiliza datos de N+1.
+    """
+    if previous is None:
+        return {
+            "continuidad": False,
+            "reversion": False,
+            "estructura": None,
+        }
+
+    current_data = calculate_candle_metrics(current)
+    previous_data = calculate_candle_metrics(previous)
+
+    current_direction = current_data["direccion"]
+    previous_direction = previous_data["direccion"]
+
+    continuidad = (
+        current_direction != "NEUTRAL"
+        and previous_direction != "NEUTRAL"
+        and current_direction == previous_direction
+    )
+
+    reversion = (
+        current_direction != "NEUTRAL"
+        and previous_direction != "NEUTRAL"
+        and current_direction != previous_direction
+    )
+
+    if continuidad:
+        estructura = "CONTINUIDAD"
+    elif reversion:
+        estructura = "REVERSIÓN"
     else:
-        signal = None
-        reason = "SIN DIRECCIÓN"
+        estructura = None
 
     return {
-        "direction": direction,
-        "body": body,
-        "range": candle_range,
-        "body_ratio": body_ratio,
-        "upper_wick": upper_wick,
-        "lower_wick": lower_wick,
-        "close_position": close_position,
-        "state": "WEAKNESS",
-        "signal": signal,
-        "reason": reason,
+        "continuidad": continuidad,
+        "reversion": reversion,
+        "estructura": estructura,
     }
 
 
-# ============================================================
-# OBTENER ÚLTIMA VELA M1 CERRADA
-# ============================================================
+def analyze_m1(candle, previous_candle=None):
+    """
+    ANÁLISIS COMPLETO DE UNA VELA M1 CERRADA.
 
-def _get_last_closed_candle(candles):
-    if not isinstance(candles, (list, tuple)):
-        return None, None
+    IMPORTANTE:
+    Esta función debe recibir la vela N cuando ya terminó.
 
-    normalized = []
+    Devuelve:
+        - fuerza
+        - continuidad
+        - reversión
+        - indecisión
+        - debilidad
+        - doji
+        - dirección
+        - cuerpo
+        - mechas
+        - posición del cierre
+        - estructura
+    """
+    data = classify_candle(candle)
 
-    for candle in candles:
-        item = _normalize_candle(candle)
-
-        if item is None:
-            continue
-
-        normalized.append(item)
-
-    if not normalized:
-        return None, None
-
-    normalized.sort(
-        key=lambda x: (
-            x["from"]
-            if x["from"] is not None
-            else 0
-        )
+    structure = analyze_continuity_reversal(
+        candle,
+        previous_candle
     )
 
-    now = time.time()
+    estado = data["estado"]
 
-    closed = [
-        candle
-        for candle in normalized
-        if _is_closed(candle, now)
-    ]
+    # --------------------------------------------------------
+    # Flags independientes.
+    # --------------------------------------------------------
+    fuerza = estado == "FUERZA"
+    debilidad = estado == "DEBILIDAD"
+    indecision = estado == "INDECISION"
+    doji = estado == "DOJI"
 
-    if not closed:
-        return None, None
+    continuidad = structure["continuidad"]
+    reversion = structure["reversion"]
 
-    current = closed[-1]
+    # --------------------------------------------------------
+    # Para continuidad/reversión, la estructura tiene prioridad
+    # únicamente cuando existe comparación válida.
+    # --------------------------------------------------------
+    if continuidad:
+        estado_final = "CONTINUIDAD"
+    elif reversion:
+        estado_final = "REVERSIÓN"
+    else:
+        estado_final = estado
 
-    previous = None
+    data.update({
+        "fuerza": fuerza,
+        "continuidad": continuidad,
+        "reversion": reversion,
+        "indecision": indecision,
+        "debilidad": debilidad,
+        "doji": doji,
 
-    if len(closed) >= 2:
-        previous = closed[-2]
+        "estructura": structure["estructura"],
+        "estado_final": estado_final,
+    })
 
-    return current, previous
+    return data
 
 
-# ============================================================
-# ANÁLISIS COMPLETO
-# ============================================================
-
-def get_strategy_analysis(candles):
+def determine_direction(analysis):
     """
-    Analiza exclusivamente la última vela M1 COMPLETAMENTE CERRADA.
+    Determina la dirección BASE de la vela M1 ya cerrada.
 
-    La vela M1 actualmente abierta nunca se utiliza para
-    generar una señal definitiva.
-    """
+    Nunca mira N+1.
 
-    current, previous = _get_last_closed_candle(candles)
-
-    if current is None:
-        return {
-            "valid": False,
-            "closed": False,
-            "signal": None,
-            "state": None,
-            "direction": None,
-            "reason": "NO EXISTE VELA M1 CERRADA",
-            "body": 0.0,
-            "body_ratio": 0.0,
-            "upper_wick": 0.0,
-            "lower_wick": 0.0,
-            "close_position": 0.0,
-            "last_5s_close": None,
-            "range_ok": False,
-        }
-
-    analysis = _analyze_candle(
-        current,
-        previous,
-    )
-
-    if analysis is None:
-        return {
-            "valid": False,
-            "closed": True,
-            "signal": None,
-            "state": None,
-            "direction": None,
-            "reason": "VELA M1 INVALIDA",
-            "body": 0.0,
-            "body_ratio": 0.0,
-            "upper_wick": 0.0,
-            "lower_wick": 0.0,
-            "close_position": 0.0,
-            "last_5s_close": None,
-            "range_ok": False,
-        }
-
-    return {
-        "valid": True,
-        "closed": True,
-
-        "signal": analysis["signal"],
-
-        "state": analysis["state"],
-        "direction": analysis["direction"],
-
-        "body": analysis["body"],
-        "range": analysis["range"],
-        "body_ratio": analysis["body_ratio"],
-
-        "upper_wick": analysis["upper_wick"],
-        "lower_wick": analysis["lower_wick"],
-
-        "close_position": analysis["close_position"],
-
-        "last_5s_close": current["close"],
-
-        "range_ok": analysis["range"] > 0,
-
-        "reason": analysis["reason"],
-
-        "open": current["open"],
-        "high": current["high"],
-        "low": current["low"],
-        "close": current["close"],
-
-        "timestamp": current["from"],
-    }
-
-
-# ============================================================
-# SEÑAL PRINCIPAL
-# ============================================================
-
-def check_pattern(candles):
-    """
-    Devuelve únicamente:
-
-        call
-        put
+    Resultado:
+        CALL
+        PUT
         None
-
-    La decisión se toma SOLO después del cierre de la M1.
     """
-
-    analysis = get_strategy_analysis(candles)
-
-    if not analysis.get("valid"):
+    if not analysis:
         return None
 
-    if not analysis.get("closed"):
-        return None
+    direccion = analysis.get("direccion")
 
-    signal = analysis.get("signal")
+    if direccion == "BULLISH":
+        return "CALL"
 
-    if signal == "call":
-        return "call"
-
-    if signal == "put":
-        return "put"
+    if direccion == "BEARISH":
+        return "PUT"
 
     return None
 
 
-# ============================================================
-# FUNCIÓN DE COMPATIBILIDAD
-# ============================================================
-
-def analyze_m1(candles):
+def determine_signal(analysis):
     """
-    Alias para poder consultar directamente el análisis M1.
+    Determina CALL/PUT exclusivamente después del cierre
+    de la vela analizada.
+
+    No devuelve señal para un DOJI/NEUTRAL.
+
+    No inventa una dirección.
     """
+    if not analysis:
+        return None
 
-    return get_strategy_analysis(candles)
+    # --------------------------------------------------------
+    # DOJI / indecisión sin dirección clara:
+    # NO ENTRAR.
+    # --------------------------------------------------------
+    if analysis.get("doji"):
+        return None
+
+    if analysis.get("indecision") and (
+        analysis.get("direccion") == "NEUTRAL"
+    ):
+        return None
+
+    return determine_direction(analysis)
 
 
-# ============================================================
-# VALIDACIÓN
-# ============================================================
+def build_n1_signal(current_candle, previous_candle=None):
+    """
+    FUNCIÓN PRINCIPAL DE LA ESTRATEGIA.
 
-def validate_strategy():
-    required = (
-        "check_pattern",
-        "get_m1_direction",
-        "get_strategy_analysis",
+    current_candle:
+        Es la vela N COMPLETAMENTE CERRADA.
+
+    previous_candle:
+        Es N-1, también cerrada.
+
+    Devuelve la señal que corresponde a N+1.
+
+    IMPORTANTE:
+        La señal NO significa ejecutar ahora.
+        Significa:
+
+            N cerró
+            ↓
+            analizar N
+            ↓
+            decidir CALL/PUT
+            ↓
+            ejecutar en apertura de N+1
+    """
+    analysis = analyze_m1(
+        current_candle,
+        previous_candle
     )
 
-    for name in required:
-        if not callable(globals().get(name)):
-            raise RuntimeError(
-                f"Falta la función requerida: {name}"
-            )
+    signal = determine_signal(analysis)
 
-    return True
+    analysis["signal_n1"] = signal
+    analysis["target_candle"] = "N+1"
+
+    return analysis
 
 
-validate_strategy()
+def check_pattern(candle, previous_candle=None):
+    """
+    Alias de compatibilidad con bot.py.
+
+    IMPORTANTE:
+    No analiza velas de 5 segundos.
+    No usa 6 velas.
+    No usa 12 velas.
+
+    Analiza exclusivamente la vela M1 cerrada.
+    """
+    return build_n1_signal(
+        candle,
+        previous_candle
+    )
+
+
+def get_m1_direction(candle, previous_candle=None):
+    """
+    Devuelve únicamente la señal para N+1.
+
+    CALL
+    PUT
+    None
+    """
+    result = build_n1_signal(
+        candle,
+        previous_candle
+    )
+
+    return result.get("signal_n1")
+
+
+def format_analysis(analysis):
+    """
+    Texto para mostrar en logs/Telegram.
+    """
+    if not analysis:
+        return "SIN ANÁLISIS"
+
+    return (
+        "\n"
+        "========================================\n"
+        "        ANÁLISIS M1 CERRADA\n"
+        "========================================\n"
+        f"Estado       : {analysis.get('estado_final')}\n"
+        f"Dirección    : {analysis.get('direccion')}\n"
+        f"Señal N+1    : {analysis.get('signal_n1')}\n"
+        "----------------------------------------\n"
+        f"Open         : {analysis.get('open')}\n"
+        f"High         : {analysis.get('high')}\n"
+        f"Low          : {analysis.get('low')}\n"
+        f"Close        : {analysis.get('close')}\n"
+        "----------------------------------------\n"
+        f"Rango        : {analysis.get('rango')}\n"
+        f"Cuerpo       : {analysis.get('cuerpo')}\n"
+        f"Ratio cuerpo : {analysis.get('ratio_cuerpo')}\n"
+        f"Mecha sup.   : {analysis.get('mecha_superior')}\n"
+        f"Mecha inf.   : {analysis.get('mecha_inferior')}\n"
+        f"Cierre pos.  : {analysis.get('posicion_cierre')}\n"
+        "----------------------------------------\n"
+        f"Fuerza       : {analysis.get('fuerza')}\n"
+        f"Continuidad  : {analysis.get('continuidad')}\n"
+        f"Reversión    : {analysis.get('reversion')}\n"
+        f"Indecisión   : {analysis.get('indecision')}\n"
+        f"Debilidad    : {analysis.get('debilidad')}\n"
+        f"Doji         : {analysis.get('doji')}\n"
+        "========================================\n"
+    )
+
+
+# ============================================================
+# EJEMPLO DE FLUJO CORRECTO
+# ============================================================
+#
+# El BOT debe hacer algo equivalente a:
+#
+#   vela_n = obtener_vela_m1_ya_cerrada()
+#   vela_n_1 = obtener_vela_m1_anterior()
+#
+#   resultado = build_n1_signal(
+#       vela_n,
+#       vela_n_1
+#   )
+#
+#   señal = resultado["signal_n1"]
+#
+#   if señal == "CALL":
+#       # ejecutar únicamente en APERTURA DE N+1
+#       pass
+#
+#   elif señal == "PUT":
+#       # ejecutar únicamente en APERTURA DE N+1
+#       pass
+#
+#   else:
+#       # NO OPERAR
+#       pass
+#
+# ============================================================
+# FIN strategy.py
+# ============================================================
