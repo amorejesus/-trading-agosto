@@ -1,8 +1,14 @@
+from __future__ import annotations
+
 import os
 import time
 import requests
 from datetime import datetime
+from typing import Any, Optional
+
+import pandas as pd
 from iqoptionapi.stable_api import IQ_Option
+
 import strategy
 
 
@@ -27,8 +33,21 @@ PAIRS = [
 AMOUNT = 9230
 EXPIRATION = 1
 
-TIMEFRAME_5S = 5
-CANDLES_REQUIRED = 12
+# La estrategia actual trabaja con velas M1.
+TIMEFRAME_M1 = 60
+
+# Cantidad de velas M1 entregadas a strategy.py.
+# Se usan para detectar:
+#
+# N-1 = toque/ruptura de soporte o resistencia M5
+# N-2
+# N-3
+# N-4
+# N-5
+# N-6 = sexta vela posterior
+#
+# La entrada se realiza en N+1.
+CANDLES_REQUIRED = 7
 
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
@@ -41,7 +60,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message):
+def send_telegram(message: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -73,7 +92,7 @@ def send_telegram(message):
 # VERIFICAR STRATEGY.PY
 # ============================================================
 
-def verify_strategy():
+def verify_strategy() -> None:
     print("\n======================================")
     print("VERIFICANDO STRATEGY.PY")
     print("======================================")
@@ -96,25 +115,31 @@ def verify_strategy():
     )
 
     for name in required:
-        if not callable(
-            getattr(strategy, name, None)
-        ):
+        function = getattr(
+            strategy,
+            name,
+            None,
+        )
+
+        if not callable(function):
             raise RuntimeError(
-                f"strategy.py no contiene la función "
-                f"'{name}'."
+                "strategy.py no contiene "
+                f"la función '{name}'."
             )
 
-        print(f"✓ {name}() encontrada")
+        print(
+            f"✓ {name}() encontrada"
+        )
 
     print("✓ STRATEGY.PY COMPATIBLE")
     print("======================================\n")
 
 
 # ============================================================
-# CONEXIÓN
+# CONEXIÓN IQ OPTION
 # ============================================================
 
-def connect_iq():
+def connect_iq() -> IQ_Option:
     if not EMAIL:
         raise RuntimeError(
             "Falta la variable de entorno IQ_EMAIL"
@@ -142,19 +167,25 @@ def connect_iq():
                 print("✓ CONEXIÓN EXITOSA")
 
                 try:
-                    iq.change_balance("PRACTICE")
-                    print("✓ CUENTA PRACTICE")
+                    iq.change_balance(
+                        "PRACTICE"
+                    )
+
+                    print(
+                        "✓ CUENTA PRACTICE"
+                    )
 
                 except Exception as e:
                     print(
-                        "⚠ No se pudo cambiar a PRACTICE: "
-                        + str(e)
+                        "⚠ No se pudo cambiar "
+                        f"a PRACTICE: {e}"
                     )
 
                 send_telegram(
                     "🤖 BOT CONECTADO\n"
                     "Modo: SNIPER N+1\n"
-                    "Mercado: FOREX\n"
+                    "Estructura: M5\n"
+                    "Análisis: M1\n"
                     f"Pares: {len(PAIRS)}"
                 )
 
@@ -180,7 +211,7 @@ def connect_iq():
 # COMPROBAR CONEXIÓN
 # ============================================================
 
-def ensure_connection(iq):
+def ensure_connection(iq: IQ_Option) -> bool:
     try:
         if iq.check_connect():
             return True
@@ -215,57 +246,93 @@ def ensure_connection(iq):
 # TIEMPO
 # ============================================================
 
-def get_current_5s():
+def get_current_m1() -> int:
     now = int(time.time())
 
     return now - (
-        now % TIMEFRAME_5S
+        now % TIMEFRAME_M1
     )
 
 
-def wait_for_new_5s(last_timestamp):
+def wait_for_new_m1(
+    last_timestamp: int,
+) -> int:
+
     while True:
-        current = get_current_5s()
+        current = get_current_m1()
 
         if current > last_timestamp:
             return current
 
-        time.sleep(0.02)
+        time.sleep(0.05)
+
+
+def wait_until_open(
+    timestamp: int,
+) -> None:
+
+    while True:
+        remaining = (
+            timestamp
+            - time.time()
+        )
+
+        if remaining <= 0:
+            return
+
+        time.sleep(
+            min(
+                0.01,
+                remaining,
+            )
+        )
 
 
 # ============================================================
-# OBTENER VELAS 5S
+# OBTENER VELAS M1
 # ============================================================
 
-def get_5s_candles(
-    iq,
-    pair,
-    end_timestamp,
-    amount=CANDLES_REQUIRED,
-):
+def get_m1_candles(
+    iq: IQ_Option,
+    pair: str,
+    end_timestamp: int,
+    amount: int = CANDLES_REQUIRED,
+) -> Optional[list]:
+
     try:
         candles = iq.get_candles(
             pair,
-            TIMEFRAME_5S,
+            TIMEFRAME_M1,
             amount,
             end_timestamp,
         )
 
     except Exception as e:
         print(
-            f"[{pair}] Error obteniendo velas: {e}"
+            f"[{pair}] Error obteniendo "
+            f"velas M1: {e}"
         )
+
         return None
 
     if not candles:
         print(
-            f"[{pair}] API no devolvió datos."
+            f"[{pair}] API no devolvió "
+            "velas M1."
         )
+
         return None
 
     valid = []
 
     for candle in candles:
+
+        if not isinstance(
+            candle,
+            dict,
+        ):
+            continue
+
         try:
             timestamp = int(
                 candle.get("from")
@@ -273,7 +340,27 @@ def get_5s_candles(
         except Exception:
             continue
 
-        if timestamp <= 0:
+        required_fields = (
+            "open",
+            "close",
+            "max",
+            "min",
+        )
+
+        valid_candle = True
+
+        for field in required_fields:
+            if field not in candle:
+                valid_candle = False
+                break
+
+            try:
+                float(candle[field])
+            except Exception:
+                valid_candle = False
+                break
+
+        if not valid_candle:
             continue
 
         valid.append(candle)
@@ -283,13 +370,43 @@ def get_5s_candles(
 
     try:
         valid.sort(
-            key=lambda x: int(x["from"])
+            key=lambda x: int(
+                x["from"]
+            )
         )
 
     except Exception:
         return None
 
+    # Eliminar timestamps duplicados.
+    unique = {}
+
+    for candle in valid:
+        try:
+            timestamp = int(
+                candle["from"]
+            )
+        except Exception:
+            continue
+
+        unique[timestamp] = candle
+
+    valid = list(
+        unique.values()
+    )
+
+    valid.sort(
+        key=lambda x: int(
+            x["from"]
+        )
+    )
+
     if len(valid) < amount:
+        print(
+            f"[{pair}] M1 insuficientes: "
+            f"{len(valid)}/{amount}"
+        )
+
         return None
 
     valid = valid[-amount:]
@@ -301,31 +418,139 @@ def get_5s_candles(
             timestamps.append(
                 int(candle["from"])
             )
-
         except Exception:
             return None
 
-    for i in range(1, len(timestamps)):
+    # Verificar que las velas sean consecutivas.
+    for i in range(
+        1,
+        len(timestamps),
+    ):
+
         difference = (
             timestamps[i]
             - timestamps[i - 1]
         )
 
-        if difference != TIMEFRAME_5S:
+        if difference != TIMEFRAME_M1:
             print(
-                f"[{pair}] SECUENCIA 5S INVALIDA: "
-                f"{difference}s"
+                f"[{pair}] SECUENCIA M1 "
+                f"INVALIDA: {difference}s"
             )
+
             return None
 
     return valid
 
 
 # ============================================================
-# IMPRIMIR VELA
+# CONVERTIR VELAS A DATAFRAME
 # ============================================================
 
-def print_candle(pair, candle):
+def candles_to_dataframe(
+    candles: list,
+) -> pd.DataFrame:
+
+    df = pd.DataFrame(candles)
+
+    if df.empty:
+        return df
+
+    rename = {}
+
+    if "max" in df.columns:
+        rename["max"] = "high"
+
+    if "min" in df.columns:
+        rename["min"] = "low"
+
+    if "Open" in df.columns:
+        rename["Open"] = "open"
+
+    if "High" in df.columns:
+        rename["High"] = "high"
+
+    if "Low" in df.columns:
+        rename["Low"] = "low"
+
+    if "Close" in df.columns:
+        rename["Close"] = "close"
+
+    if rename:
+        df.rename(
+            columns=rename,
+            inplace=True,
+        )
+
+    required = (
+        "from",
+        "open",
+        "close",
+    )
+
+    for column in required:
+        if column not in df.columns:
+            return pd.DataFrame()
+
+    df["from"] = pd.to_numeric(
+        df["from"],
+        errors="coerce",
+    )
+
+    df["open"] = pd.to_numeric(
+        df["open"],
+        errors="coerce",
+    )
+
+    df["close"] = pd.to_numeric(
+        df["close"],
+        errors="coerce",
+    )
+
+    if "high" in df.columns:
+        df["high"] = pd.to_numeric(
+            df["high"],
+            errors="coerce",
+        )
+
+    if "low" in df.columns:
+        df["low"] = pd.to_numeric(
+            df["low"],
+            errors="coerce",
+        )
+
+    df.dropna(
+        subset=[
+            "from",
+            "open",
+            "close",
+        ],
+        inplace=True,
+    )
+
+    df.sort_values(
+        "from",
+        inplace=True,
+    )
+
+    df.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    return df
+
+
+# ============================================================
+# MOSTRAR VELA
+# ============================================================
+
+def print_candle(
+    pair: str,
+    candle: Any,
+    label: str = "N",
+) -> None:
+
     try:
         timestamp = int(
             candle["from"]
@@ -347,6 +572,7 @@ def print_candle(pair, candle):
         print(
             f"[{pair}] VELA INVALIDA"
         )
+
         return
 
     if closing > opening:
@@ -364,6 +590,7 @@ def print_candle(pair, candle):
     print(
         f"[{pair}] "
         f"{dt.strftime('%H:%M:%S')} | "
+        f"{label} | "
         f"{symbol} {direction} | "
         f"O={opening} | "
         f"C={closing}"
@@ -371,10 +598,13 @@ def print_candle(pair, candle):
 
 
 # ============================================================
-# ANALIZAR STRATEGY.PY
+# ANALIZAR ESTRATEGIA
 # ============================================================
 
-def analyze_strategy(candles):
+def analyze_strategy(
+    candles: list,
+) -> Optional[str]:
+
     try:
         return strategy.check_pattern(
             candles
@@ -384,34 +614,54 @@ def analyze_strategy(candles):
         print(
             f"[STRATEGY] Error: {e}"
         )
+
         return None
 
 
-def get_full_analysis(candles):
+def get_full_analysis(
+    candles: list,
+) -> Optional[dict]:
+
     try:
-        return strategy.get_strategy_analysis(
-            candles
+        result = (
+            strategy.get_strategy_analysis(
+                candles
+            )
         )
+
+        if isinstance(
+            result,
+            dict,
+        ):
+            return result
 
     except Exception as e:
         print(
             f"[ANALYSIS] Error: {e}"
         )
-        return None
+
+    return None
 
 
 # ============================================================
 # NORMALIZAR SEÑAL
 # ============================================================
 
-def normalize_signal(signal):
+def normalize_signal(
+    signal: Any,
+) -> Optional[str]:
+
     if not isinstance(
         signal,
         str,
     ):
         return None
 
-    signal = signal.strip().lower()
+    signal = (
+        signal
+        .strip()
+        .lower()
+    )
 
     if signal in (
         "call",
@@ -427,76 +677,94 @@ def normalize_signal(signal):
 # ============================================================
 
 def print_analysis(
-    pair,
-    analysis,
-):
-    if analysis is None:
+    pair: str,
+    analysis: Optional[dict],
+) -> None:
+
+    if not isinstance(
+        analysis,
+        dict,
+    ):
         return
 
     print("\n--------------------------------------")
     print(
-        f"ANÁLISIS {pair}"
+        f"ANÁLISIS SNIPER {pair}"
     )
     print("--------------------------------------")
 
-    dominant = analysis.get(
-        "dominant"
+    # Mostrar información de soporte/resistencia
+    # si strategy.py la proporciona.
+
+    signal = analysis.get(
+        "signal"
     )
 
-    if dominant:
-        dominant_text = str(
-            dominant
-        ).upper()
+    if signal is not None:
+        print(
+            f"Señal          : "
+            f"{str(signal).upper()}"
+        )
 
-    else:
-        dominant_text = "NINGUNO"
-
-    print(
-        f"Dominante       : "
-        f"{dominant_text}"
+    support = analysis.get(
+        "support"
     )
 
-    print(
-        f"Dominancia      : "
-        f"{analysis.get('dominance_ratio', 0):.8f}"
+    if support is not None:
+        print(
+            f"Soporte M5     : "
+            f"{support}"
+        )
+
+    resistance = analysis.get(
+        "resistance"
     )
 
-    print(
-        f"Eficiencia      : "
-        f"{analysis.get('efficiency', 0):.8f}"
+    if resistance is not None:
+        print(
+            f"Resistencia M5  : "
+            f"{resistance}"
+        )
+
+    interaction = analysis.get(
+        "interaction"
     )
 
-    final_control = analysis.get(
-        "final_control"
+    if interaction is not None:
+        print(
+            f"Interacción     : "
+            f"{str(interaction).upper()}"
+        )
+
+    reference = analysis.get(
+        "reference_candle"
     )
 
-    if final_control is None:
-        final_control_text = "NONE"
+    if reference is not None:
+        print(
+            f"Vela referencia : "
+            f"{reference}"
+        )
 
-    else:
-        final_control_text = str(
-            final_control
-        ).upper()
-
-    print(
-        f"Control final   : "
-        f"{final_control_text}"
+    follow_candles = analysis.get(
+        "follow_candles"
     )
 
-    print(
-        f"Cierre 5S      : "
-        f"{analysis.get('last_5s_close')}"
+    if follow_candles is not None:
+        print(
+            f"Velas espera    : "
+            f"{follow_candles}"
+        )
+
+    final_state = analysis.get(
+        "final_state"
     )
 
-    print(
-        f"Posición cierre : "
-        f"{analysis.get('close_position')}"
-    )
-
-    print(
-        f"Rango OK        : "
-        f"{analysis.get('range_ok')}"
-    )
+    if final_state is not None:
+        print(
+            f"Estado final    : "
+            f"{str(final_state).upper()}"
+        )
 
     print(
         f"MARKET OK       : "
@@ -512,14 +780,15 @@ def print_analysis(
 
 
 # ============================================================
-# EJECUTAR SNIPER N+1
+# EJECUTAR OPERACIÓN
 # ============================================================
 
 def execute_trade(
-    iq,
-    pair,
-    signal,
-):
+    iq: IQ_Option,
+    pair: str,
+    signal: str,
+) -> tuple:
+
     signal = normalize_signal(
         signal
     )
@@ -531,32 +800,29 @@ def execute_trade(
         print(
             f"[{pair}] Sin señal válida."
         )
+
         return False, None
 
     print("\n======================================")
     print("🎯 SNIPER N+1")
     print("======================================")
-
     print(
-        f"Activo     : {pair}"
+        f"Activo       : {pair}"
     )
-
     print(
-        f"Dirección  : {signal.upper()}"
+        f"Dirección    : "
+        f"{signal.upper()}"
     )
-
     print(
-        f"Monto      : {AMOUNT}"
+        f"Monto        : {AMOUNT}"
     )
-
     print(
-        f"Expiración : {EXPIRATION}M"
+        f"Expiración   : "
+        f"{EXPIRATION}M"
     )
-
     print(
-        "Ejecución  : APERTURA N+1"
+        "Ejecución    : APERTURA N+1"
     )
-
     print("======================================")
 
     try:
@@ -568,6 +834,7 @@ def execute_trade(
         )
 
         if success:
+
             print(
                 f"✓ OPERACIÓN ABIERTA "
                 f"ID={order_id}"
@@ -576,9 +843,11 @@ def execute_trade(
             send_telegram(
                 "🎯 SNIPER N+1\n\n"
                 f"Activo: {pair}\n"
-                f"Dirección: {signal.upper()}\n"
+                f"Dirección: "
+                f"{signal.upper()}\n"
                 f"Monto: {AMOUNT}\n"
-                f"Expiración: {EXPIRATION}M"
+                f"Expiración: "
+                f"{EXPIRATION}M"
             )
 
             return True, order_id
@@ -588,15 +857,13 @@ def execute_trade(
             f"la operación en {pair}."
         )
 
-        return False, None
-
     except Exception as e:
         print(
             f"✗ Error ejecutando "
             f"{pair}: {e}"
         )
 
-        return False, None
+    return False, None
 
 
 # ============================================================
@@ -604,9 +871,10 @@ def execute_trade(
 # ============================================================
 
 def get_trade_result(
-    iq,
-    order_id,
-):
+    iq: IQ_Option,
+    order_id: Any,
+) -> Optional[float]:
+
     if not order_id:
         return None
 
@@ -641,17 +909,20 @@ def get_trade_result(
 
 
 def print_result(
-    pair,
-    result,
-):
+    pair: str,
+    result: Optional[float],
+) -> None:
+
     if result is None:
         print(
             f"\n⚠ {pair} "
-            f"RESULTADO NO DISPONIBLE"
+            "RESULTADO NO DISPONIBLE"
         )
+
         return
 
     if result > 0:
+
         print(
             f"\n🟢 WIN | {pair}"
         )
@@ -667,6 +938,7 @@ def print_result(
         )
 
     elif result < 0:
+
         print(
             f"\n🔴 LOSS | {pair}"
         )
@@ -682,6 +954,7 @@ def print_result(
         )
 
     else:
+
         print(
             f"\n⚪ EMPATE | {pair}"
         )
@@ -702,11 +975,12 @@ def print_result(
 # ============================================================
 
 def process_pair(
-    iq,
-    pair,
-    candle_timestamp,
-):
-    candles = get_5s_candles(
+    iq: IQ_Option,
+    pair: str,
+    candle_timestamp: int,
+) -> Optional[str]:
+
+    candles = get_m1_candles(
         iq,
         pair,
         candle_timestamp,
@@ -715,21 +989,46 @@ def process_pair(
 
     if candles is None:
         print(
-            f"[{pair}] "
-            f"Datos 5S insuficientes."
+            f"[{pair}] Datos M1 insuficientes."
         )
+
         return None
 
-    candle_n = candles[-1]
+    print(
+        f"\n[{pair}] "
+        "VELAS M1 RECIBIDAS"
+    )
 
-    print_candle(
-        pair,
-        candle_n,
+    labels = [
+        "N-6",
+        "N-5",
+        "N-4",
+        "N-3",
+        "N-2",
+        "N-1",
+        "N",
+    ]
+
+    for index, candle in enumerate(
+        candles
+    ):
+        label = labels[index]
+
+        print_candle(
+            pair,
+            candle,
+            label,
+        )
+
+    print(
+        f"\n[{pair}] "
+        "Analizando estructura M5..."
     )
 
     print(
         f"[{pair}] "
-        f"Analizando cierre de N..."
+        "Buscando toque/ruptura "
+        "y confirmación de 6 velas..."
     )
 
     analysis = get_full_analysis(
@@ -748,22 +1047,26 @@ def process_pair(
     )
 
     if signal is None:
+
         print(
             f"[{pair}] "
-            f"⚪ SIN OPERACIÓN"
+            "⚪ SIN OPERACIÓN"
         )
+
         return None
 
     if signal == "call":
+
         print(
             f"[{pair}] "
-            f"🟢 SEÑAL CALL → N+1"
+            "🟢 SEÑAL CALL → N+1"
         )
 
     else:
+
         print(
             f"[{pair}] "
-            f"🔴 SEÑAL PUT → N+1"
+            "🔴 SEÑAL PUT → N+1"
         )
 
     return signal
@@ -773,7 +1076,8 @@ def process_pair(
 # MAIN
 # ============================================================
 
-def main():
+def main() -> None:
+
     print("\n")
     print(
         "=========================================="
@@ -787,31 +1091,33 @@ def main():
     print(
         "=========================================="
     )
-
     print(
-        "MERCADO      : FOREX"
+        "ESTRUCTURA   : SOPORTE/RESISTENCIA M5"
     )
-
+    print(
+        "ANÁLISIS     : VELAS M1"
+    )
+    print(
+        "CONFIRMACIÓN : 6 VELAS"
+    )
+    print(
+        "ENTRADA      : APERTURA N+1"
+    )
     print(
         f"MONTO        : {AMOUNT}"
     )
-
     print(
         f"EXPIRACIÓN   : {EXPIRATION}M"
     )
-
     print(
-        f"TIMEFRAME    : {TIMEFRAME_5S}S"
+        f"TIMEFRAME    : {TIMEFRAME_M1}s"
     )
-
     print(
         f"VELAS        : {CANDLES_REQUIRED}"
     )
-
     print(
         f"PARES        : {len(PAIRS)}"
     )
-
     print(
         "=========================================="
     )
@@ -830,19 +1136,28 @@ def main():
     iq = connect_iq()
 
     last_timestamp = (
-        get_current_5s()
-        - TIMEFRAME_5S
+        get_current_m1()
+        - TIMEFRAME_M1
     )
 
     while True:
+
         try:
-            if not ensure_connection(iq):
+
+            if not ensure_connection(
+                iq
+            ):
+
                 time.sleep(5)
+
                 iq = connect_iq()
+
                 continue
 
+            # Esperar exactamente al cambio
+            # de minuto.
             current_timestamp = (
-                wait_for_new_5s(
+                wait_for_new_m1(
                     last_timestamp
                 )
             )
@@ -851,14 +1166,13 @@ def main():
                 current_timestamp
             )
 
+            print("\n\n")
             print(
-                "\n\n=========================================="
+                "=========================================="
             )
-
             print(
-                "🔔 CIERRE DE VELA N"
+                "🔔 NUEVO CICLO M1"
             )
-
             print(
                 datetime.fromtimestamp(
                     current_timestamp
@@ -866,15 +1180,20 @@ def main():
                     "%Y-%m-%d %H:%M:%S"
                 )
             )
-
             print(
                 "=========================================="
             )
 
             signals = []
 
+            # ------------------------------------------------
+            # ANALIZAR TODOS LOS PARES
+            # ------------------------------------------------
+
             for pair in PAIRS:
+
                 try:
+
                     signal = process_pair(
                         iq,
                         pair,
@@ -882,6 +1201,7 @@ def main():
                     )
 
                     if signal is not None:
+
                         signals.append(
                             (
                                 pair,
@@ -890,32 +1210,42 @@ def main():
                         )
 
                 except Exception as e:
+
                     print(
                         f"[{pair}] "
-                        f"Error procesando: "
-                        f"{e}"
+                        f"Error procesando: {e}"
                     )
 
+            # ------------------------------------------------
+            # SIN SEÑALES
+            # ------------------------------------------------
+
             if not signals:
+
                 print(
                     "\n⚪ Ningún par cumplió "
                     "las condiciones."
                 )
+
                 continue
 
-            print(
-                "\n=========================================="
-            )
+            # ------------------------------------------------
+            # MOSTRAR SEÑALES
+            # ------------------------------------------------
 
+            print("\n")
             print(
-                "🎯 SEÑALES PARA N+1"
+                "=========================================="
             )
-
+            print(
+                "🎯 SEÑALES CONFIRMADAS"
+            )
             print(
                 "=========================================="
             )
 
             for pair, signal in signals:
+
                 print(
                     f"{pair} → "
                     f"{signal.upper()}"
@@ -925,51 +1255,56 @@ def main():
                 "=========================================="
             )
 
+            # ------------------------------------------------
+            # APERTURA N+1
+            # ------------------------------------------------
+
             next_candle = (
                 current_timestamp
-                + TIMEFRAME_5S
+                + TIMEFRAME_M1
             )
-
-            while True:
-                now = time.time()
-
-                remaining = (
-                    next_candle
-                    - now
-                )
-
-                if remaining <= 0:
-                    break
-
-                time.sleep(
-                    min(
-                        0.01,
-                        remaining
-                    )
-                )
 
             print(
-                "\n=========================================="
+                "\n⏱ Esperando apertura N+1..."
             )
 
+            wait_until_open(
+                next_candle
+            )
+
+            print("\n")
+            print(
+                "=========================================="
+            )
             print(
                 "🚀 APERTURA N+1"
             )
-
             print(
                 datetime.fromtimestamp(
                     next_candle
                 ).strftime(
-                    "%H:%M:%S"
+                    "%Y-%m-%d %H:%M:%S"
                 )
             )
-
             print(
                 "=========================================="
             )
 
+            # ------------------------------------------------
+            # IMPORTANTE:
+            #
+            # PRIMERO SE EJECUTAN TODAS LAS SEÑALES.
+            #
+            # NO se espera el resultado de una operación
+            # antes de abrir la siguiente.
+            # ------------------------------------------------
+
+            opened_trades = []
+
             for pair, signal in signals:
+
                 try:
+
                     success, order_id = (
                         execute_trade(
                             iq,
@@ -978,13 +1313,76 @@ def main():
                         )
                     )
 
-                    if not success:
-                        continue
+                    if success:
 
-                    result = get_trade_result(
-                        iq,
-                        order_id,
+                        opened_trades.append(
+                            (
+                                pair,
+                                order_id,
+                            )
+                        )
+
+                except Exception as e:
+
+                    print(
+                        f"[{pair}] "
+                        f"Error operación: {e}"
                     )
+
+            # ------------------------------------------------
+            # RESULTADOS
+            # ------------------------------------------------
+
+            if not opened_trades:
+
+                print(
+                    "\n⚠ No se pudo abrir "
+                    "ninguna operación."
+                )
+
+                continue
+
+            print("\n")
+            print(
+                "=========================================="
+            )
+            print(
+                "📊 ESPERANDO RESULTADOS"
+            )
+            print(
+                "=========================================="
+            )
+
+            # Esperar una sola vez para no retrasar
+            # las entradas.
+            wait_seconds = (
+                EXPIRATION * 60
+                + 5
+            )
+
+            print(
+                f"Esperando "
+                f"{wait_seconds}s..."
+            )
+
+            time.sleep(
+                wait_seconds
+            )
+
+            for pair, order_id in opened_trades:
+
+                try:
+
+                    result = (
+                        iq.check_win_v4(
+                            order_id
+                        )
+                    )
+
+                    if result is not None:
+                        result = float(
+                            result
+                        )
 
                     print_result(
                         pair,
@@ -992,34 +1390,35 @@ def main():
                     )
 
                 except Exception as e:
+
                     print(
                         f"[{pair}] "
-                        f"Error operación: "
-                        f"{e}"
+                        f"Error consultando "
+                        f"resultado: {e}"
                     )
 
         except KeyboardInterrupt:
+
             print(
-                "\n\nBOT DETENIDO "
-                "POR EL USUARIO."
+                "\n\n"
+                "BOT DETENIDO POR EL USUARIO."
             )
 
             send_telegram(
-                "🛑 BOT SNIPER N+1 "
-                "DETENIDO"
+                "🛑 BOT SNIPER N+1 DETENIDO"
             )
 
             break
 
         except Exception as e:
-            print(
-                "\n======================================"
-            )
 
+            print("\n")
+            print(
+                "======================================"
+            )
             print(
                 "ERROR GENERAL"
             )
-
             print(
                 "======================================"
             )
@@ -1041,7 +1440,7 @@ def main():
 
 
 # ============================================================
-# PUNTO DE ENTRADA
+# EJECUCIÓN
 # ============================================================
 
 if __name__ == "__main__":
