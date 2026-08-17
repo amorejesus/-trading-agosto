@@ -237,10 +237,10 @@ def build_n1_signal(
     candles_5s: Optional[pd.DataFrame] = None,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Compatibilidad con versiones anteriores del bot.
+    """Compatibilidad con versiones anteriores de bot.py.
 
-    No crea una lógica nueva: utiliza exactamente el mismo análisis
-    de la M1 cerrada que analyze_market().
+    Usa exactamente el mismo análisis de la M1 cerrada.
+    No añade ninguna lógica ni utiliza 5 segundos para decidir.
     """
     return analyze_market(candle_1m, candles_5s, previous_m1)
 
@@ -255,6 +255,41 @@ def analyze_market(
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     return analyze_minute(candle_1m, candles_5s, previous_m1)
+
+
+def get_m1_direction(candle_1m=None):
+    """Compatibilidad con versiones anteriores de bot.py.
+
+    La dirección se obtiene únicamente de una M1 ya cerrada.
+    No analiza ni utiliza velas de 5 segundos.
+    Devuelve BULLISH, BEARISH o NEUTRAL.
+    """
+    if candle_1m is None:
+        return None
+
+    # Permite recibir una sola fila de pandas o un diccionario.
+    try:
+        if hasattr(candle_1m, "columns") and hasattr(candle_1m, "iloc"):
+            if len(candle_1m) == 0:
+                return None
+            candle_1m = candle_1m.iloc[-1]
+    except Exception:
+        return None
+
+    try:
+        opening = _to_float(candle_1m.get("open"))
+        closing = _to_float(candle_1m.get("close"))
+    except AttributeError:
+        return None
+
+    if opening is None or closing is None:
+        return None
+
+    if closing > opening:
+        return "BULLISH"
+    if closing < opening:
+        return "BEARISH"
+    return "NEUTRAL"
 
 
 def get_signal(
