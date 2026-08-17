@@ -1,1083 +1,1414 @@
-from __future__ import annotations
+import os
+import time
+import requests
+import inspect
+from datetime import datetime
 
-from typing import Any, Dict, Optional
-
-import pandas as pd
-
-
-# ============================================================
-# STRATEGY.PY
-#
-# ESTRATEGIA:
-#
-# M5 = ESTRUCTURA
-# M1 = CONFIRMACIÓN / CONTEO
-#
-# SOPORTE M5:
-#   toque/rompimiento en M1
-#   ↓
-#   la vela del toque NO cuenta
-#   ↓
-#   esperar 6 velas M1 COMPLETAS
-#   ↓
-#   cierre de la sexta
-#   ↓
-#   CALL en apertura de N+1
-#
-# RESISTENCIA M5:
-#   toque/rompimiento en M1
-#   ↓
-#   la vela del toque NO cuenta
-#   ↓
-#   esperar 6 velas M1 COMPLETAS
-#   ↓
-#   cierre de la sexta
-#   ↓
-#   PUT en apertura de N+1
-#
-# IMPORTANTE:
-# - No usa 12 velas de 5 segundos.
-# - No importa el color de las 6 velas.
-# - No importa si hacen doji.
-# - No importa si hay agotamiento.
-# - No importa si hay continuidad.
-# - No importa si rechazan o rompen.
-# - La dirección viene de la estructura M5.
-# ============================================================
+from iqoptionapi.stable_api import IQ_Option
+import strategy
 
 
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
-WAITING_CANDLES = 6
+PAIRS = [
+    "EURUSD",
+    "AUDCHF",
+    "AUDUSD",
+    "EURGBP",
+    "EURNZD",
+    "GBPAUD",
+    "GBPCAD",
+    "GBPJPY",
+    "GBPNZD",
+    "GBPUSD",
+    "NZDUSD",
+]
 
-SIGNAL_CALL = "call"
-SIGNAL_PUT = "put"
+AMOUNT = 9230
+EXPIRATION = 1
 
-TYPE_SUPPORT = "support"
-TYPE_RESISTANCE = "resistance"
+TIMEFRAME_M1 = 60
+TIMEFRAME_M5 = 300
 
-STATE_WAITING = "waiting"
-STATE_READY = "ready"
-STATE_EXECUTED = "executed"
+# M1:
+# vela de toque = N-6
+# N-5
+# N-4
+# N-3
+# N-2
+# N-1
+# entrada = N+1
+M1_CANDLES_REQUIRED = 7
+
+# Velas M5 para que strategy.py pueda determinar
+# estructura, soporte y resistencia.
+M5_CANDLES_REQUIRED = 12
+
+EMAIL = os.getenv("IQ_EMAIL")
+PASSWORD = os.getenv("IQ_PASSWORD")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 # ============================================================
-# UTILIDADES
+# TELEGRAM
 # ============================================================
 
-def _to_float(value: Any) -> Optional[float]:
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
     try:
-        if value is None:
-            return None
+        url = (
+            f"https://api.telegram.org/bot"
+            f"{TELEGRAM_TOKEN}/sendMessage"
+        )
 
-        value = float(value)
+        response = requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": str(message),
+            },
+            timeout=10,
+        )
 
-        if pd.isna(value):
-            return None
-
-        return value
-
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None:
-        return pd.DataFrame()
-
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    out = df.copy()
-
-    rename = {}
-
-    column_map = {
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "MAX": "high",
-        "MIN": "low",
-        "Max": "high",
-        "Min": "low",
-    }
-
-    for old_name, new_name in column_map.items():
-        if old_name in out.columns and new_name not in out.columns:
-            rename[old_name] = new_name
-
-    if rename:
-        out.rename(columns=rename, inplace=True)
-
-    for column in (
-        "open",
-        "high",
-        "low",
-        "close",
-        "from",
-    ):
-        if column in out.columns:
-            out[column] = pd.to_numeric(
-                out[column],
-                errors="coerce",
+        if not response.ok:
+            print(
+                f"[TELEGRAM] HTTP {response.status_code}"
             )
 
-    if "from" in out.columns:
-        out.dropna(
-            subset=["from"],
-            inplace=True,
-        )
-
-        out.sort_values(
-            "from",
-            inplace=True,
-        )
-
-        out.drop_duplicates(
-            subset=["from"],
-            keep="last",
-            inplace=True,
-        )
-
-    required = (
-        "open",
-        "high",
-        "low",
-        "close",
-    )
-
-    for column in required:
-        if column not in out.columns:
-            return pd.DataFrame()
-
-    out.dropna(
-        subset=list(required),
-        inplace=True,
-    )
-
-    out.reset_index(
-        drop=True,
-        inplace=True,
-    )
-
-    return out
-
-
-def _normalize_m1(candles: Any) -> pd.DataFrame:
-    if candles is None:
-        return pd.DataFrame()
-
-    if isinstance(candles, pd.DataFrame):
-        df = candles.copy()
-    else:
-        try:
-            df = pd.DataFrame(list(candles))
-        except Exception:
-            return pd.DataFrame()
-
-    return _normalize_columns(df)
-
-
-def _normalize_m5(candles: Any) -> pd.DataFrame:
-    if candles is None:
-        return pd.DataFrame()
-
-    if isinstance(candles, pd.DataFrame):
-        df = candles.copy()
-    else:
-        try:
-            df = pd.DataFrame(list(candles))
-        except Exception:
-            return pd.DataFrame()
-
-    return _normalize_columns(df)
+    except Exception as e:
+        print(f"[TELEGRAM] Error: {e}")
 
 
 # ============================================================
-# DIRECCIÓN DE VELA
+# VERIFICAR STRATEGY.PY
 # ============================================================
 
-def candle_direction(candle: Any) -> str:
-    if candle is None:
-        return "doji"
+def verify_strategy():
+    print("\n======================================")
+    print("VERIFICANDO STRATEGY.PY")
+    print("======================================")
+
+    print(
+        "Archivo: "
+        + str(
+            getattr(
+                strategy,
+                "__file__",
+                "desconocido"
+            )
+        )
+    )
+
+    required_any = (
+        "get_strategy_analysis",
+        "check_pattern",
+    )
+
+    found = False
+
+    for name in required_any:
+        function = getattr(
+            strategy,
+            name,
+            None
+        )
+
+        if callable(function):
+            print(
+                f"✓ {name}() encontrada"
+            )
+            found = True
+
+    if not found:
+        raise RuntimeError(
+            "strategy.py no contiene "
+            "get_strategy_analysis() ni "
+            "check_pattern()."
+        )
+
+    print("✓ STRATEGY.PY COMPATIBLE")
+    print("======================================\n")
+
+
+# ============================================================
+# CONEXIÓN
+# ============================================================
+
+def connect_iq():
+    if not EMAIL:
+        raise RuntimeError(
+            "Falta la variable de entorno IQ_EMAIL"
+        )
+
+    if not PASSWORD:
+        raise RuntimeError(
+            "Falta la variable de entorno IQ_PASSWORD"
+        )
+
+    while True:
+        try:
+            print("\n======================================")
+            print("CONECTANDO A IQ OPTION")
+            print("======================================")
+
+            iq = IQ_Option(
+                EMAIL,
+                PASSWORD
+            )
+
+            check, reason = iq.connect()
+
+            if check:
+                print("✓ CONEXIÓN EXITOSA")
+
+                try:
+                    iq.change_balance("PRACTICE")
+                    print("✓ CUENTA PRACTICE")
+                except Exception as e:
+                    print(
+                        "⚠ No se pudo cambiar a PRACTICE: "
+                        + str(e)
+                    )
+
+                send_telegram(
+                    "🤖 BOT CONECTADO\n"
+                    "Modo: SNIPER M5/M1 N+1\n"
+                    "Estructura: M5\n"
+                    "Confirmación: M1\n"
+                    f"Pares: {len(PAIRS)}"
+                )
+
+                return iq
+
+            print(
+                f"✗ Error de conexión: {reason}"
+            )
+
+        except Exception as e:
+            print(
+                f"✗ Error conectando: {e}"
+            )
+
+        print(
+            "Reintentando en 5 segundos..."
+        )
+
+        time.sleep(5)
+
+
+# ============================================================
+# COMPROBAR CONEXIÓN
+# ============================================================
+
+def ensure_connection(iq):
+    try:
+        if iq.check_connect():
+            return True
+    except Exception:
+        pass
+
+    print("\n⚠ CONEXIÓN PERDIDA")
 
     try:
-        opening = _to_float(candle["open"])
-        closing = _to_float(candle["close"])
+        check, reason = iq.connect()
+
+        if check:
+            print(
+                "✓ CONEXIÓN RESTAURADA"
+            )
+            return True
+
+        print(
+            f"✗ No se pudo reconectar: {reason}"
+        )
+
+    except Exception as e:
+        print(
+            f"✗ Error reconectando: {e}"
+        )
+
+    return False
+
+
+# ============================================================
+# TIEMPO
+# ============================================================
+
+def get_current_m1():
+    now = int(time.time())
+
+    return now - (
+        now % TIMEFRAME_M1
+    )
+
+
+def wait_for_new_m1(last_timestamp):
+    while True:
+        current = get_current_m1()
+
+        if current > last_timestamp:
+            return current
+
+        time.sleep(0.02)
+
+
+def wait_until_timestamp(timestamp):
+    while True:
+        remaining = timestamp - time.time()
+
+        if remaining <= 0:
+            return
+
+        time.sleep(
+            min(
+                0.01,
+                remaining
+            )
+        )
+
+
+# ============================================================
+# OBTENER VELAS
+# ============================================================
+
+def get_candles(
+    iq,
+    pair,
+    timeframe,
+    amount,
+    end_timestamp,
+):
+    try:
+        candles = iq.get_candles(
+            pair,
+            timeframe,
+            amount,
+            end_timestamp,
+        )
+
+    except Exception as e:
+        print(
+            f"[{pair}] Error obteniendo "
+            f"velas {timeframe}s: {e}"
+        )
+
+        return None
+
+    if not candles:
+        print(
+            f"[{pair}] API no devolvió "
+            f"velas {timeframe}s."
+        )
+
+        return None
+
+    valid = []
+
+    for candle in candles:
+        try:
+            int(candle["from"])
+            float(candle["open"])
+            float(candle["close"])
+            float(candle["high"])
+            float(candle["low"])
+        except Exception:
+            continue
+
+        valid.append(candle)
+
+    if len(valid) < amount:
+        return None
+
+    valid.sort(
+        key=lambda x: int(x["from"])
+    )
+
+    return valid[-amount:]
+
+
+# ============================================================
+# OBTENER M1
+# ============================================================
+
+def get_m1_candles(
+    iq,
+    pair,
+    timestamp,
+):
+    return get_candles(
+        iq,
+        pair,
+        TIMEFRAME_M1,
+        M1_CANDLES_REQUIRED,
+        timestamp,
+    )
+
+
+# ============================================================
+# OBTENER M5
+# ============================================================
+
+def get_m5_candles(
+    iq,
+    pair,
+    timestamp,
+):
+    return get_candles(
+        iq,
+        pair,
+        TIMEFRAME_M5,
+        M5_CANDLES_REQUIRED,
+        timestamp,
+    )
+
+
+# ============================================================
+# VALIDAR SECUENCIA M1
+# ============================================================
+
+def validate_m1_sequence(candles):
+    if not candles:
+        return False
+
+    if len(candles) < M1_CANDLES_REQUIRED:
+        return False
+
+    timestamps = []
+
+    for candle in candles:
+        try:
+            timestamps.append(
+                int(candle["from"])
+            )
+        except Exception:
+            return False
+
+    timestamps.sort()
+
+    for i in range(1, len(timestamps)):
+        difference = (
+            timestamps[i]
+            - timestamps[i - 1]
+        )
+
+        if difference != TIMEFRAME_M1:
+            return False
+
+    return True
+
+
+# ============================================================
+# COLOR DE VELA
+# ============================================================
+
+def candle_direction(candle):
+    try:
+        opening = float(
+            candle["open"]
+        )
+
+        closing = float(
+            candle["close"]
+        )
+
     except Exception:
         return "doji"
 
-    if opening is None or closing is None:
-        return "doji"
-
     if closing > opening:
-        return "bullish"
+        return "verde"
 
     if closing < opening:
-        return "bearish"
+        return "roja"
 
     return "doji"
 
 
 # ============================================================
-# SOPORTE / RESISTENCIA M5
-#
-# Se utilizan las zonas de la última vela M5 COMPLETADA.
-#
-# Soporte    = mínimo M5
-# Resistencia = máximo M5
+# IMPRIMIR VELA
 # ============================================================
 
-def get_m5_levels(
-    m5_candles: Any,
-) -> Dict[str, Any]:
-
-    result = {
-        "available": False,
-        "support": None,
-        "resistance": None,
-        "timestamp": None,
-        "reason": "sin datos M5",
-    }
-
-    m5 = _normalize_m5(m5_candles)
-
-    if m5.empty:
-        return result
-
-    if len(m5) < 1:
-        return result
-
-    # La última M5 recibida se considera la estructura más reciente.
-    last = m5.iloc[-1]
-
-    support = _to_float(last["low"])
-    resistance = _to_float(last["high"])
-
-    if support is None:
-        result["reason"] = "soporte M5 inválido"
-        return result
-
-    if resistance is None:
-        result["reason"] = "resistencia M5 inválida"
-        return result
-
-    if resistance < support:
-        result["reason"] = "estructura M5 inválida"
-        return result
-
-    result["available"] = True
-    result["support"] = support
-    result["resistance"] = resistance
-
-    if "from" in last.index:
-        timestamp = _to_float(last["from"])
-
-        if timestamp is not None:
-            result["timestamp"] = int(timestamp)
-
-    result["reason"] = "estructura M5 disponible"
-
-    return result
-
-
-# ============================================================
-# DETECTAR TOQUE / ROMPIMIENTO M1
-#
-# SOPORTE:
-#   low <= soporte
-#
-# RESISTENCIA:
-#   high >= resistencia
-#
-# No importa cómo termine la vela.
-# ============================================================
-
-def detect_zone_touch(
-    candle_m1: Any,
-    support: Optional[float],
-    resistance: Optional[float],
-) -> Optional[str]:
-
-    if candle_m1 is None:
-        return None
-
-    if support is None or resistance is None:
-        return None
-
+def print_candle(
+    pair,
+    candle,
+    label,
+):
     try:
-        low = _to_float(candle_m1["low"])
-        high = _to_float(candle_m1["high"])
+        timestamp = int(
+            candle["from"]
+        )
+
+        dt = datetime.fromtimestamp(
+            timestamp
+        )
+
+        opening = float(
+            candle["open"]
+        )
+
+        closing = float(
+            candle["close"]
+        )
+
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
     except Exception:
+        return
+
+    direction = candle_direction(
+        candle
+    )
+
+    if direction == "verde":
+        symbol = "🟢"
+    elif direction == "roja":
+        symbol = "🔴"
+    else:
+        symbol = "⚪"
+
+    print(
+        f"[{pair}] {label} "
+        f"{dt.strftime('%H:%M:%S')} | "
+        f"{symbol} {direction.upper()} | "
+        f"O={opening} "
+        f"H={high} "
+        f"L={low} "
+        f"C={closing}"
+    )
+
+
+# ============================================================
+# IMPRIMIR ESTRUCTURA M1
+# ============================================================
+
+def print_m1_structure(
+    pair,
+    candles,
+):
+    if not candles:
+        return
+
+    print("\n--------------------------------------")
+    print(
+        f"SECUENCIA M1 {pair}"
+    )
+    print("--------------------------------------")
+
+    labels = [
+        "N-6",
+        "N-5",
+        "N-4",
+        "N-3",
+        "N-2",
+        "N-1",
+        "N",
+    ]
+
+    start = max(
+        0,
+        len(candles) - len(labels)
+    )
+
+    selected = candles[start:]
+
+    for label, candle in zip(
+        labels[-len(selected):],
+        selected,
+    ):
+        print_candle(
+            pair,
+            candle,
+            label,
+        )
+
+    print("--------------------------------------")
+
+
+# ============================================================
+# NORMALIZAR SEÑAL
+# ============================================================
+
+def normalize_signal(signal):
+    if not isinstance(
+        signal,
+        str
+    ):
         return None
 
-    if low is None or high is None:
-        return None
+    signal = (
+        signal
+        .strip()
+        .lower()
+    )
 
-    # --------------------------------------------------------
-    # SOPORTE
-    # --------------------------------------------------------
-
-    if low <= support:
-        return TYPE_SUPPORT
-
-    # --------------------------------------------------------
-    # RESISTENCIA
-    # --------------------------------------------------------
-
-    if high >= resistance:
-        return TYPE_RESISTANCE
+    if signal in (
+        "call",
+        "put",
+    ):
+        return signal
 
     return None
 
 
 # ============================================================
-# CREAR ESTADO DEL TOQUE
+# LLAMAR A STRATEGY.PY
 # ============================================================
 
-def create_touch_state(
-    zone_type: str,
-    candle: Any,
-) -> Dict[str, Any]:
-
-    timestamp = None
+def call_strategy_function(
+    function,
+    m5_candles,
+    m1_candles,
+):
+    """
+    Permite que strategy.py utilice:
+    
+    get_strategy_analysis(m5, m1)
+    
+    o
+    
+    get_strategy_analysis(m1)
+    
+    o
+    
+    get_strategy_analysis(m5)
+    
+    según la firma existente.
+    """
 
     try:
-        timestamp_value = _to_float(
-            candle.get("from")
+        signature = inspect.signature(
+            function
         )
 
-        if timestamp_value is not None:
-            timestamp = int(timestamp_value)
+        parameters = [
+            p
+            for p in signature.parameters.values()
+            if p.kind
+            in (
+                p.POSITIONAL_ONLY,
+                p.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+
+        required = [
+            p
+            for p in parameters
+            if p.default
+            is inspect.Parameter.empty
+        ]
+
+        count = len(required)
+
+        if count >= 2:
+            return function(
+                m5_candles,
+                m1_candles,
+            )
+
+        if count == 1:
+            return function(
+                m1_candles
+            )
+
+        return function()
 
     except Exception:
-        pass
+        # Compatibilidad adicional:
+        # primero intenta M5 + M1.
+        try:
+            return function(
+                m5_candles,
+                m1_candles,
+            )
 
-    if zone_type == TYPE_SUPPORT:
-        signal = SIGNAL_CALL
-    elif zone_type == TYPE_RESISTANCE:
-        signal = SIGNAL_PUT
-    else:
-        signal = None
+        except TypeError:
+            try:
+                return function(
+                    m1_candles
+                )
 
-    return {
-        "active": True,
-        "state": STATE_WAITING,
-
-        "zone": zone_type,
-        "signal": signal,
-
-        "touch_timestamp": timestamp,
-
-        # ----------------------------------------------------
-        # MUY IMPORTANTE:
-        #
-        # La vela del toque empieza en 0.
-        #
-        # La siguiente vela será 1.
-        # Después:
-        # 2
-        # 3
-        # 4
-        # 5
-        # 6
-        #
-        # Al cerrar la 6 -> READY.
-        # ----------------------------------------------------
-
-        "completed_after_touch": 0,
-
-        "signal_timestamp": None,
-
-        "entry_timestamp": None,
-
-        "reason": "toque detectado",
-    }
+            except TypeError:
+                return function(
+                    m5_candles
+                )
 
 
 # ============================================================
-# ACTUALIZAR CON UNA NUEVA VELA M1
+# ANALIZAR ESTRATEGIA
 # ============================================================
 
-def update_touch_state(
-    state: Optional[Dict[str, Any]],
-    candle_m1: Any,
-) -> Dict[str, Any]:
+def get_full_analysis(
+    m5_candles,
+    m1_candles,
+):
+    function = getattr(
+        strategy,
+        "get_strategy_analysis",
+        None,
+    )
 
-    if state is None:
-        return {
-            "active": False,
-            "state": STATE_WAITING,
-            "zone": None,
-            "signal": None,
-            "completed_after_touch": 0,
-            "signal_timestamp": None,
-            "entry_timestamp": None,
-            "reason": "sin estado",
-        }
-
-    if not state.get("active"):
-        return state
-
-    if candle_m1 is None:
-        return state
-
-    # --------------------------------------------------------
-    # SI YA ESTÁ LISTO
-    # --------------------------------------------------------
-
-    if state.get("state") == STATE_READY:
-        return state
-
-    if state.get("state") == STATE_EXECUTED:
-        return state
-
-    timestamp = None
+    if not callable(function):
+        return None
 
     try:
-        timestamp_value = _to_float(
-            candle_m1.get("from")
+        return call_strategy_function(
+            function,
+            m5_candles,
+            m1_candles,
         )
 
-        if timestamp_value is not None:
-            timestamp = int(timestamp_value)
-
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # CONTAR UNA VELA M1 COMPLETA DESPUÉS DEL TOQUE
-    # --------------------------------------------------------
-
-    completed = int(
-        state.get(
-            "completed_after_touch",
-            0,
-        )
-    )
-
-    completed += 1
-
-    state["completed_after_touch"] = completed
-
-    # --------------------------------------------------------
-    # NO ANALIZAMOS EL COLOR.
-    #
-    # Solo esperamos que termine la sexta vela.
-    # --------------------------------------------------------
-
-    if completed < WAITING_CANDLES:
-
-        state["state"] = STATE_WAITING
-
-        state["reason"] = (
-            f"esperando vela "
-            f"{completed}/{WAITING_CANDLES} "
-            f"después del toque"
+    except Exception as e:
+        print(
+            f"[ANALYSIS] Error: {e}"
         )
 
-        return state
-
-    # --------------------------------------------------------
-    # SEXTA VELA COMPLETADA
-    # --------------------------------------------------------
-
-    state["state"] = STATE_READY
-
-    state["signal_timestamp"] = timestamp
-
-    state["reason"] = (
-        "6 velas M1 completadas después del toque"
-    )
-
-    return state
+        return None
 
 
 # ============================================================
-# PREPARAR N+1
+# OBTENER SEÑAL
 # ============================================================
 
-def prepare_n_plus_1(
-    state: Optional[Dict[str, Any]],
-    next_timestamp: Optional[int] = None,
-) -> Optional[str]:
+def get_strategy_signal(
+    m5_candles,
+    m1_candles,
+    analysis,
+):
+    """
+    Prioridad:
 
-    if state is None:
-        return None
+    1. analysis["signal"]
+    2. strategy.check_pattern()
+    """
 
-    if not state.get("active"):
-        return None
-
-    if state.get("state") != STATE_READY:
-        return None
-
-    signal = state.get("signal")
-
-    if signal not in (
-        SIGNAL_CALL,
-        SIGNAL_PUT,
+    if isinstance(
+        analysis,
+        dict,
     ):
+        signal = normalize_signal(
+            analysis.get(
+                "signal"
+            )
+        )
+
+        if signal:
+            return signal
+
+    function = getattr(
+        strategy,
+        "check_pattern",
+        None,
+    )
+
+    if not callable(function):
         return None
 
-    state["entry_timestamp"] = next_timestamp
+    try:
+        result = call_strategy_function(
+            function,
+            m5_candles,
+            m1_candles,
+        )
+
+        return normalize_signal(
+            result
+        )
+
+    except Exception as e:
+        print(
+            f"[STRATEGY] Error: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# MOSTRAR ANÁLISIS
+# ============================================================
+
+def print_analysis(
+    pair,
+    analysis,
+):
+    if analysis is None:
+        return
+
+    if not isinstance(
+        analysis,
+        dict,
+    ):
+        print(
+            f"[{pair}] "
+            f"Análisis recibido: "
+            f"{analysis}"
+        )
+
+        return
+
+    print("\n--------------------------------------")
+    print(
+        f"ANÁLISIS DE ESTRUCTURA {pair}"
+    )
+    print("--------------------------------------")
+
+    support = analysis.get(
+        "support"
+    )
+
+    resistance = analysis.get(
+        "resistance"
+    )
+
+    touch = analysis.get(
+        "touch"
+    )
+
+    zone = analysis.get(
+        "zone"
+    )
+
+    count = analysis.get(
+        "count"
+    )
+
+    signal = normalize_signal(
+        analysis.get(
+            "signal"
+        )
+    )
+
+    reason = analysis.get(
+        "reason"
+    )
+
+    print(
+        f"Soporte M5      : {support}"
+    )
+
+    print(
+        f"Resistencia M5  : {resistance}"
+    )
+
+    print(
+        f"Toque/Ruptura   : {touch}"
+    )
+
+    print(
+        f"Zona            : {zone}"
+    )
+
+    print(
+        f"Conteo          : {count}"
+    )
+
+    print(
+        f"Señal           : "
+        f"{signal.upper() if signal else 'NINGUNA'}"
+    )
+
+    print(
+        f"Motivo          : "
+        f"{reason if reason else 'N/A'}"
+    )
+
+    print("--------------------------------------")
+
+
+# ============================================================
+# PROCESAR PAR
+# ============================================================
+
+def process_pair(
+    iq,
+    pair,
+    candle_timestamp,
+):
+    # --------------------------------------------------------
+    # M5 = ESTRUCTURA
+    # --------------------------------------------------------
+
+    m5_candles = get_m5_candles(
+        iq,
+        pair,
+        candle_timestamp,
+    )
+
+    if not m5_candles:
+        print(
+            f"[{pair}] "
+            "M5 insuficiente."
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # M1 = TOQUE + CONTEO
+    # --------------------------------------------------------
+
+    m1_candles = get_m1_candles(
+        iq,
+        pair,
+        candle_timestamp,
+    )
+
+    if not m1_candles:
+        print(
+            f"[{pair}] "
+            "M1 insuficiente."
+        )
+
+        return None
+
+    if not validate_m1_sequence(
+        m1_candles
+    ):
+        print(
+            f"[{pair}] "
+            "Secuencia M1 inválida."
+        )
+
+        return None
+
+    print_m1_structure(
+        pair,
+        m1_candles,
+    )
+
+    # --------------------------------------------------------
+    # ANÁLISIS
+    # --------------------------------------------------------
+
+    print(
+        f"\n[{pair}] "
+        "Analizando M5 + M1..."
+    )
+
+    analysis = get_full_analysis(
+        m5_candles,
+        m1_candles,
+    )
+
+    print_analysis(
+        pair,
+        analysis,
+    )
+
+    # --------------------------------------------------------
+    # SEÑAL
+    # --------------------------------------------------------
+
+    signal = get_strategy_signal(
+        m5_candles,
+        m1_candles,
+        analysis,
+    )
+
+    if signal is None:
+        print(
+            f"[{pair}] "
+            "⚪ SIN ENTRADA"
+        )
+
+        return None
+
+    if signal == "call":
+        print(
+            f"[{pair}] "
+            "🟢 SOPORTE M5 → CALL"
+        )
+
+    elif signal == "put":
+        print(
+            f"[{pair}] "
+            "🔴 RESISTENCIA M5 → PUT"
+        )
 
     return signal
 
 
 # ============================================================
-# MARCAR EJECUTADA
+# EJECUTAR SNIPER N+1
 # ============================================================
 
-def mark_executed(
-    state: Optional[Dict[str, Any]],
-) -> None:
-
-    if state is None:
-        return
-
-    state["state"] = STATE_EXECUTED
-    state["active"] = False
-    state["reason"] = "operación ejecutada en N+1"
-
-
-# ============================================================
-# ANALIZAR UNA SECUENCIA COMPLETA
-#
-# Esta función recibe las velas M1 y la estructura M5.
-#
-# IMPORTANTE:
-# La última vela M1 se interpreta como la vela que acaba
-# de cerrar.
-# ============================================================
-
-def analyze_sequence(
-    candles_m1: Any,
-    candles_m5: Any,
-) -> Dict[str, Any]:
-
-    result: Dict[str, Any] = {
-        "valid": False,
-        "signal": None,
-        "zone": None,
-
-        "support": None,
-        "resistance": None,
-
-        "touch_detected": False,
-        "touch_timestamp": None,
-
-        "completed_after_touch": 0,
-
-        "waiting": False,
-        "ready": False,
-
-        "entry": False,
-        "entry_timestamp": None,
-
-        "reason": "sin señal",
-    }
-
-    m1 = _normalize_m1(candles_m1)
-
-    if m1.empty:
-        result["reason"] = "sin velas M1"
-        return result
-
-    m5_levels = get_m5_levels(candles_m5)
-
-    if not m5_levels["available"]:
-        result["reason"] = m5_levels["reason"]
-        return result
-
-    support = m5_levels["support"]
-    resistance = m5_levels["resistance"]
-
-    result["support"] = support
-    result["resistance"] = resistance
-
-    # --------------------------------------------------------
-    # BUSCAR EL ÚLTIMO TOQUE M1
-    # --------------------------------------------------------
-
-    touch_index = None
-    touch_zone = None
-
-    for index in range(len(m1) - 1, -1, -1):
-
-        candle = m1.iloc[index]
-
-        zone = detect_zone_touch(
-            candle,
-            support,
-            resistance,
-        )
-
-        if zone is not None:
-            touch_index = index
-            touch_zone = zone
-            break
-
-    if touch_index is None:
-        result["reason"] = (
-            "ninguna vela M1 tocó soporte/resistencia M5"
-        )
-        return result
-
-    result["touch_detected"] = True
-    result["zone"] = touch_zone
-
-    touch_candle = m1.iloc[touch_index]
-
-    touch_timestamp = None
-
-    if "from" in touch_candle.index:
-        value = _to_float(
-            touch_candle["from"]
-        )
-
-        if value is not None:
-            touch_timestamp = int(value)
-
-    result["touch_timestamp"] = touch_timestamp
-
-    # --------------------------------------------------------
-    # TODAS LAS VELAS DESPUÉS DEL TOQUE
-    #
-    # LA VELA DEL TOQUE NO SE CUENTA.
-    # --------------------------------------------------------
-
-    candles_after_touch = m1.iloc[
-        touch_index + 1:
-    ].copy()
-
-    completed = len(candles_after_touch)
-
-    result["completed_after_touch"] = completed
-
-    # --------------------------------------------------------
-    # TODAVÍA NO LLEGÓ A 6
-    # --------------------------------------------------------
-
-    if completed < WAITING_CANDLES:
-
-        result["waiting"] = True
-
-        result["reason"] = (
-            f"esperando {WAITING_CANDLES - completed} "
-            f"vela(s) M1 después del toque"
-        )
-
-        return result
-
-    # --------------------------------------------------------
-    # EXACTAMENTE / AL MENOS 6 VELAS
-    # --------------------------------------------------------
-
-    sixth_candle = candles_after_touch.iloc[
-        WAITING_CANDLES - 1
-    ]
-
-    sixth_timestamp = None
-
-    if "from" in sixth_candle.index:
-        value = _to_float(
-            sixth_candle["from"]
-        )
-
-        if value is not None:
-            sixth_timestamp = int(value)
-
-    # --------------------------------------------------------
-    # DIRECCIÓN:
-    #
-    # SOPORTE  -> CALL
-    # RESISTENCIA -> PUT
-    #
-    # NO SE USA:
-    # - color de la sexta
-    # - cuerpo
-    # - doji
-    # - mecha
-    # - agotamiento
-    # - continuidad
-    # --------------------------------------------------------
-
-    if touch_zone == TYPE_SUPPORT:
-        signal = SIGNAL_CALL
-
-    elif touch_zone == TYPE_RESISTANCE:
-        signal = SIGNAL_PUT
-
-    else:
-        result["reason"] = "zona desconocida"
-        return result
-
-    result["signal"] = signal
-    result["valid"] = True
-    result["ready"] = True
-    result["entry_timestamp"] = (
-        sixth_timestamp + 60
-        if sixth_timestamp is not None
-        else None
+def execute_trade(
+    iq,
+    pair,
+    signal,
+):
+    signal = normalize_signal(
+        signal
     )
 
-    result["reason"] = (
-        f"{touch_zone.upper()} M5 detectado + "
-        f"{WAITING_CANDLES} velas M1 completadas"
+    if signal not in (
+        "call",
+        "put",
+    ):
+        print(
+            f"[{pair}] "
+            "Señal inválida."
+        )
+
+        return False, None
+
+    print("\n======================================")
+    print("🎯 SNIPER N+1")
+    print("======================================")
+    print(
+        f"Activo     : {pair}"
     )
-
-    return result
-
-
-# ============================================================
-# ANALIZAR MERCADO
-# ============================================================
-
-def analyze_market(
-    candles_m1: Any,
-    candles_m5: Any,
-) -> Dict[str, Any]:
-
-    return analyze_sequence(
-        candles_m1,
-        candles_m5,
+    print(
+        f"Dirección  : {signal.upper()}"
     )
-
-
-# ============================================================
-# GET SIGNAL
-# ============================================================
-
-def get_signal(
-    candles_m1: Any,
-    candles_m5: Any,
-) -> Optional[str]:
-
-    result = analyze_market(
-        candles_m1,
-        candles_m5,
+    print(
+        f"Monto      : {AMOUNT}"
     )
+    print(
+        f"Expiración : {EXPIRATION}M"
+    )
+    print(
+        "Ejecución  : APERTURA N+1"
+    )
+    print("======================================")
 
-    if not result.get("valid"):
+    try:
+        success, order_id = iq.buy(
+            AMOUNT,
+            pair,
+            signal,
+            EXPIRATION,
+        )
+
+        if success:
+            print(
+                f"✓ OPERACIÓN ABIERTA "
+                f"ID={order_id}"
+            )
+
+            send_telegram(
+                "🎯 SNIPER N+1\n\n"
+                f"Activo: {pair}\n"
+                f"Dirección: {signal.upper()}\n"
+                f"Monto: {AMOUNT}\n"
+                f"Expiración: {EXPIRATION}M"
+            )
+
+            return True, order_id
+
+        print(
+            f"✗ IQ Option rechazó "
+            f"la operación en {pair}."
+        )
+
+        return False, None
+
+    except Exception as e:
+        print(
+            f"✗ Error ejecutando "
+            f"{pair}: {e}"
+        )
+
+        return False, None
+
+
+# ============================================================
+# RESULTADO
+# ============================================================
+
+def get_trade_result(
+    iq,
+    order_id,
+):
+    if not order_id:
         return None
 
-    return result.get("signal")
-
-
-# ============================================================
-# COMPATIBILIDAD
-#
-# Estas funciones se mantienen para que strategy.py siga
-# teniendo los nombres esperados por versiones anteriores
-# del bot.
-#
-# SIN DATOS M5 NO SE GENERA SEÑAL.
-# ============================================================
-
-def check_pattern(
-    candles_m1: Any,
-    candles_m5: Any = None,
-) -> Optional[str]:
-
-    if candles_m5 is None:
-        return None
-
-    return get_signal(
-        candles_m1,
-        candles_m5,
+    wait_seconds = (
+        EXPIRATION * 60
+        + 5
     )
 
-
-def signal(
-    candles_m1: Any,
-    candles_m5: Any = None,
-) -> Optional[str]:
-
-    return check_pattern(
-        candles_m1,
-        candles_m5,
+    print(
+        f"Esperando resultado "
+        f"({wait_seconds}s)..."
     )
 
+    time.sleep(
+        wait_seconds
+    )
 
-def get_m1_direction(
-    candles_m1: Any,
-) -> Optional[str]:
+    try:
+        result = iq.check_win_v4(
+            order_id
+        )
 
-    m1 = _normalize_m1(candles_m1)
+        if result is not None:
+            return float(
+                result
+            )
 
-    if m1.empty:
-        return None
-
-    candle = m1.iloc[-1]
-
-    direction = candle_direction(candle)
-
-    if direction == "bullish":
-        return SIGNAL_CALL
-
-    if direction == "bearish":
-        return SIGNAL_PUT
+    except Exception as e:
+        print(
+            f"[RESULTADO] Error: {e}"
+        )
 
     return None
 
 
-def get_strategy_analysis(
-    candles_m1: Any,
-    candles_m5: Any = None,
-) -> Optional[Dict[str, Any]]:
-
-    if candles_m5 is None:
-        return None
-
-    return analyze_market(
-        candles_m1,
-        candles_m5,
-    )
-
-
 # ============================================================
-# ESTADO INDEPENDIENTE POR PAR
-#
-# Esto permite que cada activo tenga su propio conteo.
+# IMPRIMIR RESULTADO
 # ============================================================
 
-_PAIR_STATES: Dict[str, Dict[str, Any]] = {}
-
-
-def reset_pair_state(
-    pair: str,
-) -> None:
-
-    if not isinstance(pair, str):
-        return
-
-    _PAIR_STATES.pop(
-        pair,
-        None,
-    )
-
-
-def get_pair_state(
-    pair: str,
-) -> Optional[Dict[str, Any]]:
-
-    return _PAIR_STATES.get(pair)
-
-
-def process_pair_candle(
-    pair: str,
-    candle_m1: Any,
-    m5_candles: Any,
-) -> Dict[str, Any]:
-
-    result = {
-        "pair": pair,
-        "signal": None,
-        "ready": False,
-        "entry": False,
-        "state": None,
-        "reason": "sin señal",
-    }
-
-    if not isinstance(pair, str) or not pair:
-        result["reason"] = "par inválido"
-        return result
-
-    if candle_m1 is None:
-        result["reason"] = "vela M1 inválida"
-        return result
-
-    levels = get_m5_levels(
-        m5_candles
-    )
-
-    if not levels["available"]:
-        result["reason"] = levels["reason"]
-        return result
-
-    support = levels["support"]
-    resistance = levels["resistance"]
-
-    # --------------------------------------------------------
-    # COMPROBAR SI EXISTE UN ESTADO ACTIVO
-    # --------------------------------------------------------
-
-    state = _PAIR_STATES.get(pair)
-
-    # --------------------------------------------------------
-    # SI NO EXISTE TOQUE ACTIVO, BUSCAR UNO
-    # --------------------------------------------------------
-
-    if state is None:
-
-        zone = detect_zone_touch(
-            candle_m1,
-            support,
-            resistance,
+def print_result(
+    pair,
+    result,
+):
+    if result is None:
+        print(
+            f"\n⚠ {pair} "
+            "RESULTADO NO DISPONIBLE"
         )
 
-        if zone is None:
+        return
 
-            result["reason"] = (
-                "M1 sin toque en zona M5"
+    if result > 0:
+        print(
+            f"\n🟢 WIN | {pair}"
+        )
+
+        print(
+            f"Resultado: +{result}"
+        )
+
+        send_telegram(
+            "🟢 WIN\n"
+            f"Activo: {pair}\n"
+            f"Resultado: +{result}"
+        )
+
+    elif result < 0:
+        print(
+            f"\n🔴 LOSS | {pair}"
+        )
+
+        print(
+            f"Resultado: {result}"
+        )
+
+        send_telegram(
+            "🔴 LOSS\n"
+            f"Activo: {pair}\n"
+            f"Resultado: {result}"
+        )
+
+    else:
+        print(
+            f"\n⚪ EMPATE | {pair}"
+        )
+
+        print(
+            f"Resultado: {result}"
+        )
+
+        send_telegram(
+            "⚪ EMPATE\n"
+            f"Activo: {pair}\n"
+            f"Resultado: {result}"
+        )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("\n")
+    print("==========================================")
+    print("       BOT IQ OPTION SNIPER")
+    print("           ESTRUCTURA M5")
+    print("        CONFIRMACIÓN M1 N+1")
+    print("==========================================")
+    print("ESTRUCTURA    : M5")
+    print("ANÁLISIS      : M1")
+    print("ENTRADA       : N+1")
+    print("MODO          : SNIPER")
+    print(f"MONTO         : {AMOUNT}")
+    print(
+        f"EXPIRACIÓN    : {EXPIRATION}M"
+    )
+    print(
+        f"M1 VELAS      : {M1_CANDLES_REQUIRED}"
+    )
+    print(
+        f"M5 VELAS      : {M5_CANDLES_REQUIRED}"
+    )
+    print(
+        f"PARES         : {len(PAIRS)}"
+    )
+    print("==========================================")
+
+    for pair in PAIRS:
+        print(
+            f"✓ {pair}"
+        )
+
+    print(
+        "=========================================="
+    )
+
+    verify_strategy()
+
+    iq = connect_iq()
+
+    # Última vela M1 cerrada.
+    last_timestamp = (
+        get_current_m1()
+        - TIMEFRAME_M1
+    )
+
+    while True:
+        try:
+            # ------------------------------------------------
+            # CONEXIÓN
+            # ------------------------------------------------
+
+            if not ensure_connection(
+                iq
+            ):
+                time.sleep(5)
+
+                iq = connect_iq()
+
+                continue
+
+            # ------------------------------------------------
+            # ESPERAR NUEVA VELA M1
+            # ------------------------------------------------
+
+            current_timestamp = (
+                wait_for_new_m1(
+                    last_timestamp
+                )
             )
 
-            return result
+            last_timestamp = (
+                current_timestamp
+            )
 
-        state = create_touch_state(
-            zone,
-            candle_m1,
-        )
+            print(
+                "\n\n=========================================="
+            )
 
-        _PAIR_STATES[pair] = state
+            print(
+                "🔔 NUEVA VELA M1"
+            )
 
-        result["state"] = state.copy()
+            print(
+                datetime.fromtimestamp(
+                    current_timestamp
+                ).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            )
 
-        result["reason"] = (
-            f"TOQUE {zone.upper()} M5 detectado; "
-            f"comienza conteo 0/{WAITING_CANDLES}"
-        )
+            print(
+                "=========================================="
+            )
 
-        return result
+            # ------------------------------------------------
+            # ANALIZAR TODOS LOS PARES
+            # ------------------------------------------------
 
-    # --------------------------------------------------------
-    # ESTADO READY
-    #
-    # Si el bot consulta después del cierre de la sexta,
-    # la señal queda disponible para N+1.
-    # --------------------------------------------------------
+            signals = []
 
-    if state.get("state") == STATE_READY:
+            for pair in PAIRS:
+                try:
+                    signal = process_pair(
+                        iq,
+                        pair,
+                        current_timestamp,
+                    )
 
-        result["signal"] = state.get("signal")
-        result["ready"] = True
-        result["entry"] = True
-        result["state"] = state.copy()
+                    if signal is not None:
+                        signals.append(
+                            (
+                                pair,
+                                signal,
+                            )
+                        )
 
-        result["reason"] = (
-            "señal preparada para ejecución N+1"
-        )
+                except Exception as e:
+                    print(
+                        f"[{pair}] "
+                        f"Error procesando: {e}"
+                    )
 
-        return result
+            # ------------------------------------------------
+            # SIN SEÑALES
+            # ------------------------------------------------
 
-    # --------------------------------------------------------
-    # ESTADO EJECUTADO
-    # --------------------------------------------------------
+            if not signals:
+                print(
+                    "\n⚪ Ningún par cumplió "
+                    "las condiciones."
+                )
 
-    if state.get("state") == STATE_EXECUTED:
+                continue
 
-        result["state"] = state.copy()
-        result["reason"] = "estado ya ejecutado"
+            # ------------------------------------------------
+            # MOSTRAR SEÑALES
+            # ------------------------------------------------
 
-        return result
+            print(
+                "\n=========================================="
+            )
 
-    # --------------------------------------------------------
-    # CONTAR LA NUEVA VELA
-    # --------------------------------------------------------
+            print(
+                "🎯 ENTRADAS PREPARADAS PARA N+1"
+            )
 
-    state = update_touch_state(
-        state,
-        candle_m1,
-    )
+            print(
+                "=========================================="
+            )
 
-    _PAIR_STATES[pair] = state
+            for pair, signal in signals:
+                print(
+                    f"{pair} → "
+                    f"{signal.upper()}"
+                )
 
-    result["state"] = state.copy()
+            print(
+                "=========================================="
+            )
 
-    if state.get("state") == STATE_READY:
+            # ------------------------------------------------
+            # APERTURA N+1
+            # ------------------------------------------------
 
-        result["signal"] = state.get("signal")
-        result["ready"] = True
-        result["entry"] = True
+            next_candle = (
+                current_timestamp
+                + TIMEFRAME_M1
+            )
 
-        result["reason"] = (
-            "sexta vela cerrada; "
-            "entrada preparada para N+1"
-        )
+            wait_until_timestamp(
+                next_candle
+            )
 
-        return result
+            print(
+                "\n=========================================="
+            )
 
-    result["reason"] = state.get(
-        "reason",
-        "esperando",
-    )
+            print(
+                "🚀 APERTURA N+1"
+            )
 
-    return result
+            print(
+                datetime.fromtimestamp(
+                    next_candle
+                ).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            )
+
+            print(
+                "=========================================="
+            )
+
+            # ------------------------------------------------
+            # EJECUCIÓN
+            # ------------------------------------------------
+
+            for pair, signal in signals:
+                try:
+                    success, order_id = (
+                        execute_trade(
+                            iq,
+                            pair,
+                            signal,
+                        )
+                    )
+
+                    if not success:
+                        continue
+
+                    result = get_trade_result(
+                        iq,
+                        order_id,
+                    )
+
+                    print_result(
+                        pair,
+                        result,
+                    )
+
+                except Exception as e:
+                    print(
+                        f"[{pair}] "
+                        f"Error operación: {e}"
+                    )
+
+        # ----------------------------------------------------
+        # DETENER
+        # ----------------------------------------------------
+
+        except KeyboardInterrupt:
+            print(
+                "\n\nBOT DETENIDO "
+                "POR EL USUARIO."
+            )
+
+            send_telegram(
+                "🛑 BOT SNIPER M5/M1 "
+                "DETENIDO"
+            )
+
+            break
+
+        # ----------------------------------------------------
+        # ERROR GENERAL
+        # ----------------------------------------------------
+
+        except Exception as e:
+            print(
+                "\n======================================"
+            )
+
+            print(
+                "ERROR GENERAL"
+            )
+
+            print(
+                "======================================"
+            )
+
+            print(
+                str(e)
+            )
+
+            print(
+                "======================================"
+            )
+
+            send_telegram(
+                "⚠ ERROR EN BOT\n"
+                f"{str(e)}"
+            )
+
+            time.sleep(3)
 
 
 # ============================================================
-# MARCAR OPERACIÓN EJECUTADA
-# ============================================================
-
-def mark_pair_executed(
-    pair: str,
-) -> None:
-
-    state = _PAIR_STATES.get(pair)
-
-    if state is None:
-        return
-
-    mark_executed(
-        state
-    )
-
-
-# ============================================================
-# INFORMACIÓN DEL ESTADO
-# ============================================================
-
-def get_pair_analysis(
-    pair: str,
-) -> Optional[Dict[str, Any]]:
-
-    state = _PAIR_STATES.get(pair)
-
-    if state is None:
-        return None
-
-    return state.copy()
-
-
-# ============================================================
-# PRUEBA LOCAL
+# INICIO
 # ============================================================
 
 if __name__ == "__main__":
-
-    print("==========================================")
-    print("STRATEGY.PY CARGADO CORRECTAMENTE")
-    print("==========================================")
-    print("ESTRUCTURA       : M5")
-    print("ANÁLISIS         : M1")
-    print("VELAS 5S         : NO UTILIZADAS")
-    print("VELAS ESPERA     : 6 M1")
-    print("VELA DEL TOQUE   : NO CUENTA")
-    print("------------------------------------------")
-    print("SOPORTE M5       -> CALL")
-    print("RESISTENCIA M5   -> PUT")
-    print("------------------------------------------")
-    print("TOQUE")
-    print("  ↓")
-    print("N-6")
-    print("  ↓")
-    print("N-5")
-    print("  ↓")
-    print("N-4")
-    print("  ↓")
-    print("N-3")
-    print("  ↓")
-    print("N-2")
-    print("  ↓")
-    print("N-1")
-    print("  ↓")
-    print("N = 6.ª vela después del toque")
-    print("  ↓")
-    print("N+1 = EJECUCIÓN")
-    print("==========================================")
+    main()
