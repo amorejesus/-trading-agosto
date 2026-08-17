@@ -20,7 +20,8 @@ PAIRS = [
     "GBPUSD",
     "NZDUSD",
 ]
-AMOUNT = 2500
+
+AMOUNT = 9230
 EXPIRATION = 1
 
 TIMEFRAME_5S = 5
@@ -120,8 +121,9 @@ def connect_iq():
 
                 send_telegram(
                     "🤖 BOT CONECTADO\n"
-                    f"Activo: {PAIR}\n"
-                    "Cuenta: PRACTICE"
+                    "Activos:\n"
+                    + "\n".join(PAIRS)
+                    + "\nCuenta: PRACTICE"
                 )
 
                 return iq
@@ -177,22 +179,26 @@ def wait_for_new_m1(last_m1=None):
         time.sleep(0.2)
 
 
-def get_m1_5s_candles(iq, m1_start):
+def get_m1_5s_candles(iq, pair, m1_start):
     m1_end = m1_start + 60
 
     try:
         candles = iq.get_candles(
-            PAIR,
+            pair,
             TIMEFRAME_5S,
             20,
             m1_end,
         )
     except Exception as e:
-        print(f"[CANDLES] Error: {e}")
+        print(
+            f"[CANDLES] {pair} Error: {e}"
+        )
         return None
 
     if not candles:
-        print("[CANDLES] API no devolvió datos.")
+        print(
+            f"[CANDLES] {pair} API no devolvió datos."
+        )
         return None
 
     valid = []
@@ -213,7 +219,7 @@ def get_m1_5s_candles(iq, m1_start):
 
     if len(valid) != CANDLES_PER_M1:
         print(
-            f"[M1] Velas encontradas: "
+            f"[M1] {pair} Velas encontradas: "
             f"{len(valid)}/{CANDLES_PER_M1}"
         )
         return None
@@ -231,7 +237,7 @@ def get_m1_5s_candles(iq, m1_start):
 
         if difference != TIMEFRAME_5S:
             print(
-                "[M1] SECUENCIA INVALIDA: "
+                f"[M1] {pair} SECUENCIA INVALIDA: "
                 f"diferencia={difference}s"
             )
             return None
@@ -239,9 +245,9 @@ def get_m1_5s_candles(iq, m1_start):
     return valid
 
 
-def print_m1_candles(candles):
+def print_m1_candles(pair, candles):
     print("\n--------------------------------------")
-    print("12 VELAS DE 5S")
+    print(f"{pair} | 12 VELAS DE 5S")
     print("--------------------------------------")
 
     for index, candle in enumerate(candles, start=1):
@@ -304,12 +310,12 @@ def normalize_signal(signal):
     return None
 
 
-def print_analysis(analysis):
+def print_analysis(pair, analysis):
     if analysis is None:
         return
 
     print("\n========================================")
-    print("       ANALISIS MATEMATICO")
+    print(f"       ANALISIS MATEMATICO - {pair}")
     print("========================================")
 
     dominant = analysis.get("dominant")
@@ -396,7 +402,7 @@ def print_analysis(analysis):
     print("========================================")
 
 
-def execute_trade(iq, signal):
+def execute_trade(iq, pair, signal):
     signal = normalize_signal(signal)
 
     if signal not in ("call", "put"):
@@ -407,7 +413,7 @@ def execute_trade(iq, signal):
     print("SEÑAL CONFIRMADA")
     print("======================================")
     print(f"Dirección  : {signal.upper()}")
-    print(f"Activo     : {PAIR}")
+    print(f"Activo     : {pair}")
     print(f"Monto      : {AMOUNT}")
     print(f"Expiración : {EXPIRATION}M")
     print("======================================")
@@ -415,7 +421,7 @@ def execute_trade(iq, signal):
     try:
         success, order_id = iq.buy(
             AMOUNT,
-            PAIR,
+            pair,
             signal,
             EXPIRATION,
         )
@@ -427,7 +433,7 @@ def execute_trade(iq, signal):
 
             send_telegram(
                 "📊 OPERACIÓN ABIERTA\n\n"
-                f"Activo: {PAIR}\n"
+                f"Activo: {pair}\n"
                 f"Dirección: {signal.upper()}\n"
                 f"Monto: {AMOUNT}\n"
                 f"Expiración: {EXPIRATION}M"
@@ -467,32 +473,38 @@ def get_trade_result(iq, order_id):
     return None
 
 
-def print_result(result):
+def print_result(pair, result):
     if result is None:
         print("\n⚠ RESULTADO NO DISPONIBLE")
         return
 
     if result > 0:
         print("\n🟢 WIN")
+        print(f"Activo: {pair}")
         print(f"Resultado: +{result}")
         send_telegram(
             "🟢 WIN\n"
+            f"Activo: {pair}\n"
             f"Resultado: +{result}"
         )
 
     elif result < 0:
         print("\n🔴 LOSS")
+        print(f"Activo: {pair}")
         print(f"Resultado: {result}")
         send_telegram(
             "🔴 LOSS\n"
+            f"Activo: {pair}\n"
             f"Resultado: {result}"
         )
 
     else:
         print("\n⚪ EMPATE")
+        print(f"Activo: {pair}")
         print(f"Resultado: {result}")
         send_telegram(
             "⚪ EMPATE\n"
+            f"Activo: {pair}\n"
             f"Resultado: {result}"
         )
 
@@ -503,7 +515,12 @@ def main():
     print("             BOT IQ OPTION")
     print("        M1 + 12 VELAS DE 5S")
     print("==========================================")
-    print(f"ACTIVO       : {PAIR}")
+    print("ACTIVOS:")
+
+    for pair in PAIRS:
+        print(f"  - {pair}")
+
+    print("------------------------------------------")
     print(f"MONTO        : {AMOUNT}")
     print(f"EXPIRACIÓN   : {EXPIRATION}M")
     print(f"MICROVELAS   : {CANDLES_PER_M1}")
@@ -542,111 +559,142 @@ def main():
             )
             print("======================================")
 
-            candles = None
-
-            for attempt in range(5):
-                candles = get_m1_5s_candles(
-                    iq,
-                    m1_start
-                )
-
-                if candles is not None:
-                    break
-
-                print(
-                    f"[M1] Esperando datos... "
-                    f"intento {attempt + 1}/5"
-                )
-
-                time.sleep(1)
-
             last_processed_m1 = m1_start
 
-            if candles is None:
-                print("\n⚠ M1 DESCARTADA")
-                print(
-                    "No se obtuvieron exactamente "
-                    "12 velas cerradas de 5s."
-                )
+            for pair in PAIRS:
 
-                send_telegram(
-                    "⚠ M1 DESCARTADA\n"
-                    "Datos 5s incompletos."
-                )
+                if operation_in_progress:
+                    break
 
-                continue
+                print("\n")
+                print("######################################")
+                print(f"ANALIZANDO: {pair}")
+                print("######################################")
 
-            print_m1_candles(candles)
+                candles = None
 
-            print(
-                "\nAnalizando las 12 velas..."
-            )
-
-            analysis = get_full_analysis(candles)
-            print_analysis(analysis)
-
-            signal = normalize_signal(
-                analyze_strategy(candles)
-            )
-
-            print("\n--------------------------------------")
-            print("RESULTADO DE STRATEGY.PY")
-            print("--------------------------------------")
-
-            if signal == "call":
-                print("🟢 DIRECCIÓN: CALL")
-            elif signal == "put":
-                print("🔴 DIRECCIÓN: PUT")
-            else:
-                print("⚪ SIN OPERACIÓN")
-
-            print("--------------------------------------")
-
-            if signal is None:
-                reason = "CONDICIONES_NO_CUMPLIDAS"
-
-                if analysis is not None:
-                    reason = analysis.get(
-                        "reason",
-                        reason
+                for attempt in range(5):
+                    candles = get_m1_5s_candles(
+                        iq,
+                        pair,
+                        m1_start
                     )
 
+                    if candles is not None:
+                        break
+
+                    print(
+                        f"[M1] {pair} Esperando datos... "
+                        f"intento {attempt + 1}/5"
+                    )
+
+                    time.sleep(1)
+
+                if candles is None:
+                    print(
+                        f"\n⚠ {pair} M1 DESCARTADA"
+                    )
+                    print(
+                        "No se obtuvieron exactamente "
+                        "12 velas cerradas de 5s."
+                    )
+
+                    send_telegram(
+                        "⚠ M1 DESCARTADA\n"
+                        f"Activo: {pair}\n"
+                        "Datos 5s incompletos."
+                    )
+
+                    continue
+
+                print_m1_candles(
+                    pair,
+                    candles
+                )
+
                 print(
-                    f"M1 descartada: {reason}"
+                    f"\nAnalizando las 12 velas de {pair}..."
                 )
 
-                send_telegram(
-                    "⚪ SIN OPERACIÓN\n"
-                    f"Activo: {PAIR}\n"
-                    f"Motivo: {reason}"
+                analysis = get_full_analysis(
+                    candles
                 )
 
-                continue
+                print_analysis(
+                    pair,
+                    analysis
+                )
 
-            if operation_in_progress:
+                signal = normalize_signal(
+                    analyze_strategy(candles)
+                )
+
+                print("\n--------------------------------------")
                 print(
-                    "⚠ Ya existe una operación en progreso."
+                    f"RESULTADO DE STRATEGY.PY - {pair}"
                 )
-                continue
+                print("--------------------------------------")
 
-            success, order_id = execute_trade(
-                iq,
-                signal
-            )
+                if signal == "call":
+                    print("🟢 DIRECCIÓN: CALL")
+                elif signal == "put":
+                    print("🔴 DIRECCIÓN: PUT")
+                else:
+                    print("⚪ SIN OPERACIÓN")
 
-            if not success:
-                continue
+                print("--------------------------------------")
 
-            operation_in_progress = True
+                if signal is None:
+                    reason = "CONDICIONES_NO_CUMPLIDAS"
 
-            result = get_trade_result(
-                iq,
-                order_id
-            )
+                    if analysis is not None:
+                        reason = analysis.get(
+                            "reason",
+                            reason
+                        )
 
-            print_result(result)
+                    print(
+                        f"{pair} descartado: {reason}"
+                    )
 
-            operation_in_progress = False
+                    send_telegram(
+                        "⚪ SIN OPERACIÓN\n"
+                        f"Activo: {pair}\n"
+                        f"Motivo: {reason}"
+                    )
+
+                    continue
+
+                if operation_in_progress:
+                    print(
+                        "⚠ Ya existe una operación en progreso."
+                    )
+                    break
+
+                success, order_id = execute_trade(
+                    iq,
+                    pair,
+                    signal
+                )
+
+                if not success:
+                    continue
+
+                operation_in_progress = True
+
+                result = get_trade_result(
+                    iq,
+                    order_id
+                )
+
+                print_result(
+                    pair,
+                    result
+                )
+
+                operation_in_progress = False
+
+                break
 
         except KeyboardInterrupt:
             print(
