@@ -1,10 +1,7 @@
-bot.py
-
 import os
 import time
 import requests
 from datetime import datetime
-
 from iqoptionapi.stable_api import IQ_Option
 import strategy
 
@@ -31,20 +28,7 @@ AMOUNT = 9230
 EXPIRATION = 1
 
 TIMEFRAME_5S = 5
-
-# ============================================================
-# NUEVA LÓGICA
-#
-# Se analizan exactamente 6 velas cerradas de 5S.
-# La operación se ejecuta en la apertura de la 7.ª vela.
-#
-# CALL = soporte
-# PUT  = resistencia
-# ============================================================
-
-ANALYSIS_CANDLES = 6
-ENTRY_CANDLE = 7
-
+CANDLES_REQUIRED = 12
 
 EMAIL = os.getenv("IQ_EMAIL")
 PASSWORD = os.getenv("IQ_PASSWORD")
@@ -82,9 +66,7 @@ def send_telegram(message):
             )
 
     except Exception as e:
-        print(
-            f"[TELEGRAM] Error: {e}"
-        )
+        print(f"[TELEGRAM] Error: {e}")
 
 
 # ============================================================
@@ -92,7 +74,6 @@ def send_telegram(message):
 # ============================================================
 
 def verify_strategy():
-
     print("\n======================================")
     print("VERIFICANDO STRATEGY.PY")
     print("======================================")
@@ -103,7 +84,7 @@ def verify_strategy():
             getattr(
                 strategy,
                 "__file__",
-                "desconocido"
+                "desconocido",
             )
         )
     )
@@ -115,31 +96,18 @@ def verify_strategy():
     )
 
     for name in required:
-
         if not callable(
-            getattr(
-                strategy,
-                name,
-                None
-            )
+            getattr(strategy, name, None)
         ):
-
             raise RuntimeError(
-                f"strategy.py no contiene "
-                f"la función '{name}'."
+                f"strategy.py no contiene la función "
+                f"'{name}'."
             )
 
-        print(
-            f"✓ {name}() encontrada"
-        )
+        print(f"✓ {name}() encontrada")
 
-    print(
-        "✓ STRATEGY.PY COMPATIBLE"
-    )
-
-    print(
-        "======================================\n"
-    )
+    print("✓ STRATEGY.PY COMPATIBLE")
+    print("======================================\n")
 
 
 # ============================================================
@@ -147,63 +115,46 @@ def verify_strategy():
 # ============================================================
 
 def connect_iq():
-
     if not EMAIL:
-
         raise RuntimeError(
             "Falta la variable de entorno IQ_EMAIL"
         )
 
     if not PASSWORD:
-
         raise RuntimeError(
             "Falta la variable de entorno IQ_PASSWORD"
         )
 
     while True:
-
         try:
-
             print("\n======================================")
             print("CONECTANDO A IQ OPTION")
             print("======================================")
 
             iq = IQ_Option(
                 EMAIL,
-                PASSWORD
+                PASSWORD,
             )
 
             check, reason = iq.connect()
 
             if check:
-
-                print(
-                    "✓ CONEXIÓN EXITOSA"
-                )
+                print("✓ CONEXIÓN EXITOSA")
 
                 try:
-
-                    iq.change_balance(
-                        "PRACTICE"
-                    )
-
-                    print(
-                        "✓ CUENTA PRACTICE"
-                    )
+                    iq.change_balance("PRACTICE")
+                    print("✓ CUENTA PRACTICE")
 
                 except Exception as e:
-
                     print(
-                        "⚠ No se pudo cambiar "
-                        "a PRACTICE: "
+                        "⚠ No se pudo cambiar a PRACTICE: "
                         + str(e)
                     )
 
                 send_telegram(
                     "🤖 BOT CONECTADO\n"
-                    "Modo: SOPORTE / RESISTENCIA\n"
-                    "Entrada: 7.ª vela de 5S\n"
-                    "Mercado: FOREX REAL\n"
+                    "Modo: SNIPER N+1\n"
+                    "Mercado: FOREX\n"
                     f"Pares: {len(PAIRS)}"
                 )
 
@@ -214,7 +165,6 @@ def connect_iq():
             )
 
         except Exception as e:
-
             print(
                 f"✗ Error conectando: {e}"
             )
@@ -231,29 +181,22 @@ def connect_iq():
 # ============================================================
 
 def ensure_connection(iq):
-
     try:
-
         if iq.check_connect():
             return True
 
     except Exception:
         pass
 
-    print(
-        "\n⚠ CONEXIÓN PERDIDA"
-    )
+    print("\n⚠ CONEXIÓN PERDIDA")
 
     try:
-
         check, reason = iq.connect()
 
         if check:
-
             print(
                 "✓ CONEXIÓN RESTAURADA"
             )
-
             return True
 
         print(
@@ -261,7 +204,6 @@ def ensure_connection(iq):
         )
 
     except Exception as e:
-
         print(
             f"✗ Error reconectando: {e}"
         )
@@ -274,10 +216,7 @@ def ensure_connection(iq):
 # ============================================================
 
 def get_current_5s():
-
-    now = int(
-        time.time()
-    )
+    now = int(time.time())
 
     return now - (
         now % TIMEFRAME_5S
@@ -285,106 +224,72 @@ def get_current_5s():
 
 
 def wait_for_new_5s(last_timestamp):
-
     while True:
-
         current = get_current_5s()
 
         if current > last_timestamp:
-
             return current
 
         time.sleep(0.02)
 
 
 # ============================================================
-# OBTENER 6 VELAS CERRADAS
+# OBTENER VELAS 5S
 # ============================================================
 
 def get_5s_candles(
     iq,
     pair,
     end_timestamp,
-    amount=ANALYSIS_CANDLES,
+    amount=CANDLES_REQUIRED,
 ):
-
     try:
-
         candles = iq.get_candles(
             pair,
             TIMEFRAME_5S,
-            amount + 2,
+            amount,
             end_timestamp,
         )
 
     except Exception as e:
-
         print(
-            f"[{pair}] Error obteniendo velas: "
-            f"{e}"
+            f"[{pair}] Error obteniendo velas: {e}"
         )
-
         return None
 
     if not candles:
-
         print(
             f"[{pair}] API no devolvió datos."
         )
-
         return None
 
     valid = []
 
     for candle in candles:
-
         try:
-
             timestamp = int(
                 candle.get("from")
             )
-
         except Exception:
+            continue
 
+        if timestamp <= 0:
             continue
 
         valid.append(candle)
 
     if not valid:
-
         return None
 
     try:
-
         valid.sort(
-            key=lambda x: int(
-                x["from"]
-            )
+            key=lambda x: int(x["from"])
         )
 
     except Exception:
-
         return None
 
-    # La última vela recibida en el cierre
-    # puede estar iniciándose. Se toma el bloque
-    # anterior cerrado.
-
-    valid = [
-        candle
-        for candle in valid
-        if int(candle["from"])
-        < end_timestamp
-    ]
-
     if len(valid) < amount:
-
-        print(
-            f"[{pair}] "
-            f"Velas disponibles: "
-            f"{len(valid)}/{amount}"
-        )
-
         return None
 
     valid = valid[-amount:]
@@ -392,114 +297,77 @@ def get_5s_candles(
     timestamps = []
 
     for candle in valid:
-
         try:
-
             timestamps.append(
                 int(candle["from"])
             )
 
         except Exception:
-
             return None
 
-    for i in range(
-        1,
-        len(timestamps)
-    ):
-
+    for i in range(1, len(timestamps)):
         difference = (
             timestamps[i]
             - timestamps[i - 1]
         )
 
         if difference != TIMEFRAME_5S:
-
             print(
-                f"[{pair}] "
-                f"SECUENCIA 5S INVALIDA: "
+                f"[{pair}] SECUENCIA 5S INVALIDA: "
                 f"{difference}s"
             )
-
             return None
 
     return valid
 
 
 # ============================================================
-# IMPRIMIR LAS 6 VELAS
+# IMPRIMIR VELA
 # ============================================================
 
-def print_candles(
-    pair,
-    candles
-):
-
-    print("\n--------------------------------------")
-
-    print(
-        f"{pair} | "
-        f"6 VELAS DE ANÁLISIS"
-    )
-
-    print("--------------------------------------")
-
-    for index, candle in enumerate(
-        candles,
-        start=1
-    ):
-
-        try:
-
-            timestamp = int(
-                candle["from"]
-            )
-
-            dt = datetime.fromtimestamp(
-                timestamp
-            )
-
-            opening = float(
-                candle["open"]
-            )
-
-            closing = float(
-                candle["close"]
-            )
-
-        except Exception:
-
-            print(
-                f"{index:02d} | "
-                "VELA INVALIDA"
-            )
-
-            continue
-
-        if closing > opening:
-
-            direction = "VERDE"
-            symbol = "🟢"
-
-        elif closing < opening:
-
-            direction = "ROJA"
-            symbol = "🔴"
-
-        else:
-
-            direction = "DOJI"
-            symbol = "⚪"
-
-        print(
-            f"{index:02d} | "
-            f"{dt.strftime('%H:%M:%S')} | "
-            f"{symbol} {direction} | "
-            f"O={opening} | "
-            f"C={closing}"
+def print_candle(pair, candle):
+    try:
+        timestamp = int(
+            candle["from"]
         )
 
-    print("--------------------------------------")
+        dt = datetime.fromtimestamp(
+            timestamp
+        )
+
+        opening = float(
+            candle["open"]
+        )
+
+        closing = float(
+            candle["close"]
+        )
+
+    except Exception:
+        print(
+            f"[{pair}] VELA INVALIDA"
+        )
+        return
+
+    if closing > opening:
+        direction = "VERDE"
+        symbol = "🟢"
+
+    elif closing < opening:
+        direction = "ROJA"
+        symbol = "🔴"
+
+    else:
+        direction = "DOJI"
+        symbol = "⚪"
+
+    print(
+        f"[{pair}] "
+        f"{dt.strftime('%H:%M:%S')} | "
+        f"{symbol} {direction} | "
+        f"O={opening} | "
+        f"C={closing}"
+    )
 
 
 # ============================================================
@@ -507,36 +375,28 @@ def print_candles(
 # ============================================================
 
 def analyze_strategy(candles):
-
     try:
-
         return strategy.check_pattern(
             candles
         )
 
     except Exception as e:
-
         print(
             f"[STRATEGY] Error: {e}"
         )
-
         return None
 
 
 def get_full_analysis(candles):
-
     try:
-
         return strategy.get_strategy_analysis(
             candles
         )
 
     except Exception as e:
-
         print(
             f"[ANALYSIS] Error: {e}"
         )
-
         return None
 
 
@@ -545,21 +405,18 @@ def get_full_analysis(candles):
 # ============================================================
 
 def normalize_signal(signal):
-
     if not isinstance(
         signal,
-        str
+        str,
     ):
-
         return None
 
     signal = signal.strip().lower()
 
     if signal in (
         "call",
-        "put"
+        "put",
     ):
-
         return signal
 
     return None
@@ -571,19 +428,15 @@ def normalize_signal(signal):
 
 def print_analysis(
     pair,
-    analysis
+    analysis,
 ):
-
     if analysis is None:
-
         return
 
     print("\n--------------------------------------")
-
     print(
         f"ANÁLISIS {pair}"
     )
-
     print("--------------------------------------")
 
     dominant = analysis.get(
@@ -591,13 +444,11 @@ def print_analysis(
     )
 
     if dominant:
-
         dominant_text = str(
             dominant
         ).upper()
 
     else:
-
         dominant_text = "NINGUNO"
 
     print(
@@ -620,11 +471,9 @@ def print_analysis(
     )
 
     if final_control is None:
-
         final_control_text = "NONE"
 
     else:
-
         final_control_text = str(
             final_control
         ).upper()
@@ -632,16 +481,6 @@ def print_analysis(
     print(
         f"Control final   : "
         f"{final_control_text}"
-    )
-
-    print(
-        f"Soporte         : "
-        f"{analysis.get('support', False)}"
-    )
-
-    print(
-        f"Resistencia     : "
-        f"{analysis.get('resistance', False)}"
     )
 
     print(
@@ -673,33 +512,29 @@ def print_analysis(
 
 
 # ============================================================
-# EJECUTAR EN LA 7.ª VELA
+# EJECUTAR SNIPER N+1
 # ============================================================
 
 def execute_trade(
     iq,
     pair,
-    signal
+    signal,
 ):
-
     signal = normalize_signal(
         signal
     )
 
     if signal not in (
         "call",
-        "put"
+        "put",
     ):
-
         print(
-            f"[{pair}] "
-            "Sin señal válida."
+            f"[{pair}] Sin señal válida."
         )
-
         return False, None
 
     print("\n======================================")
-    print("🎯 ENTRADA 7.ª VELA")
+    print("🎯 SNIPER N+1")
     print("======================================")
 
     print(
@@ -707,8 +542,7 @@ def execute_trade(
     )
 
     print(
-        f"Dirección  : "
-        f"{signal.upper()}"
+        f"Dirección  : {signal.upper()}"
     )
 
     print(
@@ -716,24 +550,16 @@ def execute_trade(
     )
 
     print(
-        f"Expiración : "
-        f"{EXPIRATION}M"
+        f"Expiración : {EXPIRATION}M"
     )
 
     print(
-        "Condición  : "
-        "CALL=SUPORTE / PUT=RESISTENCIA"
-    )
-
-    print(
-        "Ejecución  : "
-        "APERTURA 7.ª VELA"
+        "Ejecución  : APERTURA N+1"
     )
 
     print("======================================")
 
     try:
-
         success, order_id = iq.buy(
             AMOUNT,
             pair,
@@ -742,14 +568,13 @@ def execute_trade(
         )
 
         if success:
-
             print(
                 f"✓ OPERACIÓN ABIERTA "
                 f"ID={order_id}"
             )
 
             send_telegram(
-                "🎯 ENTRADA 7.ª VELA\n\n"
+                "🎯 SNIPER N+1\n\n"
                 f"Activo: {pair}\n"
                 f"Dirección: {signal.upper()}\n"
                 f"Monto: {AMOUNT}\n"
@@ -766,7 +591,6 @@ def execute_trade(
         return False, None
 
     except Exception as e:
-
         print(
             f"✗ Error ejecutando "
             f"{pair}: {e}"
@@ -781,15 +605,14 @@ def execute_trade(
 
 def get_trade_result(
     iq,
-    order_id
+    order_id,
 ):
-
     if not order_id:
-
         return None
 
     wait_seconds = (
-        EXPIRATION * 60 + 5
+        EXPIRATION * 60
+        + 5
     )
 
     print(
@@ -802,19 +625,14 @@ def get_trade_result(
     )
 
     try:
-
         result = iq.check_win_v4(
             order_id
         )
 
         if result is not None:
-
-            return float(
-                result
-            )
+            return float(result)
 
     except Exception as e:
-
         print(
             f"[RESULTADO] Error: {e}"
         )
@@ -824,20 +642,16 @@ def get_trade_result(
 
 def print_result(
     pair,
-    result
+    result,
 ):
-
     if result is None:
-
         print(
             f"\n⚠ {pair} "
-            "RESULTADO NO DISPONIBLE"
+            f"RESULTADO NO DISPONIBLE"
         )
-
         return
 
     if result > 0:
-
         print(
             f"\n🟢 WIN | {pair}"
         )
@@ -853,7 +667,6 @@ def print_result(
         )
 
     elif result < 0:
-
         print(
             f"\n🔴 LOSS | {pair}"
         )
@@ -869,7 +682,6 @@ def print_result(
         )
 
     else:
-
         print(
             f"\n⚪ EMPATE | {pair}"
         )
@@ -886,39 +698,38 @@ def print_result(
 
 
 # ============================================================
-# PROCESAR PAR
+# PROCESAR UN PAR
 # ============================================================
 
 def process_pair(
     iq,
     pair,
-    candle_timestamp
+    candle_timestamp,
 ):
-
     candles = get_5s_candles(
         iq,
         pair,
         candle_timestamp,
-        ANALYSIS_CANDLES,
+        CANDLES_REQUIRED,
     )
 
     if candles is None:
-
         print(
             f"[{pair}] "
-            "Datos 5S insuficientes."
+            f"Datos 5S insuficientes."
         )
-
         return None
 
-    print_candles(
+    candle_n = candles[-1]
+
+    print_candle(
         pair,
-        candles
+        candle_n,
     )
 
     print(
         f"[{pair}] "
-        "Analizando las 6 velas..."
+        f"Analizando cierre de N..."
     )
 
     analysis = get_full_analysis(
@@ -927,7 +738,7 @@ def process_pair(
 
     print_analysis(
         pair,
-        analysis
+        analysis,
     )
 
     signal = normalize_signal(
@@ -937,33 +748,23 @@ def process_pair(
     )
 
     if signal is None:
-
         print(
             f"[{pair}] "
-            "⚪ SIN OPERACIÓN"
+            f"⚪ SIN OPERACIÓN"
         )
-
         return None
 
     if signal == "call":
-
         print(
             f"[{pair}] "
-            "🟢 SOPORTE → CALL"
+            f"🟢 SEÑAL CALL → N+1"
         )
 
-    elif signal == "put":
-
+    else:
         print(
             f"[{pair}] "
-            "🔴 RESISTENCIA → PUT"
+            f"🔴 SEÑAL PUT → N+1"
         )
-
-    print(
-        f"[{pair}] "
-        "🎯 SEÑAL PREPARADA "
-        "PARA LA 7.ª VELA"
-    )
 
     return signal
 
@@ -973,31 +774,22 @@ def process_pair(
 # ============================================================
 
 def main():
-
     print("\n")
-
+    print(
+        "=========================================="
+    )
+    print(
+        "          BOT IQ OPTION SNIPER"
+    )
+    print(
+        "             MODO N+1"
+    )
     print(
         "=========================================="
     )
 
     print(
-        "       BOT IQ OPTION SNIPER"
-    )
-
-    print(
-        "       SOPORTE / RESISTENCIA"
-    )
-
-    print(
-        "       ENTRADA 7.ª VELA"
-    )
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "MERCADO      : FOREX REAL"
+        "MERCADO      : FOREX"
     )
 
     print(
@@ -1013,18 +805,11 @@ def main():
     )
 
     print(
-        f"ANÁLISIS     : "
-        f"{ANALYSIS_CANDLES} VELAS"
+        f"VELAS        : {CANDLES_REQUIRED}"
     )
 
     print(
-        f"ENTRADA      : "
-        f"{ENTRY_CANDLE}.ª VELA"
-    )
-
-    print(
-        f"PARES        : "
-        f"{len(PAIRS)}"
+        f"PARES        : {len(PAIRS)}"
     )
 
     print(
@@ -1032,7 +817,6 @@ def main():
     )
 
     for pair in PAIRS:
-
         print(
             f"✓ {pair}"
         )
@@ -1045,24 +829,16 @@ def main():
 
     iq = connect_iq()
 
-    # Último cierre de 5S ya procesado.
     last_timestamp = (
         get_current_5s()
         - TIMEFRAME_5S
     )
 
     while True:
-
         try:
-
-            if not ensure_connection(
-                iq
-            ):
-
+            if not ensure_connection(iq):
                 time.sleep(5)
-
                 iq = connect_iq()
-
                 continue
 
             current_timestamp = (
@@ -1075,10 +851,12 @@ def main():
                 current_timestamp
             )
 
-            print("\n\n==========================================")
+            print(
+                "\n\n=========================================="
+            )
 
             print(
-                "🔔 CIERRE DE LA 6.ª VELA"
+                "🔔 CIERRE DE VELA N"
             )
 
             print(
@@ -1095,43 +873,34 @@ def main():
 
             signals = []
 
-            # ----------------------------------------
-            # ANALIZAR TODOS LOS PARES
-            # ----------------------------------------
-
             for pair in PAIRS:
-
                 try:
-
                     signal = process_pair(
                         iq,
                         pair,
-                        current_timestamp
+                        current_timestamp,
                     )
 
                     if signal is not None:
-
                         signals.append(
                             (
                                 pair,
-                                signal
+                                signal,
                             )
                         )
 
                 except Exception as e:
-
                     print(
                         f"[{pair}] "
-                        f"Error procesando: {e}"
+                        f"Error procesando: "
+                        f"{e}"
                     )
 
             if not signals:
-
                 print(
                     "\n⚪ Ningún par cumplió "
                     "las condiciones."
                 )
-
                 continue
 
             print(
@@ -1139,8 +908,7 @@ def main():
             )
 
             print(
-                "🎯 SEÑALES PREPARADAS "
-                "PARA LA 7.ª VELA"
+                "🎯 SEÑALES PARA N+1"
             )
 
             print(
@@ -1148,28 +916,14 @@ def main():
             )
 
             for pair, signal in signals:
-
-                if signal == "call":
-
-                    print(
-                        f"{pair} → "
-                        "CALL → SOPORTE"
-                    )
-
-                else:
-
-                    print(
-                        f"{pair} → "
-                        "PUT → RESISTENCIA"
-                    )
+                print(
+                    f"{pair} → "
+                    f"{signal.upper()}"
+                )
 
             print(
                 "=========================================="
             )
-
-            # ----------------------------------------
-            # APERTURA DE LA 7.ª VELA
-            # ----------------------------------------
 
             next_candle = (
                 current_timestamp
@@ -1177,15 +931,14 @@ def main():
             )
 
             while True:
-
                 now = time.time()
 
                 remaining = (
-                    next_candle - now
+                    next_candle
+                    - now
                 )
 
                 if remaining <= 0:
-
                     break
 
                 time.sleep(
@@ -1200,7 +953,7 @@ def main():
             )
 
             print(
-                "🚀 APERTURA 7.ª VELA"
+                "🚀 APERTURA N+1"
             )
 
             print(
@@ -1215,61 +968,50 @@ def main():
                 "=========================================="
             )
 
-            # ----------------------------------------
-            # EJECUTAR LAS SEÑALES
-            # ----------------------------------------
-
             for pair, signal in signals:
-
                 try:
-
                     success, order_id = (
                         execute_trade(
                             iq,
                             pair,
-                            signal
+                            signal,
                         )
                     )
 
                     if not success:
-
                         continue
 
-                    result = (
-                        get_trade_result(
-                            iq,
-                            order_id
-                        )
+                    result = get_trade_result(
+                        iq,
+                        order_id,
                     )
 
                     print_result(
                         pair,
-                        result
+                        result,
                     )
 
                 except Exception as e:
-
                     print(
                         f"[{pair}] "
-                        f"Error operación: {e}"
+                        f"Error operación: "
+                        f"{e}"
                     )
 
         except KeyboardInterrupt:
-
             print(
                 "\n\nBOT DETENIDO "
                 "POR EL USUARIO."
             )
 
             send_telegram(
-                "🛑 BOT SNIPER "
-                "7.ª VELA DETENIDO"
+                "🛑 BOT SNIPER N+1 "
+                "DETENIDO"
             )
 
             break
 
         except Exception as e:
-
             print(
                 "\n======================================"
             )
@@ -1297,6 +1039,10 @@ def main():
 
             time.sleep(3)
 
+
+# ============================================================
+# PUNTO DE ENTRADA
+# ============================================================
 
 if __name__ == "__main__":
     main()
