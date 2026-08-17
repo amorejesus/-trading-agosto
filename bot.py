@@ -7,7 +7,19 @@ from iqoptionapi.stable_api import IQ_Option
 import strategy
 
 
-PAIR = [ "EURUSD-OTC", "GBPUSD-OTC" ]
+FOREX_PAIRS = [
+    "EURUSD",
+    "AUDCHF",
+    "AUDUSD",
+    "EURGBP",
+    "EURNZD",
+    "GBPAUD",
+    "GBPCAD",
+    "GBPJPY",
+    "GBPNZD",
+    "GBPUSD",
+    "NZDUSD",
+]
 AMOUNT = 2500
 EXPIRATION = 1
 
