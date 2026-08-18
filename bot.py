@@ -24,8 +24,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = [
-    "EURUSD",
-    "GBPUSD",
+    "EURUSD-OTC",
+    "GBPUSD-OTC",
 ]
 
 
@@ -41,7 +41,7 @@ CANDLE_COUNT = 60
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 30
+AMOUNT = 35
 EXPIRATION = 1
 
 
@@ -1411,4 +1411,3 @@ def main() -> None:
 if __name__ == "__main__":
 
     main()
-
