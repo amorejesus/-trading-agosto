@@ -26,6 +26,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PAIRS = [
     "EURUSD",
     "GBPUSD",
+    "GBPJPY",
+    "NZDUSD",
+    "EURJPY",
+    "AUDUSD",
 ]
 
 
