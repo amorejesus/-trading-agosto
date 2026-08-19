@@ -1184,6 +1184,7 @@ def process_pair(
     result = analyze_market(
         closed_candle,
         None,
+        df_1m,
     )
 
     result["minute_timestamp"] = closed_timestamp
