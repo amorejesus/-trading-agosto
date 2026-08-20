@@ -54,7 +54,7 @@ EXPIRATION = 1
 # ============================================================
 
 POLL_INTERVAL = 0.10
-MAX_ENTRY_DELAY = 5.0
+MAX_ENTRY_DELAY = 0.0
 
 
 # ============================================================
@@ -904,6 +904,10 @@ def execute_pending(
     if current_minute < n1_timestamp:
         return False
 
+    # --------------------------------------------------------
+    # SI N+1 YA TERMINÓ, CANCELAR
+    # --------------------------------------------------------
+
     if current_minute > n1_timestamp:
 
         logger.warning(
@@ -933,7 +937,7 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # SEGUNDO DE N+1
+    # SEGUNDO ACTUAL DE N+1
     # --------------------------------------------------------
 
     server_second = (
@@ -944,22 +948,12 @@ def execute_pending(
     if server_second < 0:
         return False
 
-    if server_second > MAX_ENTRY_DELAY:
-
-        logger.warning(
-            "%s | entrada N+1 demasiado tarde | "
-            "segundo=%s | máximo=%s",
-            pair,
-            server_second,
-            MAX_ENTRY_DELAY,
-        )
-
-        PENDING_ENTRY.pop(
-            pair,
-            None,
-        )
-
-        return False
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    #
+    # La señal NO se cancela por llegar tarde dentro de N+1.
+    # Se permite intentar la operación mientras N+1 siga viva.
+    # --------------------------------------------------------
 
     if (
         LAST_TRADE_CANDLE.get(pair)
@@ -1015,36 +1009,45 @@ def execute_pending(
 
     if not ok:
 
-        logger.error(
-            "%s | ❌ BINARIA RECHAZADA | "
+        logger.warning(
+            "%s | ⚠️ BINARIA NO ACEPTADA | "
             "signal=%s | N=%s | N+1=%s | "
-            "server=%s | result=%s",
+            "server=%s | segundo=%s | result=%s | "
+            "SEÑAL CONSERVADA PARA REINTENTO",
             pair,
             signal.upper(),
             n_timestamp,
             n1_timestamp,
             server_ts,
+            server_second,
             raw_result,
         )
 
         telegram_send(
-            "❌ BINARIA RECHAZADA\n\n"
+            "⚠️ BINARIA NO ACEPTADA\n\n"
             f"Par: {pair}\n"
             f"Dirección: {signal.upper()}\n\n"
             f"N: {n_timestamp}\n"
             f"N+1: {n1_timestamp}\n"
             f"Servidor: {server_ts}\n"
-            f"Segundo N+1: {server_second}\n"
-            "Apertura N+1: orden enviada al abrir el minuto\n\n"
+            f"Segundo N+1: {server_second}\n\n"
+            "⚠️ La señal sigue pendiente.\n"
+            "🔄 Se volverá a intentar mientras N+1 siga activo.\n\n"
             f"Respuesta IQ:\n{raw_result}"
         )
 
-        PENDING_ENTRY.pop(
-            pair,
-            None,
-        )
+        # ----------------------------------------------------
+        # NO ELIMINAR PENDING_ENTRY.
+        #
+        # Si IQ rechaza temporalmente la operación, la señal
+        # confirmada permanece pendiente para volver a intentar.
+        # ----------------------------------------------------
 
         return False
+
+    # --------------------------------------------------------
+    # OPERACIÓN ACEPTADA
+    # --------------------------------------------------------
 
     LAST_TRADE_CANDLE[
         pair
@@ -1198,7 +1201,6 @@ def process_pair(
 
     if signal in ("call", "put"):
         create_pending_signal(pair, result)
-        execute_pending(pair)
     else:
         logger.info(
             "%s | N=%s | SIN SEÑAL | %s",
