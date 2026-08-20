@@ -23,7 +23,9 @@ IQ_PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# SOLO ESTE PAR
+# Se mantiene EURUSD como nombre lógico.
+# El bot resolverá automáticamente EURUSD o EURUSD-OTC
+# según cuál esté disponible para BINARIAS en IQ Option.
 PAIRS = [
     "EURUSD",
 ]
@@ -49,17 +51,14 @@ EXPIRATION = 1
 
 
 # ============================================================
-# EJECUCIÓN N+1
+# LOOP SNIPER
 # ============================================================
 
 POLL_INTERVAL = 0.03
 
-# Ventana máxima de reintentos después de comenzar N+1.
-# Se mantiene suficientemente amplia para rechazos temporales.
-MAX_ENTRY_DELAY = 15.0
-
-# Tiempo mínimo entre dos llamadas consecutivas a IQ.buy().
-BUY_RETRY_INTERVAL = 0.08
+# Ventana máxima para reintentar una orden rechazada.
+# La primera orden se intenta inmediatamente al comenzar N+1.
+MAX_ENTRY_DELAY = 10.0
 
 
 # ============================================================
@@ -67,7 +66,7 @@ BUY_RETRY_INTERVAL = 0.08
 # ============================================================
 
 TELEGRAM_POLL_INTERVAL = 1.0
-TELEGRAM_HTTP_TIMEOUT = 0.8
+TELEGRAM_HTTP_TIMEOUT = 0.5
 
 
 # ============================================================
@@ -88,6 +87,12 @@ LAST_TRADE_CANDLE: Dict[str, int] = {}
 
 STREAMS_STARTED = False
 
+# Mapea nombre lógico -> símbolo realmente usado por IQ Option.
+# Ejemplo:
+# EURUSD -> EURUSD
+# EURUSD -> EURUSD-OTC
+ACTIVE_API_PAIR: Dict[str, str] = {}
+
 
 # ============================================================
 # LOGGING
@@ -107,10 +112,7 @@ logger = logging.getLogger(__name__)
 
 def telegram_send(message: str) -> bool:
 
-    if not TELEGRAM_TOKEN:
-        return False
-
-    if not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
 
     url = (
@@ -119,7 +121,6 @@ def telegram_send(message: str) -> bool:
     )
 
     try:
-
         response = requests.post(
             url,
             data={
@@ -129,24 +130,13 @@ def telegram_send(message: str) -> bool:
             timeout=TELEGRAM_HTTP_TIMEOUT,
         )
 
-        if response.status_code != 200:
-
-            logger.warning(
-                "Telegram HTTP %s",
-                response.status_code,
-            )
-
-            return False
-
-        return True
+        return response.status_code == 200
 
     except Exception as exc:
-
         logger.warning(
             "Telegram no disponible: %s",
             exc,
         )
-
         return False
 
 
@@ -162,28 +152,20 @@ def telegram_worker() -> None:
     if not TELEGRAM_TOKEN:
         return
 
-    logger.info(
-        "Telegram worker iniciado."
-    )
+    logger.info("Telegram worker iniciado.")
 
     while True:
 
         try:
-
             url = (
                 "https://api.telegram.org/"
                 f"bot{TELEGRAM_TOKEN}/getUpdates"
             )
 
-            params: Dict[str, Any] = {
-                "timeout": 0,
-            }
+            params: Dict[str, Any] = {"timeout": 0}
 
             if LAST_UPDATE_ID is not None:
-
-                params["offset"] = (
-                    LAST_UPDATE_ID + 1
-                )
+                params["offset"] = LAST_UPDATE_ID + 1
 
             response = requests.get(
                 url,
@@ -192,57 +174,30 @@ def telegram_worker() -> None:
             )
 
             if response.status_code != 200:
-
-                time.sleep(
-                    TELEGRAM_POLL_INTERVAL
-                )
-
+                time.sleep(TELEGRAM_POLL_INTERVAL)
                 continue
 
             data = response.json()
 
             if not data.get("ok"):
-
-                time.sleep(
-                    TELEGRAM_POLL_INTERVAL
-                )
-
+                time.sleep(TELEGRAM_POLL_INTERVAL)
                 continue
 
-            for update in data.get(
-                "result",
-                [],
-            ):
+            for update in data.get("result", []):
 
-                LAST_UPDATE_ID = update.get(
-                    "update_id"
-                )
+                LAST_UPDATE_ID = update.get("update_id")
 
-                message = update.get(
-                    "message",
-                    {},
-                )
+                message = update.get("message", {})
 
                 text = str(
-                    message.get(
-                        "text",
-                        "",
-                    )
+                    message.get("text", "")
                 ).strip().lower()
 
                 chat_id = str(
-                    message.get(
-                        "chat",
-                        {},
-                    ).get(
-                        "id",
-                        "",
-                    )
+                    message.get("chat", {}).get("id", "")
                 )
 
-                if chat_id != str(
-                    TELEGRAM_CHAT_ID
-                ):
+                if chat_id != str(TELEGRAM_CHAT_ID):
                     continue
 
                 if text == "/start":
@@ -251,22 +206,12 @@ def telegram_worker() -> None:
 
                     telegram_send(
                         "🟢 BOT ACTIVADO\n\n"
-                        "ESTRATEGIA 1M + 5S\n\n"
-                        "CALL:\n"
-                        "🟢 Primera 5S > apertura 1M\n"
-                        "🔴 Retroceso 5S < apertura 1M\n"
-                        "🟢 Cierre 1M verde\n\n"
-                        "PUT:\n"
-                        "🔴 Primera 5S < apertura 1M\n"
-                        "🟢 Retroceso 5S > apertura 1M\n"
-                        "🔴 Cierre 1M rojo\n\n"
-                        "🎯 ENTRADA N+1\n"
-                        "⚡ Reintento automático si IQ rechaza temporalmente."
+                        "ESTRATEGIA 1M + 5S\n"
+                        "🎯 SNIPER N+1\n"
+                        "Entrada inmediatamente al comenzar N+1."
                     )
 
-                    logger.info(
-                        "BOT ACTIVADO"
-                    )
+                    logger.info("BOT ACTIVADO")
 
                 elif text == "/stop":
 
@@ -277,29 +222,29 @@ def telegram_worker() -> None:
                         "No se abrirán nuevas operaciones."
                     )
 
-                    logger.info(
-                        "BOT DETENIDO"
-                    )
+                    logger.info("BOT DETENIDO")
 
                 elif text == "/status":
 
-                    status = (
-                        "🟢 ACTIVO"
-                        if BOT_RUNNING
-                        else
-                        "🔴 DETENIDO"
+                    status = "🟢 ACTIVO" if BOT_RUNNING else "🔴 DETENIDO"
+
+                    active = ", ".join(
+                        f"{logical}->{api}"
+                        for logical, api
+                        in ACTIVE_API_PAIR.items()
                     )
 
                     telegram_send(
                         "📊 ESTADO\n\n"
                         f"Estado: {status}\n"
-                        "Modo: SNIPER N+1\n"
+                        "Modo: SNIPER\n"
                         "Principal: 1M\n"
                         "Micro: 5S\n"
                         "Entrada: N+1\n"
                         "Tipo: BINARIA\n"
                         f"Importe: ${AMOUNT}\n"
-                        f"Pares: {', '.join(PAIRS)}"
+                        f"Pares: {', '.join(PAIRS)}\n"
+                        f"Activos IQ: {active or 'sin resolver'}"
                     )
 
         except Exception as exc:
@@ -309,13 +254,11 @@ def telegram_worker() -> None:
                 exc,
             )
 
-        time.sleep(
-            TELEGRAM_POLL_INTERVAL
-        )
+        time.sleep(TELEGRAM_POLL_INTERVAL)
 
 
 # ============================================================
-# TIMESTAMP SERVIDOR IQ
+# SERVIDOR IQ OPTION
 # ============================================================
 
 def get_server_timestamp() -> Optional[int]:
@@ -324,15 +267,12 @@ def get_server_timestamp() -> Optional[int]:
         return None
 
     try:
-
         timestamp = IQ.get_server_timestamp()
 
         if timestamp is None:
             return None
 
-        return int(
-            float(timestamp)
-        )
+        return int(float(timestamp))
 
     except Exception as exc:
 
@@ -345,6 +285,148 @@ def get_server_timestamp() -> Optional[int]:
 
 
 # ============================================================
+# DISPONIBILIDAD DEL ACTIVO
+# ============================================================
+
+def _binary_is_open(open_time: Dict[str, Any], symbol: str) -> bool:
+    """
+    Comprueba si el símbolo está disponible para BINARIAS.
+    No modifica la estrategia; solamente resuelve el símbolo
+    que IQ Option permite comprar.
+    """
+
+    try:
+        binary = open_time.get("binary", {})
+
+        info = binary.get(symbol)
+
+        if not isinstance(info, dict):
+            return False
+
+        return bool(info.get("open", False))
+
+    except Exception:
+        return False
+
+
+def resolve_binary_asset(
+    logical_pair: str,
+) -> Optional[str]:
+    """
+    Resuelve el activo real para la compra binaria.
+
+    Prioridad:
+      1. EURUSD
+      2. EURUSD-OTC
+
+    Esto corrige el error:
+    'Cannot purchase an option (the asset is not available at the moment).'
+
+    IMPORTANTE:
+    Si EURUSD no está abierto y EURUSD-OTC sí, se utilizará EURUSD-OTC
+    también para las velas, de forma que el análisis y la entrada sean
+    sobre el MISMO activo.
+    """
+
+    if IQ is None:
+        return None
+
+    candidates = [
+        logical_pair,
+    ]
+
+    if not logical_pair.upper().endswith("-OTC"):
+        candidates.append(
+            f"{logical_pair}-OTC"
+        )
+
+    try:
+
+        open_time = IQ.get_all_open_time()
+
+        for candidate in candidates:
+
+            if _binary_is_open(
+                open_time,
+                candidate,
+            ):
+
+                return candidate
+
+    except Exception as exc:
+
+        logger.warning(
+            "No se pudo consultar disponibilidad de %s: %s",
+            logical_pair,
+            exc,
+        )
+
+    return None
+
+
+def resolve_all_binary_assets() -> None:
+
+    global ACTIVE_API_PAIR
+
+    if IQ is None:
+        return
+
+    for logical_pair in PAIRS:
+
+        actual = resolve_binary_asset(
+            logical_pair
+        )
+
+        if actual:
+
+            previous = ACTIVE_API_PAIR.get(
+                logical_pair
+            )
+
+            if previous != actual:
+
+                ACTIVE_API_PAIR[
+                    logical_pair
+                ] = actual
+
+                logger.info(
+                    "%s | activo IQ seleccionado: %s",
+                    logical_pair,
+                    actual,
+                )
+
+        else:
+
+            logger.warning(
+                "%s | no hay activo binario disponible.",
+                logical_pair,
+            )
+
+
+def get_api_pair(
+    logical_pair: str,
+) -> Optional[str]:
+
+    actual = ACTIVE_API_PAIR.get(
+        logical_pair
+    )
+
+    if actual:
+        return actual
+
+    actual = resolve_binary_asset(
+        logical_pair
+    )
+
+    if actual:
+        ACTIVE_API_PAIR[
+            logical_pair
+        ] = actual
+
+    return actual
+
+
+# ============================================================
 # CONEXIÓN IQ OPTION
 # ============================================================
 
@@ -354,14 +436,10 @@ def connect_iq() -> bool:
     global STREAMS_STARTED
 
     if not IQ_EMAIL:
-        raise ValueError(
-            "Falta IQ_EMAIL"
-        )
+        raise ValueError("Falta IQ_EMAIL")
 
     if not IQ_PASSWORD:
-        raise ValueError(
-            "Falta IQ_PASSWORD"
-        )
+        raise ValueError("Falta IQ_PASSWORD")
 
     logger.info(
         "Conectando a IQ Option..."
@@ -375,7 +453,6 @@ def connect_iq() -> bool:
     connected, reason = IQ.connect()
 
     if not connected:
-
         raise ConnectionError(
             f"No se pudo conectar: {reason}"
         )
@@ -385,6 +462,8 @@ def connect_iq() -> bool:
     )
 
     STREAMS_STARTED = False
+
+    resolve_all_binary_assets()
 
     start_realtime_streams()
 
@@ -397,9 +476,9 @@ def connect_iq() -> bool:
 
     telegram_send(
         "🟢 IQ OPTION CONECTADO\n\n"
-        "Modo SNIPER N+1\n"
-        "Binarias OTC\n"
-        "Entrada al comenzar N+1."
+        "Modo SNIPER\n"
+        "Binarias\n"
+        "Entrada inmediata en N+1."
     )
 
     return True
@@ -413,13 +492,12 @@ def ensure_connection() -> bool:
     try:
 
         if IQ is None:
-
             return connect_iq()
 
         if IQ.check_connect():
 
             if not STREAMS_STARTED:
-
+                resolve_all_binary_assets()
                 start_realtime_streams()
 
             return True
@@ -441,10 +519,11 @@ def ensure_connection() -> bool:
 
         STREAMS_STARTED = False
 
+        resolve_all_binary_assets()
         start_realtime_streams()
 
         telegram_send(
-            "🟢 IQ OPTION RECONECTADO"
+            "🟢 IQ OPTION RECONectado"
         )
 
         return True
@@ -460,7 +539,7 @@ def ensure_connection() -> bool:
 
 
 # ============================================================
-# STREAMS
+# STREAMS DE VELAS
 # ============================================================
 
 def start_realtime_streams() -> None:
@@ -477,40 +556,58 @@ def start_realtime_streams() -> None:
         "Iniciando streams en tiempo real..."
     )
 
-    for pair in PAIRS:
+    any_started = False
+
+    for logical_pair in PAIRS:
+
+        api_pair = get_api_pair(
+            logical_pair
+        )
+
+        if not api_pair:
+
+            logger.warning(
+                "%s | no disponible para iniciar stream.",
+                logical_pair,
+            )
+
+            continue
 
         try:
 
             IQ.start_candles_stream(
-                pair,
+                api_pair,
                 TIMEFRAME,
                 5,
             )
 
             IQ.start_candles_stream(
-                pair,
+                api_pair,
                 MICRO_TIMEFRAME,
                 20,
             )
 
             logger.info(
-                "%s | streams 60s + 5s iniciados",
-                pair,
+                "%s -> %s | streams 60s + 5s iniciados",
+                logical_pair,
+                api_pair,
             )
+
+            any_started = True
 
         except Exception as exc:
 
             logger.error(
                 "%s | error iniciando streams: %s",
-                pair,
+                api_pair,
                 exc,
             )
 
-    STREAMS_STARTED = True
+    STREAMS_STARTED = any_started
 
 
 # ============================================================
-# DATAFRAME REALTIME
+# REALTIME DATAFRAME
 # ============================================================
 
 def realtime_dataframe(
@@ -539,47 +636,28 @@ def realtime_dataframe(
 
                 rows.append(
                     {
-                        "from": int(
-                            float(timestamp)
-                        ),
-
-                        "open": float(
-                            candle["open"]
-                        ),
-
-                        "close": float(
-                            candle["close"]
-                        ),
-
+                        "from": int(float(timestamp)),
+                        "open": float(candle["open"]),
+                        "close": float(candle["close"]),
                         "high": float(
                             candle.get(
                                 "max",
-                                candle.get(
-                                    "high"
-                                ),
+                                candle.get("high"),
                             )
                         ),
-
                         "low": float(
                             candle.get(
                                 "min",
-                                candle.get(
-                                    "low"
-                                ),
+                                candle.get("low"),
                             )
                         ),
-
                         "volume": float(
-                            candle.get(
-                                "volume",
-                                0,
-                            )
+                            candle.get("volume", 0)
                         ),
                     }
                 )
 
             except Exception:
-
                 continue
 
         if not rows:
@@ -622,11 +700,18 @@ def realtime_dataframe(
 # ============================================================
 
 def get_1m_realtime(
-    pair: str,
+    logical_pair: str,
 ) -> Optional[pd.DataFrame]:
 
+    api_pair = get_api_pair(
+        logical_pair
+    )
+
+    if not api_pair:
+        return None
+
     return realtime_dataframe(
-        pair,
+        api_pair,
         TIMEFRAME,
     )
 
@@ -636,22 +721,26 @@ def get_1m_realtime(
 # ============================================================
 
 def get_5s_realtime(
-    pair: str,
+    logical_pair: str,
     minute_timestamp: int,
 ) -> Optional[pd.DataFrame]:
 
+    api_pair = get_api_pair(
+        logical_pair
+    )
+
+    if not api_pair:
+        return None
+
     df = realtime_dataframe(
-        pair,
+        api_pair,
         MICRO_TIMEFRAME,
     )
 
     if df is None:
         return None
 
-    start = int(
-        minute_timestamp
-    )
-
+    start = int(minute_timestamp)
     end = start + TIMEFRAME
 
     df = df[
@@ -669,17 +758,14 @@ def get_5s_realtime(
 
 
 # ============================================================
-# VELA CERRADA
+# VELAS
 # ============================================================
 
 def get_closed_1m(
     df: pd.DataFrame,
 ) -> Optional[pd.Series]:
 
-    if df is None:
-        return None
-
-    if len(df) < 2:
+    if df is None or len(df) < 2:
         return None
 
     return df.iloc[-2]
@@ -690,18 +776,13 @@ def get_closed_1m(
 # ============================================================
 
 def create_pending_signal(
-    pair: str,
+    logical_pair: str,
     result: Dict[str, Any],
 ) -> None:
 
-    signal = result.get(
-        "signal"
-    )
+    signal = result.get("signal")
 
-    if signal not in (
-        "call",
-        "put",
-    ):
+    if signal not in ("call", "put"):
         return
 
     minute_ts = result.get(
@@ -711,19 +792,16 @@ def create_pending_signal(
     if minute_ts is None:
         return
 
-    minute_ts = int(
-        minute_ts
-    )
+    minute_ts = int(minute_ts)
 
     next_timestamp = (
         minute_ts + TIMEFRAME
     )
 
     existing = PENDING_ENTRY.get(
-        pair
+        logical_pair
     )
 
-    # Evitar duplicar la misma señal N.
     if existing is not None:
 
         if int(
@@ -731,6 +809,10 @@ def create_pending_signal(
         ) == minute_ts:
 
             return
+
+    api_pair = get_api_pair(
+        logical_pair
+    )
 
     opening = result.get(
         "minute_open"
@@ -749,7 +831,9 @@ def create_pending_signal(
         0,
     )
 
-    PENDING_ENTRY[pair] = {
+    PENDING_ENTRY[
+        logical_pair
+    ] = {
 
         "signal": signal,
 
@@ -770,13 +854,18 @@ def create_pending_signal(
             "",
         ),
 
+        # Símbolo exacto que generó la señal.
+        "api_pair": api_pair,
+
         "created_at": time.time(),
 
-        # Estado de ejecución
         "entry_notified": False,
-        "attempts": 0,
-        "last_attempt": 0.0,
+
         "last_rejection": None,
+
+        "attempts": 0,
+
+        "last_attempt": 0.0,
     }
 
     direction = (
@@ -788,7 +877,8 @@ def create_pending_signal(
 
     telegram_send(
         "🎯 SEÑAL CONFIRMADA\n\n"
-        f"Par: {pair}\n"
+        f"Par: {logical_pair}\n"
+        f"Activo IQ: {api_pair}\n"
         f"Dirección: {direction}\n\n"
         "VELA N CERRADA\n"
         f"Timestamp: {minute_ts}\n"
@@ -805,9 +895,10 @@ def create_pending_signal(
     )
 
     logger.info(
-        "%s | SEÑAL %s | N=%s | N+1=%s",
-        pair,
+        "%s | SEÑAL %s | API=%s | N=%s | N+1=%s",
+        logical_pair,
         signal.upper(),
+        api_pair,
         minute_ts,
         next_timestamp,
     )
@@ -818,88 +909,41 @@ def create_pending_signal(
 # ============================================================
 
 def buy_binary(
-    pair: str,
+    api_pair: str,
     signal: str,
 ) -> tuple[bool, Optional[Any], Any]:
 
     if IQ is None:
-
-        return (
-            False,
-            None,
-            "IQ=None",
-        )
+        return False, None, "IQ=None"
 
     try:
 
-        logger.info(
-            "%s | ENVIANDO IQ.buy() | signal=%s | amount=%s",
-            pair,
-            signal.upper(),
-            AMOUNT,
-        )
-
         result = IQ.buy(
             AMOUNT,
-            pair,
+            api_pair,
             signal,
             EXPIRATION,
         )
 
-        logger.info(
-            "%s | RESPUESTA IQ.buy(): %r",
-            pair,
-            result,
-        )
-
-        # IQ Option normalmente devuelve:
-        # (True, order_id)
         if isinstance(result, tuple):
 
             if len(result) >= 2:
 
-                accepted = result[0]
-                order_id = result[1]
-
-                # NO convertir cualquier objeto extraño
-                # a True. Solo aceptación explícita.
-                ok = (
-                    accepted is True
-                    or accepted == 1
-                    or str(accepted).lower() == "true"
-                )
-
                 return (
-                    ok,
-                    order_id,
+                    bool(result[0]),
+                    result[1],
                     result,
                 )
 
             if len(result) == 1:
 
-                accepted = result[0]
-
-                ok = (
-                    accepted is True
-                    or accepted == 1
-                    or str(accepted).lower() == "true"
-                )
-
                 return (
-                    ok,
+                    bool(result[0]),
                     None,
                     result,
                 )
 
         if result is True:
-
-            return (
-                True,
-                None,
-                result,
-            )
-
-        if result == 1:
 
             return (
                 True,
@@ -916,8 +960,8 @@ def buy_binary(
     except Exception as exc:
 
         logger.exception(
-            "%s | excepción IQ.buy()",
-            pair,
+            "%s | error buy binary",
+            api_pair,
         )
 
         return (
@@ -928,37 +972,29 @@ def buy_binary(
 
 
 # ============================================================
-# EJECUCIÓN N+1
+# EJECUCIÓN SNIPER N+1
 # ============================================================
 
 def execute_pending(
-    pair: str,
+    logical_pair: str,
 ) -> bool:
     """
-    EJECUCIÓN CORREGIDA.
+    Ejecuta la señal confirmada justo al comenzar N+1.
 
-    La señal se crea cuando N termina.
-
-    La orden se envía directamente al comenzar N+1.
-
-    Si IQ Option rechaza temporalmente la orden:
-        - NO se elimina la señal.
-        - NO se marca como ejecutada.
-        - NO se cambia CALL/PUT.
-        - Se vuelve a llamar IQ.buy().
-    
-    La señal solo desaparece cuando IQ.buy() confirma
-    explícitamente que la operación fue aceptada.
+    CAMBIO PRINCIPAL:
+    - La orden NO depende de volver a consultar la vela M1.
+    - La orden NO espera otro cierre.
+    - Se usa el símbolo exacto guardado cuando se confirmó la señal.
+    - IQ.buy() se llama inmediatamente cuando server_ts >= N+1.
+    - Si IQ rechaza temporalmente, se reintenta rápidamente.
+    - Si el rechazo es 'asset is not available', se registra claramente.
     """
 
     pending = PENDING_ENTRY.get(
-        pair
+        logical_pair
     )
 
     if pending is None:
-        return False
-
-    if IQ is None:
         return False
 
     server_ts = get_server_timestamp()
@@ -966,9 +1002,7 @@ def execute_pending(
     if server_ts is None:
         return False
 
-    server_ts = int(
-        server_ts
-    )
+    server_ts = int(server_ts)
 
     n_timestamp = int(
         pending["minute_timestamp"]
@@ -978,66 +1012,40 @@ def execute_pending(
         pending["next_timestamp"]
     )
 
-    # ========================================================
-    # TODAVÍA ESTAMOS EN N
-    # ========================================================
-
+    # Antes de N+1 no se opera.
     if server_ts < n1_timestamp:
-
         return False
 
-    # ========================================================
-    # YA SE EJECUTÓ ESTA N+1
-    # ========================================================
-
-    if LAST_TRADE_CANDLE.get(pair) == n1_timestamp:
+    # Evita duplicar la misma entrada.
+    if LAST_TRADE_CANDLE.get(
+        logical_pair
+    ) == n1_timestamp:
 
         PENDING_ENTRY.pop(
-            pair,
+            logical_pair,
             None,
         )
 
         return True
 
-    # ========================================================
-    # VERIFICAR QUE NO HAYA EXPIRADO LA VENTANA
-    # ========================================================
+    signal = pending["signal"]
 
-    elapsed = (
-        server_ts - n1_timestamp
+    api_pair = pending.get(
+        "api_pair"
     )
 
-    if elapsed > MAX_ENTRY_DELAY:
+    if not api_pair:
+        api_pair = get_api_pair(
+            logical_pair
+        )
+        pending["api_pair"] = api_pair
 
+    if not api_pair:
         logger.error(
-            "%s | ❌ VENTANA N+1 AGOTADA | "
-            "N+1=%s | servidor=%s | intentos=%s | "
-            "último rechazo=%r",
-            pair,
-            n1_timestamp,
-            server_ts,
-            pending.get("attempts", 0),
-            pending.get("last_rejection"),
+            "%s | N+1 llegó pero no hay símbolo binario disponible.",
+            logical_pair,
         )
-
-        telegram_send(
-            "❌ ENTRADA NO EJECUTADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {pending['signal'].upper()}\n"
-            f"N+1: {n1_timestamp}\n\n"
-            "Se agotó la ventana de ejecución.\n\n"
-            f"Última respuesta IQ:\n"
-            f"{pending.get('last_rejection')}"
-        )
-
-        PENDING_ENTRY.pop(
-            pair,
-            None,
-        )
-
         return False
-
-    signal = pending["signal"]
 
     direction = (
         "CALL 🟢"
@@ -1046,13 +1054,9 @@ def execute_pending(
         "PUT 🔴"
     )
 
-    second_n1 = (
+    server_second = (
         server_ts % TIMEFRAME
     )
-
-    # ========================================================
-    # AVISO N+1
-    # ========================================================
 
     if not pending.get(
         "entry_notified",
@@ -1061,53 +1065,76 @@ def execute_pending(
 
         pending["entry_notified"] = True
 
-        logger.info(
-            "%s | ⚡ N+1 DETECTADA | "
-            "server=%s | segundo=%s | "
-            "N=%s | N+1=%s",
-            pair,
-            server_ts,
-            second_n1,
-            n_timestamp,
-            n1_timestamp,
-        )
-
         telegram_send(
             "⚡ N+1 DETECTADA\n\n"
-            f"Par: {pair}\n"
+            f"Par: {logical_pair}\n"
+            f"Activo IQ: {api_pair}\n"
             f"Dirección: {direction}\n\n"
             f"Servidor IQ: {server_ts}\n"
-            f"Segundo N+1: {second_n1}\n\n"
+            f"Segundo N+1: {server_second}\n\n"
             f"Timestamp N: {n_timestamp}\n"
             f"Timestamp N+1: {n1_timestamp}\n\n"
-            "🎯 ENVIANDO ORDEN A IQ OPTION"
+            "🎯 EJECUTANDO BINARIA"
         )
 
-    # ========================================================
-    # CONTROL DE VELOCIDAD DE REINTENTO
-    # ========================================================
+        logger.info(
+            "%s | ⚡ N+1 DETECTADA | "
+            "API=%s | server=%s | segundo=%s",
+            logical_pair,
+            api_pair,
+            server_ts,
+            server_second,
+        )
 
-    now = time.monotonic()
+    elapsed = (
+        server_ts - n1_timestamp
+    )
+
+    # La primera orden ocurre inmediatamente en N+1.
+    # Solo se permite una pequeña ventana para rechazos temporales.
+    if elapsed < 0:
+        return False
+
+    if elapsed > MAX_ENTRY_DELAY:
+
+        telegram_send(
+            "❌ ENTRADA NO EJECUTADA\n\n"
+            f"Par: {logical_pair}\n"
+            f"Activo IQ: {api_pair}\n"
+            f"Dirección: {signal.upper()}\n"
+            f"N+1: {n1_timestamp}\n\n"
+            "IQ Option no aceptó la orden dentro de la "
+            "ventana de ejecución.\n\n"
+            f"Última respuesta IQ:\n"
+            f"{pending.get('last_rejection')}"
+        )
+
+        logger.error(
+            "%s | ❌ ventana N+1 agotada | "
+            "última respuesta=%s",
+            logical_pair,
+            pending.get("last_rejection"),
+        )
+
+        PENDING_ENTRY.pop(
+            logical_pair,
+            None,
+        )
+
+        return False
 
     last_attempt = float(
         pending.get(
-            "last_attempt_monotonic",
+            "last_attempt",
             0.0,
         )
     )
 
     if (
         last_attempt > 0
-        and (
-            now - last_attempt
-        ) < BUY_RETRY_INTERVAL
+        and time.time() - last_attempt < POLL_INTERVAL
     ):
-
         return False
-
-    pending[
-        "last_attempt_monotonic"
-    ] = now
 
     pending["last_attempt"] = time.time()
 
@@ -1118,111 +1145,91 @@ def execute_pending(
         )
     ) + 1
 
-    attempt = pending[
-        "attempts"
-    ]
-
     logger.info(
-        "%s | ⚡ IQ.buy() INTENTO #%s | "
-        "%s | N+1=%s | segundo=%s",
-        pair,
-        attempt,
+        "%s | ⚡ IQ.buy #%s | "
+        "API=%s | %s | N+1=%s | segundo=%s",
+        logical_pair,
+        pending["attempts"],
+        api_pair,
         signal.upper(),
         n1_timestamp,
-        second_n1,
+        server_second,
     )
 
-    # ========================================================
-    # ENVIAR ORDEN
-    # ========================================================
-
     ok, order_id, raw_result = buy_binary(
-        pair,
+        api_pair,
         signal,
     )
 
-    # ========================================================
-    # IQ RECHAZÓ
-    # ========================================================
-
     if not ok:
 
-        pending[
-            "last_rejection"
-        ] = raw_result
+        pending["last_rejection"] = raw_result
 
         logger.warning(
-            "%s | ❌ IQ.buy() RECHAZADA | "
-            "intento=%s | signal=%s | "
-            "N+1=%s | servidor=%s | respuesta=%r",
-            pair,
-            attempt,
-            signal.upper(),
-            n1_timestamp,
-            server_ts,
+            "%s | ❌ IQ RECHAZÓ | "
+            "API=%s | intento=%s | "
+            "resultado=%s",
+            logical_pair,
+            api_pair,
+            pending["attempts"],
             raw_result,
         )
 
-        # IMPORTANTE:
-        # NO eliminar PENDING_ENTRY.
-        # NO cambiar LAST_TRADE_CANDLE.
-        # NO considerar ejecutada.
-        #
-        # El siguiente ciclo volverá a intentar.
+        # Si IQ indica que el activo no está disponible,
+        # NO se cambia el activo de una señal ya confirmada.
+        # Eso evita analizar EURUSD y terminar comprando
+        # EURUSD-OTC con un análisis diferente.
+        if (
+            isinstance(raw_result, tuple)
+            and len(raw_result) >= 2
+            and "asset is not available"
+            in str(raw_result[1]).lower()
+        ):
 
-        if attempt == 1:
-
-            telegram_send(
-                "⚠️ IQ OPTION RECHAZÓ EL PRIMER INTENTO\n\n"
-                f"Par: {pair}\n"
-                f"Dirección: {signal.upper()}\n"
-                f"N+1: {n1_timestamp}\n\n"
-                "🔄 SE REINTENTARÁ AUTOMÁTICAMENTE\n\n"
-                f"Respuesta IQ:\n{raw_result}"
+            logger.error(
+                "%s | ACTIVO NO DISPONIBLE PARA COMPRA: %s",
+                logical_pair,
+                api_pair,
             )
 
         return False
 
-    # ========================================================
-    # IQ ACEPTÓ LA ORDEN
-    # ========================================================
-
+    # ÉXITO REAL.
     LAST_TRADE_CANDLE[
-        pair
+        logical_pair
     ] = n1_timestamp
 
+    PENDING_ENTRY.pop(
+        logical_pair,
+        None,
+    )
+
     telegram_send(
-        "✅ OPERACIÓN ACEPTADA POR IQ OPTION\n\n"
-        f"Par: {pair}\n"
+        "✅ OPERACIÓN ABIERTA\n\n"
+        f"Par: {logical_pair}\n"
+        f"Activo IQ: {api_pair}\n"
         f"Dirección: {signal.upper()}\n\n"
         "VELA N\n"
         f"Timestamp: {n_timestamp}\n"
         f"Apertura: {pending['minute_open']}\n"
         f"Cierre: {pending['minute_close']}\n\n"
-        "➡️ ENTRADA N+1\n"
+        "ENTRADA N+1\n"
         f"Timestamp: {n1_timestamp}\n\n"
         f"💵 Importe: ${AMOUNT}\n"
         "⏱ Expiración: 1 minuto\n"
         f"🆔 ID: {order_id}\n"
-        f"🔁 Intentos: {attempt}"
+        f"🔁 Intentos: {pending['attempts']}"
     )
 
     logger.info(
-        "%s | ✅ OPERACIÓN ACEPTADA | "
-        "%s | N=%s | N+1=%s | "
-        "ID=%s | intentos=%s",
-        pair,
+        "%s | ✅ BINARIA ABIERTA | "
+        "API=%s | %s | N=%s | N+1=%s | intentos=%s",
+        logical_pair,
+        api_pair,
         signal.upper(),
         n_timestamp,
         n1_timestamp,
-        order_id,
-        attempt,
-    )
-
-    # SOLO AHORA eliminamos la señal pendiente.
-    PENDING_ENTRY.pop(
-        pair,
-        None,
+        pending["attempts"],
     )
 
     return True
@@ -1233,25 +1240,20 @@ def execute_pending(
 # ============================================================
 
 def process_pair(
-    pair: str,
+    logical_pair: str,
 ) -> None:
 
-    # ========================================================
-    # PRIMERO: ejecutar cualquier señal pendiente
-    # ========================================================
-
-    if pair in PENDING_ENTRY:
+    # PRIMERO:
+    # Si existe una señal pendiente, se intenta ejecutar.
+    # Esto ocurre antes del análisis de una nueva vela.
+    if logical_pair in PENDING_ENTRY:
 
         execute_pending(
-            pair
+            logical_pair
         )
 
-    # ========================================================
-    # OBTENER 1M
-    # ========================================================
-
     df_1m = get_1m_realtime(
-        pair
+        logical_pair
     )
 
     if df_1m is None:
@@ -1288,26 +1290,18 @@ def process_pair(
         return
 
     if closed_ts >= current_minute:
-
         return
-
-    # ========================================================
-    # NO ANALIZAR LA MISMA N DOS VECES
-    # ========================================================
 
     if (
-        LAST_PROCESSED_MINUTE.get(pair)
+        LAST_PROCESSED_MINUTE.get(
+            logical_pair
+        )
         == closed_ts
     ):
-
         return
 
-    # ========================================================
-    # OBTENER 5S DE N
-    # ========================================================
-
     candles_5s = get_5s_realtime(
-        pair,
+        logical_pair,
         closed_ts,
     )
 
@@ -1315,7 +1309,7 @@ def process_pair(
 
         logger.warning(
             "%s | no hay 5S para N=%s",
-            pair,
+            logical_pair,
             closed_ts,
         )
 
@@ -1326,7 +1320,7 @@ def process_pair(
         logger.warning(
             "%s | 5S insuficientes | "
             "N=%s | %s/%s",
-            pair,
+            logical_pair,
             closed_ts,
             len(candles_5s),
             MICRO_CANDLE_COUNT,
@@ -1334,13 +1328,12 @@ def process_pair(
 
         return
 
-    # Marcar N como analizada.
     LAST_PROCESSED_MINUTE[
-        pair
+        logical_pair
     ] = closed_ts
 
     # ========================================================
-    # ANALIZAR N
+    # NO SE MODIFICA LA ESTRATEGIA.
     # ========================================================
 
     result = analyze_market(
@@ -1374,17 +1367,12 @@ def process_pair(
     )
 
     logger.info(
-        "%s | N=%s | "
-        "signal=%s | reason=%s",
-        pair,
+        "%s | N=%s | signal=%s | reason=%s",
+        logical_pair,
         closed_ts,
         signal,
         reason,
     )
-
-    # ========================================================
-    # SEÑAL CONFIRMADA
-    # ========================================================
 
     if signal in (
         "call",
@@ -1392,33 +1380,28 @@ def process_pair(
     ):
 
         create_pending_signal(
-            pair,
+            logical_pair,
             result,
         )
 
-        # ====================================================
-        # INTENTO INMEDIATO
-        #
-        # Si N ya cerró y el servidor está en N+1,
-        # aquí se envía directamente IQ.buy().
-        # ====================================================
-
+        # EJECUCIÓN INMEDIATA.
+        # No espera al siguiente ciclo.
         execute_pending(
-            pair
+            logical_pair
         )
 
     else:
 
         logger.info(
             "%s | N=%s | SIN SEÑAL | %s",
-            pair,
+            logical_pair,
             closed_ts,
             reason,
         )
 
 
 # ============================================================
-# TODOS LOS PARES
+# PROCESAR TODOS LOS PARES
 # ============================================================
 
 def analyze_all_pairs() -> None:
@@ -1426,7 +1409,7 @@ def analyze_all_pairs() -> None:
     if not BOT_RUNNING:
         return
 
-    for pair in PAIRS:
+    for logical_pair in PAIRS:
 
         if not BOT_RUNNING:
             return
@@ -1434,14 +1417,14 @@ def analyze_all_pairs() -> None:
         try:
 
             process_pair(
-                pair
+                logical_pair
             )
 
         except Exception:
 
             logger.exception(
                 "%s | error procesando par",
-                pair,
+                logical_pair,
             )
 
 
@@ -1458,7 +1441,7 @@ def main() -> None:
     )
 
     logger.info(
-        "BOT IQ OPTION BINARIAS OTC"
+        "BOT IQ OPTION BINARIAS"
     )
 
     logger.info(
@@ -1485,38 +1468,19 @@ def main() -> None:
     )
 
     logger.info(
-        "REINTENTO IQ.buy(): %.2fs",
-        BUY_RETRY_INTERVAL,
-    )
-
-    logger.info(
-        "VENTANA N+1: %.2fs",
-        MAX_ENTRY_DELAY,
-    )
-
-    logger.info(
         "=========================================="
     )
 
     required = {
-
-        "IQ_EMAIL":
-            IQ_EMAIL,
-
-        "IQ_PASSWORD":
-            IQ_PASSWORD,
-
-        "TELEGRAM_TOKEN":
-            TELEGRAM_TOKEN,
-
-        "TELEGRAM_CHAT_ID":
-            TELEGRAM_CHAT_ID,
+        "IQ_EMAIL": IQ_EMAIL,
+        "IQ_PASSWORD": IQ_PASSWORD,
+        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
     }
 
     missing = [
         key
-        for key, value
-        in required.items()
+        for key, value in required.items()
         if not value
     ]
 
@@ -1555,25 +1519,16 @@ def main() -> None:
 
     telegram_send(
         "🤖 BOT LISTO\n\n"
-        "BINARIAS OTC\n"
-        "MODO SNIPER N+1\n\n"
+        "BINARIAS\n"
+        "MODO SNIPER\n\n"
         "ESTRATEGIA:\n"
         "1M + 5S\n\n"
-        "CALL:\n"
-        "🟢 Primera 5S > apertura 1M\n"
-        "🔴 Retroceso 5S < apertura 1M\n"
-        "🟢 Cierre 1M verde\n\n"
-        "PUT:\n"
-        "🔴 Primera 5S < apertura 1M\n"
-        "🟢 Retroceso 5S > apertura 1M\n"
-        "🔴 Cierre 1M rojo\n\n"
         "🎯 Entrada SOLO en N+1\n"
-        "⚡ IQ.buy() directo\n"
-        "🔄 Reintento automático ante rechazo temporal\n"
-        "🕐 Reloj IQ Option\n"
+        "⚡ Ejecución inmediata al comenzar N+1\n"
+        "🔄 Reintento rápido si IQ rechaza temporalmente\n"
+        "🔎 Activo binario resuelto automáticamente\n"
         f"💵 ${AMOUNT}\n"
-        "⏱ 1 minuto\n"
-        f"📌 Par: {', '.join(PAIRS)}"
+        "⏱ 1 minuto"
     )
 
     while True:
@@ -1582,23 +1537,19 @@ def main() -> None:
 
             if not BOT_RUNNING:
 
-                time.sleep(
-                    0.20
-                )
+                time.sleep(0.20)
 
                 continue
 
             if not ensure_connection():
 
-                time.sleep(
-                    1
-                )
+                time.sleep(1)
 
                 continue
 
-            # =================================================
-            # PROCESAMIENTO CONTINUO
-            # =================================================
+            # Actualiza disponibilidad sin tocar la lógica
+            # de análisis.
+            resolve_all_binary_assets()
 
             analyze_all_pairs()
 
@@ -1626,9 +1577,7 @@ def main() -> None:
                 "Error principal"
             )
 
-            time.sleep(
-                0.5
-            )
+            time.sleep(0.5)
 
 
 # ============================================================
@@ -1636,5 +1585,4 @@ def main() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
