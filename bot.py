@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = [
     "EURUSD",
-    "EURJPY",
+    "GBPUSD",
 ]
 
 
@@ -900,10 +900,6 @@ def execute_pending(
     if current_minute < n1_timestamp:
         return False
 
-    # --------------------------------------------------------
-    # SI N+1 YA TERMINÓ, CANCELAR
-    # --------------------------------------------------------
-
     if current_minute > n1_timestamp:
 
         logger.warning(
@@ -933,7 +929,7 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # SEGUNDO ACTUAL DE N+1
+    # SEGUNDO EXACTO DE N+1
     # --------------------------------------------------------
 
     server_second = (
@@ -944,12 +940,22 @@ def execute_pending(
     if server_second < 0:
         return False
 
-    # --------------------------------------------------------
-    # IMPORTANTE:
-    #
-    # La señal NO se cancela por llegar tarde dentro de N+1.
-    # Se permite intentar la operación mientras N+1 siga viva.
-    # --------------------------------------------------------
+    if server_second > MAX_ENTRY_DELAY:
+
+        logger.warning(
+            "%s | entrada N+1 demasiado tarde | "
+            "segundo=%s | máximo=%s",
+            pair,
+            server_second,
+            MAX_ENTRY_DELAY,
+        )
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
+        return False
 
     if (
         LAST_TRADE_CANDLE.get(pair)
@@ -1005,45 +1011,36 @@ def execute_pending(
 
     if not ok:
 
-        logger.warning(
-            "%s | ⚠️ BINARIA NO ACEPTADA | "
+        logger.error(
+            "%s | ❌ BINARIA RECHAZADA | "
             "signal=%s | N=%s | N+1=%s | "
-            "server=%s | segundo=%s | result=%s | "
-            "SEÑAL CONSERVADA PARA REINTENTO",
+            "server=%s | result=%s",
             pair,
             signal.upper(),
             n_timestamp,
             n1_timestamp,
             server_ts,
-            server_second,
             raw_result,
         )
 
         telegram_send(
-            "⚠️ BINARIA NO ACEPTADA\n\n"
+            "❌ BINARIA RECHAZADA\n\n"
             f"Par: {pair}\n"
             f"Dirección: {signal.upper()}\n\n"
             f"N: {n_timestamp}\n"
             f"N+1: {n1_timestamp}\n"
             f"Servidor: {server_ts}\n"
-            f"Segundo N+1: {server_second}\n\n"
-            "⚠️ La señal sigue pendiente.\n"
-            "🔄 Se volverá a intentar mientras N+1 siga activo.\n\n"
+            f"Segundo N+1: {server_second}\n"
+            "Apertura N+1: orden enviada al abrir el minuto\n\n"
             f"Respuesta IQ:\n{raw_result}"
         )
 
-        # ----------------------------------------------------
-        # NO ELIMINAR PENDING_ENTRY.
-        #
-        # Si IQ rechaza temporalmente la operación, la señal
-        # confirmada permanece pendiente para volver a intentar.
-        # ----------------------------------------------------
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
 
         return False
-
-    # --------------------------------------------------------
-    # OPERACIÓN ACEPTADA
-    # --------------------------------------------------------
 
     LAST_TRADE_CANDLE[
         pair
@@ -1092,16 +1089,7 @@ def execute_pending(
 def process_pair(
     pair: str,
 ) -> None:
-    """Flujo estricto N -> cierre -> decisión -> N+1.
 
-    La M1 se va observando durante toda su duración y se guarda
-    localmente en LAST_LIVE_M1. Al cambiar el minuto, la vela que
-    estaba viva pasa a ser N cerrada y se analiza una sola vez.
-    No se consultan microvelas ni se exige ninguna cantidad de datos 5S.
-    """
-
-    # Primero se atiende cualquier señal ya confirmada para que
-    # N+1 se ejecute antes de volver a hacer trabajo de análisis.
     if pair in PENDING_ENTRY:
         execute_pending(pair)
 
@@ -1112,8 +1100,6 @@ def process_pair(
     server_ts = int(server_ts)
     current_minute = (server_ts // TIMEFRAME) * TIMEFRAME
 
-    # Leer únicamente el stream M1 ya abierto. No hacemos una
-    # petición histórica al llegar al cierre.
     df_1m = get_1m_realtime(pair)
     if df_1m is not None and not df_1m.empty:
         live_candle = get_live_1m(df_1m)
@@ -1135,7 +1121,6 @@ def process_pair(
 
                 LAST_LIVE_M1[pair] = live_candle.to_dict()
 
-    # Antes del cambio de minuto solo se recopila N.
     closed_timestamp = current_minute - TIMEFRAME
 
     if LAST_PROCESSED_MINUTE.get(pair) == closed_timestamp:
@@ -1143,8 +1128,6 @@ def process_pair(
 
     cached = LAST_CLOSED_M1.get(pair)
 
-    # Si el stream todavía no publicó N+1, el último snapshot de
-    # N ya quedó cerrado por el reloj y se usa como N final.
     if cached is None:
         live = LAST_LIVE_M1.get(pair)
         if live is not None:
@@ -1168,7 +1151,6 @@ def process_pair(
 
     closed_candle = pd.Series(cached)
 
-    # Guardia crítica: nunca analizar una vela anterior ni N+1.
     if int(float(closed_candle["from"])) != closed_timestamp:
         return
 
