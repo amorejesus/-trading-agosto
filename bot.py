@@ -51,9 +51,16 @@ EXPIRATION = 1
 
 POLL_INTERVAL = 0.10
 
-# Se permite intentar la misma señal durante los primeros
-# 10 segundos de N+1 si IQ rechaza temporalmente la orden.
-MAX_ENTRY_DELAY = 10.0
+# ============================================================
+# CAMBIO ÚNICO DE EJECUCIÓN
+# ============================================================
+#
+# La entrada puede reintentarse durante TODO N+1.
+# Ya no se cancela a los 5/10 segundos.
+#
+# ============================================================
+
+MAX_ENTRY_DELAY = 59.0
 
 
 # ============================================================
@@ -670,7 +677,10 @@ def get_closed_1m(
 
             return matches.iloc[-1]
 
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
 
             return None
 
@@ -753,7 +763,8 @@ def create_pending_signal(
 
         "created_at": time.time(),
 
-        "entry_notification_sent": False,
+        # Contador de intentos de ejecución.
+        "attempts": 0,
     }
 
     direction = (
@@ -905,26 +916,24 @@ def execute_pending(
         ]
     )
 
+    # --------------------------------------------------------
+    # ENTRADA EXCLUSIVA EN N+1
+    # --------------------------------------------------------
+
     current_minute = (
         server_ts
         // TIMEFRAME
     ) * TIMEFRAME
 
-    # --------------------------------------------------------
-    # TODAVÍA NO HA COMENZADO N+1
-    # --------------------------------------------------------
-
+    # Todavía no llegó N+1.
     if current_minute < n1_timestamp:
         return False
 
-    # --------------------------------------------------------
-    # N+1 YA TERMINÓ
-    # --------------------------------------------------------
-
+    # N+1 ya terminó.
     if current_minute > n1_timestamp:
 
         logger.warning(
-            "%s | señal perdida | "
+            "%s | señal perdida definitivamente | "
             "N=%s | N+1=%s | actual=%s",
             pair,
             n_timestamp,
@@ -933,13 +942,11 @@ def execute_pending(
         )
 
         telegram_send(
-            "⏳ ENTRADA CANCELADA\n\n"
+            "❌ ENTRADA NO EJECUTADA\n\n"
             f"Par: {pair}\n"
-            f"N: {n_timestamp}\n"
-            f"N+1: {n1_timestamp}\n"
-            f"Minuto actual: {current_minute}\n\n"
-            "La ventana N+1 terminó.\n"
-            "🚫 No se ejecuta en N+2."
+            f"Dirección: {pending['signal'].upper()}\n"
+            f"N+1: {n1_timestamp}\n\n"
+            "Terminó N+1 sin aceptación de IQ Option."
         )
 
         PENDING_ENTRY.pop(
@@ -950,7 +957,7 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # SEGUNDO ACTUAL DE N+1
+    # ESTAMOS DENTRO DE N+1
     # --------------------------------------------------------
 
     server_second = (
@@ -962,13 +969,22 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # PERMITIR REINTENTOS DENTRO DE N+1
+    # CAMBIO IMPORTANTE
+    #
+    # La señal NO se elimina cuando IQ Option rechaza una
+    # operación temporalmente.
+    #
+    # Se vuelve a intentar hasta que:
+    #
+    # 1. IQ Option acepte la orden, o
+    # 2. termine N+1.
+    #
     # --------------------------------------------------------
 
     if server_second > MAX_ENTRY_DELAY:
 
         logger.warning(
-            "%s | entrada N+1 agotada | "
+            "%s | N+1 terminó sin ejecución | "
             "segundo=%s | máximo=%s",
             pair,
             server_second,
@@ -980,7 +996,7 @@ def execute_pending(
             f"Par: {pair}\n"
             f"Dirección: {pending['signal'].upper()}\n"
             f"N+1: {n1_timestamp}\n\n"
-            "Se agotó la ventana de reintento."
+            "Terminó la ventana completa de N+1."
         )
 
         PENDING_ENTRY.pop(
@@ -989,10 +1005,6 @@ def execute_pending(
         )
 
         return False
-
-    # --------------------------------------------------------
-    # EVITAR DUPLICAR UNA OPERACIÓN YA EJECUTADA
-    # --------------------------------------------------------
 
     if (
         LAST_TRADE_CANDLE.get(pair)
@@ -1017,35 +1029,26 @@ def execute_pending(
         "PUT 🔴"
     )
 
-    # --------------------------------------------------------
-    # SOLO AVISAR LA PRIMERA VEZ
-    # --------------------------------------------------------
-
-    if not pending.get(
-        "entry_notification_sent"
-    ):
-
-        telegram_send(
-            "⚡ N+1 DETECTADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {direction}\n\n"
-            f"Servidor IQ: {server_ts}\n"
-            f"Segundo N+1: {server_second}\n\n"
-            f"Timestamp N: {n_timestamp}\n"
-            f"Timestamp N+1: {n1_timestamp}\n\n"
-            "Apertura N+1: orden enviada al abrir el minuto\n\n"
-            "🎯 EJECUTANDO BINARIA"
+    pending["attempts"] = (
+        int(
+            pending.get(
+                "attempts",
+                0,
+            )
         )
+        + 1
+    )
 
-        pending[
-            "entry_notification_sent"
-        ] = True
+    attempt = pending[
+        "attempts"
+    ]
 
     logger.info(
-        "%s | ⚡ INTENTO ENTRADA N+1 | "
-        "server=%s | segundo=%s | "
+        "%s | ⚡ INTENTO %s | "
+        "N+1 | server=%s | segundo=%s | "
         "N=%s | N+1=%s",
         pair,
+        attempt,
         server_ts,
         server_second,
         n_timestamp,
@@ -1053,7 +1056,7 @@ def execute_pending(
     )
 
     # --------------------------------------------------------
-    # INTENTO DE COMPRA
+    # NO SE BLOQUEA EL INTENTO CON TELEGRAM
     # --------------------------------------------------------
 
     ok, order_id, raw_result = buy_binary(
@@ -1062,18 +1065,24 @@ def execute_pending(
     )
 
     # --------------------------------------------------------
-    # SI IQ RECHAZA:
-    # NO ELIMINAR LA SEÑAL.
-    # SE VOLVERÁ A INTENTAR EN EL SIGUIENTE CICLO.
+    # ORDEN RECHAZADA
+    #
+    # IMPORTANTE:
+    # NO HACER POP AQUÍ.
+    #
+    # La señal permanece en PENDING_ENTRY y el siguiente
+    # ciclo vuelve a llamar execute_pending().
     # --------------------------------------------------------
 
     if not ok:
 
         logger.warning(
             "%s | ⚠️ BINARIA NO ACEPTADA | "
-            "signal=%s | N=%s | N+1=%s | "
-            "server=%s | segundo=%s | result=%s",
+            "intento=%s | signal=%s | "
+            "N=%s | N+1=%s | server=%s | segundo=%s | "
+            "result=%s",
             pair,
+            attempt,
             signal.upper(),
             n_timestamp,
             n1_timestamp,
@@ -1085,7 +1094,7 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # OPERACIÓN ACEPTADA
+    # ORDEN ACEPTADA
     # --------------------------------------------------------
 
     LAST_TRADE_CANDLE[
@@ -1107,19 +1116,23 @@ def execute_pending(
         f"Cierre: {pending['minute_close']}\n\n"
         "VELA N+1\n"
         f"Timestamp: {n1_timestamp}\n"
-        "Entrada ejecutada dentro de N+1\n\n"
+        f"Segundo de ejecución: {server_second}\n\n"
         f"💵 Importe: ${AMOUNT}\n"
         "⏱ Expiración: 1 minuto\n"
-        f"🆔 ID: {order_id}"
+        f"🆔 ID: {order_id}\n"
+        f"🔁 Intento aceptado: {attempt}"
     )
 
     logger.info(
         "%s | ✅ BINARIA ABIERTA | "
-        "%s | N=%s | N+1=%s | ID=%s",
+        "%s | intento=%s | N=%s | N+1=%s | "
+        "segundo=%s | ID=%s",
         pair,
         signal.upper(),
+        attempt,
         n_timestamp,
         n1_timestamp,
+        server_second,
         order_id,
     )
 
@@ -1133,19 +1146,18 @@ def execute_pending(
 def process_pair(
     pair: str,
 ) -> None:
-    """Flujo estricto N -> cierre -> decisión -> N+1.
 
-    La M1 se va observando durante toda su duración y se guarda
-    localmente en LAST_LIVE_M1. Al cambiar el minuto, la vela que
-    estaba viva pasa a ser N cerrada y se analiza una sola vez.
-    No se consultan microvelas ni se exige ninguna cantidad de datos 5S.
-    """
+    """Flujo estricto N -> cierre -> decisión -> N+1."""
 
-    # Primero se atiende cualquier señal ya confirmada.
-    # Si IQ la rechaza temporalmente, queda pendiente para
-    # volver a intentar dentro de N+1.
+    # --------------------------------------------------------
+    # PRIMERO EJECUTAR CUALQUIER SEÑAL PENDIENTE
+    # --------------------------------------------------------
+
     if pair in PENDING_ENTRY:
-        execute_pending(pair)
+
+        execute_pending(
+            pair
+        )
 
     server_ts = get_server_timestamp()
 
@@ -1161,10 +1173,18 @@ def process_pair(
         // TIMEFRAME
     ) * TIMEFRAME
 
-    # Leer únicamente el stream M1 ya abierto.
-    df_1m = get_1m_realtime(pair)
+    # --------------------------------------------------------
+    # LEER STREAM M1
+    # --------------------------------------------------------
 
-    if df_1m is not None and not df_1m.empty:
+    df_1m = get_1m_realtime(
+        pair
+    )
+
+    if (
+        df_1m is not None
+        and not df_1m.empty
+    ):
 
         live_candle = get_live_1m(
             df_1m
@@ -1176,7 +1196,9 @@ def process_pair(
 
                 live_ts = int(
                     float(
-                        live_candle["from"]
+                        live_candle[
+                            "from"
+                        ]
                     )
                 )
 
@@ -1190,8 +1212,10 @@ def process_pair(
 
             if live_ts == current_minute:
 
-                previous_live = LAST_LIVE_M1.get(
-                    pair
+                previous_live = (
+                    LAST_LIVE_M1.get(
+                        pair
+                    )
                 )
 
                 if previous_live is not None:
@@ -1226,7 +1250,10 @@ def process_pair(
                     pair
                 ] = live_candle.to_dict()
 
-    # Antes del cambio de minuto solo se recopila N.
+    # --------------------------------------------------------
+    # VELA N CERRADA
+    # --------------------------------------------------------
+
     closed_timestamp = (
         current_minute
         - TIMEFRAME
@@ -1245,9 +1272,6 @@ def process_pair(
         pair
     )
 
-    # Si el stream todavía no publicó N+1,
-    # el último snapshot de N ya quedó cerrado
-    # por el reloj y se usa como N final.
     if cached is None:
 
         live = LAST_LIVE_M1.get(
@@ -1304,11 +1328,15 @@ def process_pair(
         cached
     )
 
-    # Guardia crítica:
-    # nunca analizar una vela anterior ni N+1.
+    # --------------------------------------------------------
+    # GUARDIA
+    # --------------------------------------------------------
+
     if int(
         float(
-            closed_candle["from"]
+            closed_candle[
+                "from"
+            ]
         )
     ) != closed_timestamp:
 
@@ -1317,6 +1345,10 @@ def process_pair(
     LAST_PROCESSED_MINUTE[
         pair
     ] = closed_timestamp
+
+    # --------------------------------------------------------
+    # ANALIZAR M1 CERRADA
+    # --------------------------------------------------------
 
     result = analyze_market(
         closed_candle,
@@ -1331,13 +1363,17 @@ def process_pair(
     result[
         "minute_open"
     ] = float(
-        closed_candle["open"]
+        closed_candle[
+            "open"
+        ]
     )
 
     result[
         "minute_close"
     ] = float(
-        closed_candle["close"]
+        closed_candle[
+            "close"
+        ]
     )
 
     signal = result.get(
@@ -1512,10 +1548,11 @@ def main() -> None:
         "N inicia → recopilar datos → N cierra\n"
         "analizar N → decidir CALL/PUT → N+1\n\n"
         "🎯 Entrada SOLO en N+1\n"
-        "⚡ Reintento automático si IQ rechaza temporalmente\n"
+        "🔁 Reintento durante toda N+1\n"
         "🕐 Reloj sincronizado con IQ Option\n"
-        "💵 $35\n"
-        "⏱ 1 minuto"
+        f"💵 ${AMOUNT}\n"
+        "⏱ 1 minuto\n"
+        f"📊 Pares: {', '.join(PAIRS)}"
     )
 
     while True:
