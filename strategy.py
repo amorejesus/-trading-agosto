@@ -26,14 +26,6 @@ WEAKNESS_BODY_RATIO = 0.35
 CONTINUITY_BODY_RATIO = 0.45
 FORCE_BODY_RATIO = 0.60
 
-# Confirmación de estructura para la entrada N+1.
-# No cambia la dirección: solo permite operar cuando N es una
-# vela de reanudación del movimiento después de un retroceso.
-STRUCTURE_LOOKBACK = 6
-IMPULSE_BODY_RATIO = 0.45
-IMPULSE_CLOSE_CALL = 0.65
-IMPULSE_CLOSE_PUT = 0.35
-
 
 # ============================================================
 # UTILIDADES
@@ -62,158 +54,6 @@ def _get_ohlc(candle: pd.Series) -> Optional[tuple[float, float, float, float]]:
         return None
 
     return opening, high, low, closing
-
-
-# ============================================================
-# ESTRUCTURA + RETROCESO + REANUDACIÓN
-# ============================================================
-
-def _structure_confirmation(
-    candle_1m: pd.Series,
-    previous_m1: Optional[pd.DataFrame],
-) -> Dict[str, Any]:
-    """
-    Busca únicamente este patrón en M1 cerradas:
-
-        tendencia bajista -> retroceso alcista -> impulso bajista (N)
-        tendencia alcista -> retroceso bajista -> impulso alcista (N)
-
-    La vela N es la vela que acaba de cerrar. La función no mira N+1.
-    Si no existe contexto suficiente, no inventa una estructura.
-    """
-    result = {
-        "confirmed": False,
-        "structure": "NONE",
-        "pullback": False,
-        "impulse": False,
-        "reason": "sin estructura confirmada",
-    }
-
-    if previous_m1 is None or not isinstance(previous_m1, pd.DataFrame) or previous_m1.empty:
-        result["reason"] = "sin historial M1 suficiente para estructura"
-        return result
-
-    cols = {str(c).lower(): c for c in previous_m1.columns}
-    required = ("open", "high", "low", "close")
-    if any(c not in cols for c in required):
-        result["reason"] = "historial M1 sin OHLC completo"
-        return result
-
-    rows = previous_m1.copy()
-    try:
-        if "from" in cols:
-            rows = rows.sort_values(cols["from"])
-    except Exception:
-        pass
-
-    # Si el historial incluye N, eliminarla por timestamp para que
-    # la estructura use exclusivamente velas anteriores a N.
-    current_ts = None
-    try:
-        current_ts = int(float(candle_1m.get("from")))
-    except Exception:
-        pass
-
-    if current_ts is not None and "from" in cols:
-        try:
-            rows = rows[rows[cols["from"]].astype(float).astype(int) != current_ts]
-        except Exception:
-            pass
-
-    rows = rows.tail(STRUCTURE_LOOKBACK)
-    if len(rows) < 3:
-        result["reason"] = "menos de 3 M1 anteriores"
-        return result
-
-    def vals(row):
-        return (
-            _to_float(row.get(cols["open"])),
-            _to_float(row.get(cols["high"])),
-            _to_float(row.get(cols["low"])),
-            _to_float(row.get(cols["close"])),
-        )
-
-    parsed = [vals(row) for _, row in rows.iterrows()]
-    parsed = [x for x in parsed if None not in x and x[1] >= x[2]]
-    if len(parsed) < 3:
-        result["reason"] = "historial M1 inválido"
-        return result
-
-    # Las dos últimas velas previas forman la tendencia y la última
-    # debe ser el retroceso contra esa tendencia.
-    a, b, pull = parsed[-3], parsed[-2], parsed[-1]
-    ao, ah, al, ac = a
-    bo, bh, bl, bc = b
-    po, ph, pl, pc = pull
-
-    co = _to_float(candle_1m.get("open"))
-    ch = _to_float(candle_1m.get("high"))
-    cl = _to_float(candle_1m.get("low"))
-    cc = _to_float(candle_1m.get("close"))
-    if None in (co, ch, cl, cc) or ch < cl:
-        result["reason"] = "M1 N inválida"
-        return result
-
-    n_range = ch - cl
-    n_body = abs(cc - co)
-    if n_range <= 0:
-        return result
-    n_body_ratio = n_body / n_range
-    n_position = (cc - cl) / n_range
-
-    bearish_structure = (
-        ac < ao and bc < bo
-        and bc < ac
-        and pc > po
-    )
-    bullish_structure = (
-        ac > ao and bc > bo
-        and bc > ac
-        and pc < po
-    )
-
-    if bearish_structure:
-        # El cierre de N debe romper el mínimo del retroceso y quedar
-        # en la parte baja del rango: eso define la reanudación bajista.
-        impulse = (
-            cc < pl
-            and cc < co
-            and n_body_ratio >= IMPULSE_BODY_RATIO
-            and n_position <= IMPULSE_CLOSE_PUT
-        )
-        result.update({
-            "structure": "BEARISH",
-            "pullback": True,
-            "impulse": bool(impulse),
-        })
-        if impulse:
-            result["confirmed"] = True
-            result["reason"] = "estructura bajista + retroceso alcista + nuevo impulso bajista"
-        else:
-            result["reason"] = "estructura bajista y retroceso, pero N no confirma nuevo impulso"
-        return result
-
-    if bullish_structure:
-        impulse = (
-            cc > ph
-            and cc > co
-            and n_body_ratio >= IMPULSE_BODY_RATIO
-            and n_position >= IMPULSE_CLOSE_CALL
-        )
-        result.update({
-            "structure": "BULLISH",
-            "pullback": True,
-            "impulse": bool(impulse),
-        })
-        if impulse:
-            result["confirmed"] = True
-            result["reason"] = "estructura alcista + retroceso bajista + nuevo impulso alcista"
-        else:
-            result["reason"] = "estructura alcista y retroceso, pero N no confirma nuevo impulso"
-        return result
-
-    result["reason"] = "no hay tendencia + retroceso claramente definido"
-    return result
 
 
 # ============================================================
@@ -251,11 +91,6 @@ def analyze_minute(
         "debilidad": False,
         "doji": False,
         "quality_checks": {},
-        "structure_confirmed": False,
-        "structure": "NONE",
-        "pullback": False,
-        "impulse": False,
-        "structure_reason": "sin estructura confirmada",
     }
 
     ohlc = _get_ohlc(candle_1m)
@@ -368,18 +203,6 @@ def analyze_minute(
     result["state"] = state
 
     # --------------------------------------------------------
-    # CONFIRMACIÓN DEL MEJOR PUNTO DE ENTRADA
-    # --------------------------------------------------------
-    # N debe ser la vela de reanudación después de un retroceso.
-    # Esto solo filtra la señal; no usa ningún dato de N+1.
-    structure = _structure_confirmation(candle_1m, previous_m1)
-    result["structure_confirmed"] = structure["confirmed"]
-    result["structure"] = structure["structure"]
-    result["pullback"] = structure["pullback"]
-    result["impulse"] = structure["impulse"]
-    result["structure_reason"] = structure["reason"]
-
-    # --------------------------------------------------------
     # DECISION FINAL: SOLO CON N CERRADA
     # --------------------------------------------------------
 
@@ -388,21 +211,14 @@ def analyze_minute(
         return result
 
     if direction == "BULLISH":
-        if not structure["confirmed"] or structure["structure"] != "BULLISH":
-            result["reason"] = "sin señal: falta reanudación alcista después del retroceso"
-            return result
         result["signal"] = "call"
         result["valid"] = True
-        result["reason"] = f"CALL confirmada al cierre de N: {state} + nuevo impulso alcista"
-        return result
-
-    if not structure["confirmed"] or structure["structure"] != "BEARISH":
-        result["reason"] = "sin señal: falta reanudación bajista después del retroceso"
+        result["reason"] = f"CALL confirmada al cierre de N: {state}"
         return result
 
     result["signal"] = "put"
     result["valid"] = True
-    result["reason"] = f"PUT confirmada al cierre de N: {state} + nuevo impulso bajista"
+    result["reason"] = f"PUT confirmada al cierre de N: {state}"
     return result
 
 
