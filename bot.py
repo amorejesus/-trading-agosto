@@ -904,6 +904,7 @@ def execute_pending(
     # No esperamos a que el stream de velas 1M publique la
     # nueva vela. Ese retraso era el que desplazaba el punto
     # de entrada. El reloj del servidor es la referencia.
+    #
     # --------------------------------------------------------
 
     current_minute = (
@@ -1208,6 +1209,7 @@ def process_pair(
 
     if signal in ("call", "put"):
         create_pending_signal(pair, result)
+        execute_pending(pair)
     else:
         logger.info(
             "%s | N=%s | SIN SEÑAL | %s",
