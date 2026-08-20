@@ -25,7 +25,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = [
     "EURUSD",
-    "GBPUSD",
 ]
 
 
@@ -907,10 +906,16 @@ def buy_binary(
 def execute_pending(
     pair: str,
 ) -> bool:
+    """
+    Ejecuta una señal confirmada inmediatamente cuando N ya cerró.
 
-    pending = PENDING_ENTRY.get(
-        pair
-    )
+    La confirmación de N ya implica que N+1 está comenzando.
+    No se consulta nuevamente la vela M1 antes de IQ.buy(), para
+    evitar perder tiempo de entrada. Si IQ Option rechaza temporalmente
+    la orden, la señal permanece pendiente y se reintenta durante N+1.
+    """
+
+    pending = PENDING_ENTRY.get(pair)
 
     if pending is None:
         return False
@@ -922,106 +927,24 @@ def execute_pending(
 
     server_ts = int(server_ts)
 
-    current_minute = (
-        server_ts
-        // TIMEFRAME
-    ) * TIMEFRAME
-
     n_timestamp = int(
-        pending[
-            "minute_timestamp"
-        ]
+        pending["minute_timestamp"]
     )
 
     n1_timestamp = int(
-        pending[
-            "next_timestamp"
-        ]
+        pending["next_timestamp"]
     )
 
-    # --------------------------------------------------------
-    # ENTRADA EXCLUSIVA EN N+1
-    # --------------------------------------------------------
-    if current_minute < n1_timestamp:
+    # La señal solo puede ejecutarse después del cierre de N.
+    # Si el reloj ya está en N+1, se intenta INMEDIATAMENTE.
+    if server_ts < n1_timestamp:
         return False
 
-    if current_minute > n1_timestamp:
-
-        logger.warning(
-            "%s | señal perdida | "
-            "N=%s | N+1=%s | actual=%s",
-            pair,
-            n_timestamp,
-            n1_timestamp,
-            current_minute,
-        )
-
-        telegram_send(
-            "❌ ENTRADA NO EJECUTADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: {pending['signal'].upper()}\n"
-            f"N+1: {n1_timestamp}\n\n"
-            "Terminó N+1 sin aceptación de IQ Option."
-        )
-
-        PENDING_ENTRY.pop(
-            pair,
-            None,
-        )
-
+    if LAST_TRADE_CANDLE.get(pair) == n1_timestamp:
+        PENDING_ENTRY.pop(pair, None)
         return False
 
-    # --------------------------------------------------------
-    # No depender del stream 1M para autorizar la entrada.
-    # El reloj del servidor IQ es la referencia de N+1.
-    # Esto evita perder la operación porque el stream todavía
-    # no publicó la vela nueva.
-    # --------------------------------------------------------
-    try:
-        df = get_1m_realtime(
-            pair
-        )
-
-        execution_open = pending.get(
-            "minute_open"
-        )
-
-        if df is not None and not df.empty:
-            live_candle = get_live_1m(
-                df
-            )
-
-            if live_candle is not None:
-                try:
-                    live_timestamp = int(
-                        live_candle["from"]
-                    )
-
-                    if live_timestamp == n1_timestamp:
-                        execution_open = float(
-                            live_candle["open"]
-                        )
-                except Exception:
-                    pass
-
-    except Exception:
-        execution_open = pending.get(
-            "minute_open"
-        )
-
-    if (
-        LAST_TRADE_CANDLE.get(pair)
-        == n1_timestamp
-    ):
-        PENDING_ENTRY.pop(
-            pair,
-            None,
-        )
-        return False
-
-    signal = pending[
-        "signal"
-    ]
+    signal = pending["signal"]
 
     direction = (
         "CALL 🟢"
@@ -1030,29 +953,20 @@ def execute_pending(
         "PUT 🔴"
     )
 
-    server_second = (
-        server_ts
-        % TIMEFRAME
-    )
+    server_second = server_ts % TIMEFRAME
 
-    # --------------------------------------------------------
-    # AVISO ÚNICO DE N+1
-    # --------------------------------------------------------
-    if not pending.get(
-        "entry_notified",
-        False,
-    ):
+    # Aviso único.
+    if not pending.get("entry_notified", False):
 
         logger.info(
             "%s | ⚡ N+1 DETECTADA | "
             "server=%s | segundo=%s | "
-            "N=%s | N+1=%s | OPEN=%s",
+            "N=%s | N+1=%s",
             pair,
             server_ts,
             server_second,
             n_timestamp,
             n1_timestamp,
-            execution_open,
         )
 
         telegram_send(
@@ -1063,51 +977,31 @@ def execute_pending(
             f"Segundo N+1: {server_second}\n\n"
             f"Timestamp N: {n_timestamp}\n"
             f"Timestamp N+1: {n1_timestamp}\n\n"
-            f"Apertura N+1: {execution_open}\n\n"
             "🎯 EJECUTANDO BINARIA"
         )
 
-        pending[
-            "entry_notified"
-        ] = True
+        pending["entry_notified"] = True
 
-    # --------------------------------------------------------
-    # REINTENTO DURANTE TODA LA VENTANA N+1
-    # --------------------------------------------------------
-    elapsed = (
-        server_ts
-        - n1_timestamp
-    )
+    # Reintentar durante N+1.
+    elapsed = server_ts - n1_timestamp
 
     if elapsed < 0 or elapsed > MAX_ENTRY_DELAY:
         return False
 
     last_attempt = float(
-        pending.get(
-            "last_attempt",
-            0.0,
-        )
+        pending.get("last_attempt", 0.0)
     )
 
-    # No llamar IQ.buy varias veces dentro del mismo instante
-    # de servidor; esperamos un pequeño intervalo entre intentos.
     if (
         last_attempt > 0
         and time.time() - last_attempt < POLL_INTERVAL
     ):
         return False
 
-    pending[
-        "last_attempt"
-    ] = time.time()
+    pending["last_attempt"] = time.time()
 
-    pending[
-        "attempts"
-    ] = int(
-        pending.get(
-            "attempts",
-            0,
-        )
+    pending["attempts"] = int(
+        pending.get("attempts", 0)
     ) + 1
 
     logger.info(
@@ -1120,6 +1014,9 @@ def execute_pending(
         server_second,
     )
 
+    # IMPORTANTE:
+    # IQ.buy() se llama directamente. No se hace ninguna consulta
+    # adicional de velas antes de enviar la orden.
     ok, order_id, raw_result = buy_binary(
         pair,
         signal,
@@ -1127,9 +1024,7 @@ def execute_pending(
 
     if not ok:
 
-        pending[
-            "last_rejection"
-        ] = raw_result
+        pending["last_rejection"] = raw_result
 
         logger.warning(
             "%s | ❌ BINARIA RECHAZADA | "
@@ -1144,14 +1039,10 @@ def execute_pending(
             raw_result,
         )
 
-        # IMPORTANTE: NO eliminar PENDING_ENTRY.
-        # La señal permanece activa para el siguiente intento
-        # mientras siga dentro de N+1.
+        # Mantener la señal para el siguiente intento.
         return False
 
-    LAST_TRADE_CANDLE[
-        pair
-    ] = n1_timestamp
+    LAST_TRADE_CANDLE[pair] = n1_timestamp
 
     PENDING_ENTRY.pop(
         pair,
@@ -1166,9 +1057,8 @@ def execute_pending(
         f"Timestamp: {n_timestamp}\n"
         f"Apertura: {pending['minute_open']}\n"
         f"Cierre: {pending['minute_close']}\n\n"
-        "VELA N+1\n"
-        f"Timestamp: {n1_timestamp}\n"
-        f"Apertura: {execution_open}\n\n"
+        "ENTRADA N+1\n"
+        f"Timestamp: {n1_timestamp}\n\n"
         f"💵 Importe: ${AMOUNT}\n"
         "⏱ Expiración: 1 minuto\n"
         f"🆔 ID: {order_id}\n"
@@ -1177,14 +1067,11 @@ def execute_pending(
 
     logger.info(
         "%s | ✅ BINARIA ABIERTA | "
-        "%s | N=%s | N+1=%s | "
-        "OPEN=%s | ID=%s | intentos=%s",
+        "%s | N=%s | N+1=%s | intentos=%s",
         pair,
         signal.upper(),
         n_timestamp,
         n1_timestamp,
-        execution_open,
-        order_id,
         pending["attempts"],
     )
 
@@ -1333,6 +1220,10 @@ def process_pair(
             pair,
             result,
         )
+
+        # Ejecutar inmediatamente después de confirmar N.
+        # No esperar al siguiente ciclo del loop.
+        execute_pending(pair)
 
     else:
 
