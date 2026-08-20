@@ -288,22 +288,34 @@ def get_server_timestamp() -> Optional[int]:
 # DISPONIBILIDAD DEL ACTIVO
 # ============================================================
 
-def _binary_is_open(open_time: Dict[str, Any], symbol: str) -> bool:
+def _binary_asset_is_usable(
+    active: Dict[str, Any],
+) -> bool:
     """
-    Comprueba si el símbolo está disponible para BINARIAS.
-    No modifica la estrategia; solamente resuelve el símbolo
-    que IQ Option permite comprar.
+    Comprueba únicamente la información de BINARIAS/TURBO.
+
+    IMPORTANTE:
+    NO llama a IQ.get_all_open_time() porque esa función de algunas
+    versiones de iqoptionapi también consulta DIGITAL y puede lanzar:
+
+        get_digital_underlying_list_data late 30 sec
+        TypeError: 'NoneType' object is not subscriptable
+
+    El bot utiliza BINARIAS, por lo que no necesitamos consultar DIGITAL.
     """
 
     try:
-        binary = open_time.get("binary", {})
 
-        info = binary.get(symbol)
-
-        if not isinstance(info, dict):
+        if not isinstance(active, dict):
             return False
 
-        return bool(info.get("open", False))
+        if not bool(active.get("enabled", False)):
+            return False
+
+        if bool(active.get("is_suspended", False)):
+            return False
+
+        return True
 
     except Exception:
         return False
@@ -313,19 +325,14 @@ def resolve_binary_asset(
     logical_pair: str,
 ) -> Optional[str]:
     """
-    Resuelve el activo real para la compra binaria.
+    Resuelve el activo real para BINARIAS/TURBO sin tocar DIGITAL.
 
     Prioridad:
-      1. EURUSD
-      2. EURUSD-OTC
+      1. símbolo normal
+      2. símbolo -OTC
 
-    Esto corrige el error:
-    'Cannot purchase an option (the asset is not available at the moment).'
-
-    IMPORTANTE:
-    Si EURUSD no está abierto y EURUSD-OTC sí, se utilizará EURUSD-OTC
-    también para las velas, de forma que el análisis y la entrada sean
-    sobre el MISMO activo.
+    Usa get_all_init_v2() directamente para evitar el bug de
+    get_all_open_time() que intenta consultar DIGITAL.
     """
 
     if IQ is None:
@@ -342,26 +349,86 @@ def resolve_binary_asset(
 
     try:
 
-        open_time = IQ.get_all_open_time()
+        init_data = IQ.get_all_init_v2()
 
-        for candidate in candidates:
+        if not isinstance(init_data, dict):
+            logger.warning(
+                "%s | get_all_init_v2() devolvió None/datos inválidos.",
+                logical_pair,
+            )
+            return None
 
-            if _binary_is_open(
-                open_time,
-                candidate,
-            ):
+        # Primero BINARIAS y luego TURBO.
+        # IQ.buy() utiliza el mismo mecanismo para estas opciones.
+        for option_type in ("binary", "turbo"):
 
-                return candidate
+            option_data = init_data.get(
+                option_type,
+                {},
+            )
+
+            if not isinstance(option_data, dict):
+                continue
+
+            actives = option_data.get(
+                "actives",
+                {},
+            )
+
+            if not isinstance(actives, dict):
+                continue
+
+            for active in actives.values():
+
+                if not isinstance(active, dict):
+                    continue
+
+                raw_name = str(
+                    active.get(
+                        "name",
+                        "",
+                    )
+                )
+
+                if "." in raw_name:
+                    symbol = raw_name.split(
+                        ".",
+                        1,
+                    )[1]
+                else:
+                    symbol = raw_name
+
+                if symbol not in candidates:
+                    continue
+
+                if _binary_asset_is_usable(active):
+
+                    logger.info(
+                        "%s | activo %s disponible para %s",
+                        logical_pair,
+                        symbol,
+                        option_type.upper(),
+                    )
+
+                    return symbol
+
+        logger.warning(
+            "%s | no hay BINARIA/TURBO disponible ahora. "
+            "No se consulta DIGITAL.",
+            logical_pair,
+        )
+
+        return None
 
     except Exception as exc:
 
         logger.warning(
-            "No se pudo consultar disponibilidad de %s: %s",
+            "%s | error consultando activos binarios: %s",
             logical_pair,
             exc,
         )
 
-    return None
+        return None
 
 
 def resolve_all_binary_assets() -> None:
