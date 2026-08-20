@@ -14,6 +14,44 @@ from strategy import analyze_market
 
 
 # ============================================================
+# CORRECCIÓN: DESACTIVAR HILO DIGITAL DE IQOPTIONAPI
+# ============================================================
+#
+# Esta versión de iqoptionapi inicia internamente el hilo
+# __get_digital_open(). Ese hilo llama a:
+#
+#   get_digital_underlying_list_data()["underlying"]
+#
+# Cuando IQ Option no devuelve los datos DIGITAL, la librería
+# devuelve None y genera:
+#
+#   get_digital_underlying_list_data late 30 sec
+#   TypeError: 'NoneType' object is not subscriptable
+#
+# Este bot trabaja con BINARIAS/TURBO, no con DIGITAL.
+# Por eso se desactiva únicamente ese hilo interno.
+# No se modifica la estrategia ni la ejecución binaria.
+#
+
+def _disabled_digital_open(
+    self,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    return None
+
+
+# El nombre doble-underscore queda "mangled" por Python.
+# Se reemplaza antes de crear/conectar la instancia IQ_Option.
+try:
+    IQ_Option._IQ_Option__get_digital_open = (
+        _disabled_digital_open
+    )
+except Exception:
+    pass
+
+
+# ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
@@ -46,7 +84,7 @@ MICRO_CANDLE_COUNT = 12
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 70
+AMOUNT = 75
 EXPIRATION = 1
 
 
@@ -58,7 +96,7 @@ POLL_INTERVAL = 0.03
 
 # Ventana máxima para reintentar una orden rechazada.
 # La primera orden se intenta inmediatamente al comenzar N+1.
-MAX_ENTRY_DELAY = 10.0
+MAX_ENTRY_DELAY = 0.5
 
 
 # ============================================================
@@ -1083,6 +1121,17 @@ def execute_pending(
     if server_ts < n1_timestamp:
         return False
 
+    # MODO SNIPER: la orden solo se envía en la apertura de N+1.
+    server_second = server_ts - n1_timestamp
+
+    if server_second > MAX_ENTRY_DELAY:
+        logger.warning(
+            "%s | entrada fuera de apertura N+1 | segundo=%s",
+            logical_pair,
+            server_second,
+        )
+        return False
+
     # Evita duplicar la misma entrada.
     if LAST_TRADE_CANDLE.get(
         logical_pair
@@ -1121,9 +1170,7 @@ def execute_pending(
         "PUT 🔴"
     )
 
-    server_second = (
-        server_ts % TIMEFRAME
-    )
+    server_second = server_ts - n1_timestamp
 
     if not pending.get(
         "entry_notified",
