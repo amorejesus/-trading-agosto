@@ -45,7 +45,7 @@ CANDLE_COUNT = 60
 # OPERACIÓN
 # ============================================================
 
-AMOAMOUNT = 75
+AMOUNT = 35
 EXPIRATION = 1
 
 
