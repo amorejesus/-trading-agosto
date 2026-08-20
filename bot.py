@@ -24,8 +24,12 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 PAIRS = [
-    "AUDUSD-OTC",
-    "CADJPY-OTC",
+    "EURUSD",
+    "EURJPY",
+    "EURGBP",
+    "GBPJPY",
+    "NZDUSD",
+    "GBPUSD",
 ]
 
 
@@ -41,7 +45,7 @@ CANDLE_COUNT = 60
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 30
+AMOAMOUNT = 75
 EXPIRATION = 1
 
 
@@ -49,7 +53,7 @@ EXPIRATION = 1
 # LOOP SNIPER
 # ============================================================
 
-POLL_INTERVAL = 0.05
+POLL_INTERVAL = 0.10
 MAX_ENTRY_DELAY = 0.0
 
 
@@ -248,13 +252,11 @@ def telegram_worker() -> None:
 
                     telegram_send(
                         "🟢 BOT ACTIVADO\n\n"
-                        "ESTRATEGIA 2 MINUTOS\n\n"
+                        "ESTRATEGIA M1 COMPLETA\n\n"
                         "N inicia → recopilar datos → N cierra\n"
                         "analizar N → decidir CALL/PUT → N+1\n\n"
-                        "🎯 SNIPER N+1 POR RETROCESO\n"
-                        "CALL: precio < apertura N+1\n"
-                        "PUT: precio > apertura N+1\n"
-                        "Entrada dentro de N+1 cuando se cumple el disparador."
+                        "🎯 SNIPER N+1\n"
+                        "Entrada al comenzar N+1."
                     )
 
                     logger.info(
@@ -391,7 +393,7 @@ def connect_iq() -> bool:
         "🟢 IQ OPTION CONECTADO\n\n"
         "Modo SNIPER\n"
         "Binarias OTC\n"
-        "Entrada en N+1 únicamente cuando el precio está contra la operación."
+        "Entrada inmediata en N+1."
     )
 
     return True
@@ -479,14 +481,8 @@ def start_realtime_streams() -> None:
                 10,
             )
 
-            IQ.start_candles_stream(
-                pair,
-                60,
-                20,
-            )
-
             logger.info(
-                "%s | stream 60s + 60s iniciado",
+                "%s | stream 60s iniciado",
                 pair,
             )
 
@@ -622,18 +618,6 @@ def get_1m_realtime(
     return realtime_dataframe(
         pair,
         TIMEFRAME,
-    )
-
-
-def get_intrabar_1m(
-    pair: str,
-) -> Optional[pd.DataFrame]:
-
-    # Estas velas de 1 minuto se usan solo para describir
-    # los movimientos internos de la vela N de 2 minutos.
-    return realtime_dataframe(
-        pair,
-        60,
     )
 
 
@@ -782,15 +766,10 @@ def create_pending_signal(
         f"Cuerpo: {result.get('body')}\n"
         f"Mecha superior: {result.get('upper_wick')}\n"
         f"Mecha inferior: {result.get('lower_wick')}\n"
-        f"Posición cierre: {result.get('close_position')}\n"
-        f"Movimiento interno N: {result.get('intrabar', {}).get('path')}\n"
-        f"EMA9: {result.get('indicators', {}).get('ema_fast')}\n"
-        f"EMA21: {result.get('indicators', {}).get('ema_slow')}\n"
-        f"RSI14: {result.get('indicators', {}).get('rsi')}\n\n"
+        f"Posición cierre: {result.get('close_position')}\n\n"
         "✅ SEÑAL CONFIRMADA\n"
         "🚫 N NO SE OPERA\n"
         "➡️ ENTRADA EXCLUSIVA EN N+1\n"
-        "🎯 Sniper: CALL si precio < apertura N+1; PUT si precio > apertura N+1\n"
         f"N+1: {next_timestamp}"
     )
 
@@ -880,84 +859,162 @@ def buy_binary(
 
 
 # ============================================================
-# EJECUCIÓN SNIPER N+1 POR RETROCESO DE PRECIO
+# EJECUCIÓN SNIPER N+1
 # ============================================================
 
 def execute_pending(
     pair: str,
 ) -> bool:
-    """
-    Ejecuta la señal calculada al cierre de N exclusivamente en N+1.
 
-    La dirección ya fue determinada con N cerrada:
-    - N completa se analiza.
-    - CALL/PUT queda fijado.
-    - N+1 solo es la vela de ejecución.
-    - Ningún dato de N+1 cambia la dirección.
-    """
-
-    pending = PENDING_ENTRY.get(pair)
+    pending = PENDING_ENTRY.get(
+        pair
+    )
 
     if pending is None:
         return False
 
     server_ts = get_server_timestamp()
+
     if server_ts is None:
         return False
 
     server_ts = int(server_ts)
 
-    n_timestamp = int(pending["minute_timestamp"])
-    n1_timestamp = int(pending["next_timestamp"])
+    n_timestamp = int(
+        pending[
+            "minute_timestamp"
+        ]
+    )
 
-    current_candle = (
-        server_ts // TIMEFRAME
+    n1_timestamp = int(
+        pending[
+            "next_timestamp"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # ENTRADA EXCLUSIVA EN N+1
+    # --------------------------------------------------------
+    #
+    # La señal se genera con la M1 N ya cerrada.
+    # La orden SOLO puede ejecutarse cuando el reloj del
+    # servidor de IQ Option ya entró en N+1.
+    #
+    # IMPORTANTE:
+    # No esperamos a que el stream de velas 1M publique la
+    # nueva vela. Ese retraso era el que desplazaba el punto
+    # de entrada. El reloj del servidor es la referencia.
+    # --------------------------------------------------------
+
+    current_minute = (
+        server_ts
+        // TIMEFRAME
     ) * TIMEFRAME
 
-    # Esperar hasta el comienzo exacto de N+1.
-    if current_candle < n1_timestamp:
+    if current_minute < n1_timestamp:
         return False
 
-    # Si N+1 ya terminó, la señal se cancela y no pasa a N+2.
-    if current_candle > n1_timestamp:
-        logger.info(
-            "%s | SEÑAL CANCELADA | N+1 terminó sin ejecución | "
-            "N=%s | N+1=%s",
+    if current_minute > n1_timestamp:
+
+        logger.warning(
+            "%s | señal perdida | "
+            "N=%s | N+1=%s | actual=%s",
             pair,
             n_timestamp,
             n1_timestamp,
+            current_minute,
         )
-        PENDING_ENTRY.pop(pair, None)
+
+        telegram_send(
+            "⏳ ENTRADA CANCELADA\n\n"
+            f"Par: {pair}\n"
+            f"N: {n_timestamp}\n"
+            f"N+1: {n1_timestamp}\n"
+            f"Minuto actual: {current_minute}\n\n"
+            "La ventana N+1 terminó.\n"
+            "🚫 No se ejecuta en N+2."
+        )
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    if LAST_TRADE_CANDLE.get(pair) == n1_timestamp:
-        PENDING_ENTRY.pop(pair, None)
+    # --------------------------------------------------------
+    # SEGUNDO EXACTO DE N+1
+    # --------------------------------------------------------
+
+    server_second = (
+        server_ts
+        - n1_timestamp
+    )
+
+    if server_second < 0:
         return False
 
-    signal = pending["signal"]
+    if server_second > MAX_ENTRY_DELAY:
 
-    if signal not in ("call", "put"):
-        PENDING_ENTRY.pop(pair, None)
+        logger.warning(
+            "%s | entrada N+1 demasiado tarde | "
+            "segundo=%s | máximo=%s",
+            pair,
+            server_second,
+            MAX_ENTRY_DELAY,
+        )
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    # La entrada se hace en N+1. No se usa el precio de N+1
-    # para cambiar la dirección calculada.
+    if (
+        LAST_TRADE_CANDLE.get(pair)
+        == n1_timestamp
+    ):
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
+        return False
+
+    signal = pending[
+        "signal"
+    ]
+
+    direction = (
+        "CALL 🟢"
+        if signal == "call"
+        else
+        "PUT 🔴"
+    )
+
     logger.info(
-        "%s | 🚀 EJECUTANDO N+1 | signal=%s | N=%s | N+1=%s",
+        "%s | ⚡ ENTRADA N+1 | "
+        "server=%s | segundo=%s | "
+        "N=%s | N+1=%s | OPEN=%s",
         pair,
-        signal.upper(),
+        server_ts,
+        server_second,
         n_timestamp,
         n1_timestamp,
+        None,
     )
 
     telegram_send(
-        "🚀 EJECUTANDO SEÑAL N+1\n\n"
+        "⚡ N+1 DETECTADA\n\n"
         f"Par: {pair}\n"
-        f"Dirección: {signal.upper()}\n"
-        f"N cerrada: {n_timestamp}\n"
-        f"N+1 apertura: {n1_timestamp}\n\n"
-        "La dirección fue calculada exclusivamente con N cerrada.\n"
-        "N+1 no participa en la decisión.\n\n"
+        f"Dirección: {direction}\n\n"
+        f"Servidor IQ: {server_ts}\n"
+        f"Segundo N+1: {server_second}\n\n"
+        f"Timestamp N: {n_timestamp}\n"
+        f"Timestamp N+1: {n1_timestamp}\n\n"
+        "Apertura N+1: orden enviada al abrir el minuto\n\n"
         "🎯 EJECUTANDO BINARIA"
     )
 
@@ -967,48 +1024,72 @@ def execute_pending(
     )
 
     if not ok:
-        # Mantener la señal pendiente si IQ Option rechaza el primer intento.
-        # Esto permite reintentar dentro de la misma N+1 si el activo tarda
-        # unos instantes en quedar disponible. La dirección sigue siendo la
-        # calculada exclusivamente con N cerrada.
-        logger.warning(
-            "%s | BINARIA NO EJECUTADA TODAVÍA | "
-            "signal=%s | N=%s | N+1=%s | result=%s",
+
+        logger.error(
+            "%s | ❌ BINARIA RECHAZADA | "
+            "signal=%s | N=%s | N+1=%s | "
+            "server=%s | result=%s",
             pair,
             signal.upper(),
             n_timestamp,
             n1_timestamp,
+            server_ts,
             raw_result,
         )
 
-        # NO eliminar PENDING_ENTRY aquí.
-        # El siguiente ciclo vuelve a intentar mientras N+1 siga abierta.
+        telegram_send(
+            "❌ BINARIA RECHAZADA\n\n"
+            f"Par: {pair}\n"
+            f"Dirección: {signal.upper()}\n\n"
+            f"N: {n_timestamp}\n"
+            f"N+1: {n1_timestamp}\n"
+            f"Servidor: {server_ts}\n"
+            f"Segundo N+1: {server_second}\n"
+            "Apertura N+1: orden enviada al abrir el minuto\n\n"
+            f"Respuesta IQ:\n{raw_result}"
+        )
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    LAST_TRADE_CANDLE[pair] = n1_timestamp
-    PENDING_ENTRY.pop(pair, None)
+    LAST_TRADE_CANDLE[
+        pair
+    ] = n1_timestamp
+
+    PENDING_ENTRY.pop(
+        pair,
+        None,
+    )
 
     telegram_send(
         "✅ OPERACIÓN ABIERTA\n\n"
         f"Par: {pair}\n"
         f"Dirección: {signal.upper()}\n\n"
-        "ANÁLISIS DE N CERRADA\n"
-        f"Timestamp N: {n_timestamp}\n"
-        f"Apertura N: {pending['minute_open']}\n"
-        f"Cierre N: {pending['minute_close']}\n\n"
-        "ENTRADA N+1\n"
-        f"Timestamp N+1: {n1_timestamp}\n\n"
+        "VELA N\n"
+        f"Timestamp: {n_timestamp}\n"
+        f"Apertura: {pending['minute_open']}\n"
+        f"Cierre: {pending['minute_close']}\n\n"
+        "VELA N+1\n"
+        f"Timestamp: {n1_timestamp}\n"
+        "Apertura N+1: orden enviada al abrir el minuto\n\n"
         f"💵 Importe: ${AMOUNT}\n"
         "⏱ Expiración: 1 minuto\n"
         f"🆔 ID: {order_id}"
     )
 
     logger.info(
-        "%s | ✅ BINARIA ABIERTA | %s | N=%s | N+1=%s | ID=%s",
+        "%s | ✅ BINARIA ABIERTA | "
+        "%s | N=%s | N+1=%s | "
+        "OPEN=%s | ID=%s",
         pair,
         signal.upper(),
         n_timestamp,
         n1_timestamp,
+        None,
         order_id,
     )
 
@@ -1018,22 +1099,20 @@ def execute_pending(
 # ============================================================
 # PROCESAR UN PAR
 # ============================================================
-# PROCESAR UN PAR
-# ============================================================
 
 def process_pair(
     pair: str,
 ) -> None:
     """Flujo estricto N -> cierre -> decisión -> N+1.
 
-    La vela de 1 minuto se va observando durante toda su duración y se guarda
+    La M1 se va observando durante toda su duración y se guarda
     localmente en LAST_LIVE_M1. Al cambiar el minuto, la vela que
     estaba viva pasa a ser N cerrada y se analiza una sola vez.
     No se consultan microvelas ni se exige ninguna cantidad de datos 5S.
     """
 
-    # Primero se atiende cualquier señal ya confirmada para ejecutar
-    # exclusivamente en N+1.
+    # Primero se atiende cualquier señal ya confirmada para que
+    # N+1 se ejecute antes de volver a hacer trabajo de análisis.
     if pair in PENDING_ENTRY:
         execute_pending(pair)
 
@@ -1044,7 +1123,7 @@ def process_pair(
     server_ts = int(server_ts)
     current_minute = (server_ts // TIMEFRAME) * TIMEFRAME
 
-    # Leer únicamente el stream stream de 2 minutos ya abierto. No hacemos una
+    # Leer únicamente el stream M1 ya abierto. No hacemos una
     # petición histórica al llegar al cierre.
     df_1m = get_1m_realtime(pair)
     if df_1m is not None and not df_1m.empty:
@@ -1106,32 +1185,10 @@ def process_pair(
 
     LAST_PROCESSED_MINUTE[pair] = closed_timestamp
 
-    # Datos internos de N: solo las velas 1M que pertenecen al
-    # intervalo de N. Nunca se entrega N+1 a la estrategia.
-    intrabar_1m = get_intrabar_1m(pair)
-
-    if intrabar_1m is not None and not intrabar_1m.empty:
-        intrabar_1m = intrabar_1m[
-            (intrabar_1m["from"].astype(int) >= closed_timestamp)
-            & (
-                intrabar_1m["from"].astype(int)
-                < closed_timestamp + TIMEFRAME
-            )
-        ].copy()
-
-    # El historial para indicadores/estructura usa velas 1M
-    # anteriores a N; N+1 nunca entra en este análisis.
-    previous_m1 = get_intrabar_1m(pair)
-    if previous_m1 is not None and not previous_m1.empty:
-        previous_m1 = previous_m1[
-            previous_m1["from"].astype(int) < closed_timestamp
-        ].copy()
-
     result = analyze_market(
         closed_candle,
         None,
-        previous_m1,
-        intrabar_1m,
+        df_1m,
     )
 
     result["minute_timestamp"] = closed_timestamp
@@ -1205,11 +1262,11 @@ def main() -> None:
     )
 
     logger.info(
-        "MODO N+1 SEGÚN ANÁLISIS COMPLETO DE N"
+        "MODO SNIPER N+1"
     )
 
     logger.info(
-        "ESTRATEGIA 2 MINUTOS"
+        "ESTRATEGIA M1 COMPLETA"
     )
 
     logger.info(
@@ -1295,8 +1352,7 @@ def main() -> None:
         "N inicia → recopilar datos → N cierra\n"
         "analizar N → decidir CALL/PUT → N+1\n\n"
         "🎯 Entrada SOLO en N+1\n"
-        "🎯 CALL: precio < apertura N+1\n"
-        "🎯 PUT: precio > apertura N+1\n"
+        "⚡ Sin espera artificial\n"
         "🕐 Reloj sincronizado con IQ Option\n"
         "💵 $30\n"
         "⏱ 1 minuto"
