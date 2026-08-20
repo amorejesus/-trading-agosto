@@ -54,7 +54,7 @@ EXPIRATION = 1
 # ============================================================
 
 POLL_INTERVAL = 0.10
-MAX_ENTRY_DELAY = 0.0
+MAX_ENTRY_DELAY = 5.0
 
 
 # ============================================================
@@ -895,17 +895,6 @@ def execute_pending(
     # --------------------------------------------------------
     # ENTRADA EXCLUSIVA EN N+1
     # --------------------------------------------------------
-    #
-    # La señal se genera con la M1 N ya cerrada.
-    # La orden SOLO puede ejecutarse cuando el reloj del
-    # servidor de IQ Option ya entró en N+1.
-    #
-    # IMPORTANTE:
-    # No esperamos a que el stream de velas 1M publique la
-    # nueva vela. Ese retraso era el que desplazaba el punto
-    # de entrada. El reloj del servidor es la referencia.
-    #
-    # --------------------------------------------------------
 
     current_minute = (
         server_ts
@@ -944,7 +933,7 @@ def execute_pending(
         return False
 
     # --------------------------------------------------------
-    # SEGUNDO EXACTO DE N+1
+    # SEGUNDO DE N+1
     # --------------------------------------------------------
 
     server_second = (
