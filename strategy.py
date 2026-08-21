@@ -77,7 +77,7 @@ MAX_SCORE = 100
 
 MIN_STRUCTURE_SCORE = 8
 MIN_CONTINUITY_SCORE = 5
-MIN_FINAL_SCORE = 70
+MIN_FINAL_SCORE = 82
 
 
 # ============================================================
