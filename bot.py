@@ -4,16 +4,13 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import requests
 
 from iqoptionapi.stable_api import IQ_Option
-from strategy import (
-    analyze_live_candle,
-    analyze_market,
-)
+from strategy import analyze_market
 
 
 # ============================================================
@@ -26,46 +23,55 @@ IQ_PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+PAIRS = [
+    "EURUSD",
+]
+
 
 # ============================================================
 # TEMPORALIDADES
 # ============================================================
 
 TIMEFRAME = 60
+MICRO_TIMEFRAME = 5
 
-# Máximo de velas utilizadas.
 CANDLE_COUNT = 60
+MICRO_CANDLE_COUNT = 12
 
 
 # ============================================================
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 78
+AMOUNT = 80
 EXPIRATION = 1
 
 
 # ============================================================
-# EJECUCIÓN
+# INVERSIÓN DE OPERACIONES
+# ============================================================
+#
+# La estrategia analiza normalmente:
+#
+# CALL -> se ejecuta PUT
+# PUT  -> se ejecuta CALL
+#
+# La señal original se conserva para los registros.
 # ============================================================
 
-POLL_INTERVAL = 0.05
-
-# Entrada solamente en N+1.
-MAX_ENTRY_DELAY = 5
+INVERT_OPERATIONS = True
 
 
 # ============================================================
-# SELECCIÓN DEL MERCADO
+# LOOP SNIPER
 # ============================================================
 
-MIN_MARKET_SCORE = 70
+POLL_INTERVAL = 0.03
 
-# Número máximo de candidatos para registrar.
-TOP_MARKETS_TO_LOG = 5
-
-# Actualizar activos disponibles cada cierto tiempo.
-ASSET_REFRESH_INTERVAL = 60
+# Ventana de ejecución de N+1.
+# La orden se intenta desde el segundo 00 y se permite
+# reintentar hasta el segundo indicado.
+MAX_ENTRY_DELAY = 5.0
 
 
 # ============================================================
@@ -73,11 +79,11 @@ ASSET_REFRESH_INTERVAL = 60
 # ============================================================
 
 TELEGRAM_POLL_INTERVAL = 1.0
-TELEGRAM_HTTP_TIMEOUT = 3.0
+TELEGRAM_HTTP_TIMEOUT = 0.5
 
 
 # ============================================================
-# ESTADO GLOBAL
+# ESTADO
 # ============================================================
 
 BOT_RUNNING = False
@@ -86,22 +92,19 @@ IQ: Optional[IQ_Option] = None
 
 LAST_UPDATE_ID: Optional[int] = None
 
-AVAILABLE_OTC_PAIRS: List[str] = []
+LAST_PROCESSED_MINUTE: Dict[str, int] = {}
 
-LAST_ASSET_REFRESH = 0.0
+PENDING_ENTRY: Dict[str, Dict[str, Any]] = {}
 
-STREAMS_STARTED_FOR: Dict[str, bool] = {}
+LAST_TRADE_CANDLE: Dict[str, int] = {}
 
-LAST_PROCESSED_MINUTE: Optional[int] = None
+STREAMS_STARTED = False
 
-PENDING_ENTRY: Optional[Dict[str, Any]] = None
+ACTIVE_API_PAIR: Dict[str, str] = {}
 
-LAST_TRADE_CANDLE: Optional[int] = None
-
-LIVE_M1_STATE: Dict[
-    str,
-    Dict[str, Any],
-] = {}
+# Seguimiento de la vela M1 que está transcurriendo.
+# No modifica la decisión final de la estrategia.
+LIVE_M1_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================
@@ -110,11 +113,7 @@ LIVE_M1_STATE: Dict[
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 logger = logging.getLogger(__name__)
@@ -124,14 +123,9 @@ logger = logging.getLogger(__name__)
 # TELEGRAM
 # ============================================================
 
-def telegram_send(
-    message: str,
-) -> bool:
+def telegram_send(message: str) -> bool:
 
-    if (
-        not TELEGRAM_TOKEN
-        or not TELEGRAM_CHAT_ID
-    ):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
 
     url = (
@@ -188,7 +182,7 @@ def telegram_worker() -> None:
             )
 
             params: Dict[str, Any] = {
-                "timeout": 0,
+                "timeout": 0
             }
 
             if LAST_UPDATE_ID is not None:
@@ -223,39 +217,39 @@ def telegram_worker() -> None:
 
             for update in data.get(
                 "result",
-                [],
+                []
             ):
 
-                LAST_UPDATE_ID = (
-                    update.get("update_id")
+                LAST_UPDATE_ID = update.get(
+                    "update_id"
                 )
 
                 message = update.get(
                     "message",
-                    {},
+                    {}
                 )
 
                 text = str(
                     message.get(
                         "text",
-                        "",
+                        ""
                     )
                 ).strip().lower()
 
                 chat_id = str(
                     message.get(
                         "chat",
-                        {},
+                        {}
                     ).get(
                         "id",
-                        "",
+                        ""
                     )
                 )
 
-                if (
-                    chat_id
-                    != str(TELEGRAM_CHAT_ID)
+                if chat_id != str(
+                    TELEGRAM_CHAT_ID
                 ):
+
                     continue
 
                 if text == "/start":
@@ -264,10 +258,14 @@ def telegram_worker() -> None:
 
                     telegram_send(
                         "🟢 BOT ACTIVADO\n\n"
-                        "MODO MULTI-OTC\n"
-                        "Analizando mercados OTC disponibles.\n"
-                        "Buscando la mejor estructura.\n"
-                        "Operación solo en el mejor candidato."
+                        "ESTRATEGIA 1M + MONITOREO INTRAMINUTO\n"
+                        "🎯 SNIPER N+1\n\n"
+                        "⚠️ OPERACIONES INVERTIDAS\n"
+                        "CALL detectada → PUT ejecutada\n"
+                        "PUT detectada → CALL ejecutada\n\n"
+                        "La M1 se monitorea mientras está abierta.\n"
+                        "La decisión definitiva se toma al cierre de N.\n"
+                        "La entrada se intenta en 00-05s de N+1."
                     )
 
                     logger.info(
@@ -283,33 +281,37 @@ def telegram_worker() -> None:
                         "No se abrirán nuevas operaciones."
                     )
 
+                    logger.info(
+                        "BOT DETENIDO"
+                    )
+
                 elif text == "/status":
 
                     status = (
                         "🟢 ACTIVO"
                         if BOT_RUNNING
-                        else "🔴 DETENIDO"
+                        else
+                        "🔴 DETENIDO"
                     )
 
-                    pending_text = (
-                        "Sí"
-                        if PENDING_ENTRY
-                        else "No"
+                    active = ", ".join(
+                        f"{logical}->{api}"
+                        for logical, api
+                        in ACTIVE_API_PAIR.items()
                     )
 
                     telegram_send(
                         "📊 ESTADO\n\n"
                         f"Estado: {status}\n"
-                        "Modo: MULTI-OTC\n"
-                        "Estrategia: Continuidad\n"
-                        f"OTC disponibles: "
-                        f"{len(AVAILABLE_OTC_PAIRS)}\n"
+                        "Modo: SNIPER\n"
+                        "Principal: 1M\n"
+                        "Monitoreo: intraminuto\n"
+                        "Entrada: N+1, segundos 00-05\n"
+                        "Tipo: BINARIA\n"
+                        "⚠️ Operaciones: INVERTIDAS\n"
                         f"Importe: ${AMOUNT}\n"
-                        f"Expiración: "
-                        f"{EXPIRATION} minuto\n"
-                        f"Señal pendiente: "
-                        f"{pending_text}\n"
-                        "Entrada: N+1 segundos 00-05"
+                        f"Pares: {', '.join(PAIRS)}\n"
+                        f"Activos IQ: {active or 'sin resolver'}"
                     )
 
         except Exception as exc:
@@ -325,7 +327,7 @@ def telegram_worker() -> None:
 
 
 # ============================================================
-# TIMESTAMP DEL SERVIDOR
+# SERVIDOR IQ OPTION
 # ============================================================
 
 def get_server_timestamp() -> Optional[int]:
@@ -335,9 +337,7 @@ def get_server_timestamp() -> Optional[int]:
 
     try:
 
-        timestamp = (
-            IQ.get_server_timestamp()
-        )
+        timestamp = IQ.get_server_timestamp()
 
         if timestamp is None:
             return None
@@ -357,12 +357,243 @@ def get_server_timestamp() -> Optional[int]:
 
 
 # ============================================================
+# DISPONIBILIDAD DEL ACTIVO
+# ============================================================
+
+def _binary_asset_is_usable(
+    active: Dict[str, Any],
+) -> bool:
+
+    try:
+
+        if not isinstance(
+            active,
+            dict
+        ):
+
+            return False
+
+        if not bool(
+            active.get(
+                "enabled",
+                False
+            )
+        ):
+
+            return False
+
+        if bool(
+            active.get(
+                "is_suspended",
+                False
+            )
+        ):
+
+            return False
+
+        return True
+
+    except Exception:
+
+        return False
+
+
+def resolve_binary_asset(
+    logical_pair: str,
+) -> Optional[str]:
+
+    if IQ is None:
+        return None
+
+    candidates = [
+        logical_pair,
+    ]
+
+    if not logical_pair.upper().endswith(
+        "-OTC"
+    ):
+
+        candidates.append(
+            f"{logical_pair}-OTC"
+        )
+
+    try:
+
+        init_data = IQ.get_all_init_v2()
+
+        if not isinstance(
+            init_data,
+            dict
+        ):
+
+            logger.warning(
+                "%s | get_all_init_v2() devolvió datos inválidos.",
+                logical_pair,
+            )
+
+            return None
+
+        for option_type in (
+            "binary",
+            "turbo",
+        ):
+
+            option_data = init_data.get(
+                option_type,
+                {}
+            )
+
+            if not isinstance(
+                option_data,
+                dict
+            ):
+
+                continue
+
+            actives = option_data.get(
+                "actives",
+                {}
+            )
+
+            if not isinstance(
+                actives,
+                dict
+            ):
+
+                continue
+
+            for active in actives.values():
+
+                if not isinstance(
+                    active,
+                    dict
+                ):
+
+                    continue
+
+                raw_name = str(
+                    active.get(
+                        "name",
+                        ""
+                    )
+                )
+
+                if "." in raw_name:
+
+                    symbol = raw_name.split(
+                        ".",
+                        1
+                    )[1]
+
+                else:
+
+                    symbol = raw_name
+
+                if symbol not in candidates:
+                    continue
+
+                if _binary_asset_is_usable(
+                    active
+                ):
+
+                    logger.info(
+                        "%s | activo %s disponible para %s",
+                        logical_pair,
+                        symbol,
+                        option_type.upper(),
+                    )
+
+                    return symbol
+
+        logger.warning(
+            "%s | no hay BINARIA/TURBO disponible ahora.",
+            logical_pair,
+        )
+
+        return None
+
+    except Exception as exc:
+
+        logger.warning(
+            "%s | error consultando activos binarios: %s",
+            logical_pair,
+            exc,
+        )
+
+        return None
+
+
+def resolve_all_binary_assets() -> None:
+
+    global ACTIVE_API_PAIR
+
+    if IQ is None:
+        return
+
+    for logical_pair in PAIRS:
+
+        actual = resolve_binary_asset(
+            logical_pair
+        )
+
+        if actual:
+
+            previous = ACTIVE_API_PAIR.get(
+                logical_pair
+            )
+
+            if previous != actual:
+
+                ACTIVE_API_PAIR[
+                    logical_pair
+                ] = actual
+
+                logger.info(
+                    "%s | activo IQ seleccionado: %s",
+                    logical_pair,
+                    actual,
+                )
+
+        else:
+
+            logger.warning(
+                "%s | no hay activo binario disponible.",
+                logical_pair,
+            )
+
+
+def get_api_pair(
+    logical_pair: str,
+) -> Optional[str]:
+
+    actual = ACTIVE_API_PAIR.get(
+        logical_pair
+    )
+
+    if actual:
+        return actual
+
+    actual = resolve_binary_asset(
+        logical_pair
+    )
+
+    if actual:
+
+        ACTIVE_API_PAIR[
+            logical_pair
+        ] = actual
+
+    return actual
+
+
+# ============================================================
 # CONEXIÓN IQ OPTION
 # ============================================================
 
 def connect_iq() -> bool:
 
     global IQ
+    global STREAMS_STARTED
 
     if not IQ_EMAIL:
         raise ValueError(
@@ -395,14 +626,27 @@ def connect_iq() -> bool:
         "IQ Option conectado."
     )
 
-    refresh_otc_assets(
-        force=True
+    STREAMS_STARTED = False
+
+    resolve_all_binary_assets()
+
+    start_realtime_streams()
+
+    server_ts = get_server_timestamp()
+
+    logger.info(
+        "Servidor IQ timestamp=%s",
+        server_ts,
     )
 
     telegram_send(
         "🟢 IQ OPTION CONECTADO\n\n"
-        "Modo MULTI-OTC\n"
-        "Buscando automáticamente los OTC disponibles."
+        "Modo SNIPER\n"
+        "Binarias\n\n"
+        "⚠️ OPERACIONES INVERTIDAS\n"
+        "CALL → PUT\n"
+        "PUT → CALL\n\n"
+        "Entrada en 00-05s de N+1."
     )
 
     return True
@@ -411,17 +655,26 @@ def connect_iq() -> bool:
 def ensure_connection() -> bool:
 
     global IQ
+    global STREAMS_STARTED
 
     try:
 
         if IQ is None:
+
             return connect_iq()
 
         if IQ.check_connect():
+
+            if not STREAMS_STARTED:
+
+                resolve_all_binary_assets()
+
+                start_realtime_streams()
+
             return True
 
         logger.warning(
-            "Conexión perdida. Reconectando..."
+            "Conexión IQ perdida. Reconectando..."
         )
 
         connected, reason = IQ.connect()
@@ -435,9 +688,11 @@ def ensure_connection() -> bool:
 
             return False
 
-        refresh_otc_assets(
-            force=True
-        )
+        STREAMS_STARTED = False
+
+        resolve_all_binary_assets()
+
+        start_realtime_streams()
 
         telegram_send(
             "🟢 IQ OPTION RECONECTADO"
@@ -456,273 +711,80 @@ def ensure_connection() -> bool:
 
 
 # ============================================================
-# DESCUBRIR TODOS LOS OTC DISPONIBLES
+# STREAMS DE VELAS
 # ============================================================
 
-def is_asset_usable(
-    active: Dict[str, Any],
-) -> bool:
+def start_realtime_streams() -> None:
 
-    try:
-
-        if not isinstance(
-            active,
-            dict,
-        ):
-            return False
-
-        if not bool(
-            active.get(
-                "enabled",
-                False,
-            )
-        ):
-            return False
-
-        if bool(
-            active.get(
-                "is_suspended",
-                False,
-            )
-        ):
-            return False
-
-        return True
-
-    except Exception:
-
-        return False
-
-
-def extract_symbol(
-    active: Dict[str, Any],
-) -> Optional[str]:
-
-    try:
-
-        raw_name = str(
-            active.get(
-                "name",
-                "",
-            )
-        )
-
-        if not raw_name:
-            return None
-
-        if "." in raw_name:
-
-            return raw_name.split(
-                ".",
-                1,
-            )[1]
-
-        return raw_name
-
-    except Exception:
-
-        return None
-
-
-def discover_otc_assets() -> List[str]:
+    global STREAMS_STARTED
 
     if IQ is None:
-        return []
-
-    found = set()
-
-    try:
-
-        init_data = (
-            IQ.get_all_init_v2()
-        )
-
-        if not isinstance(
-            init_data,
-            dict,
-        ):
-
-            logger.warning(
-                "get_all_init_v2() inválido."
-            )
-
-            return []
-
-        for option_type in (
-            "binary",
-            "turbo",
-        ):
-
-            option_data = (
-                init_data.get(
-                    option_type,
-                    {},
-                )
-            )
-
-            if not isinstance(
-                option_data,
-                dict,
-            ):
-                continue
-
-            actives = (
-                option_data.get(
-                    "actives",
-                    {},
-                )
-            )
-
-            if not isinstance(
-                actives,
-                dict,
-            ):
-                continue
-
-            for active in actives.values():
-
-                if not is_asset_usable(
-                    active
-                ):
-                    continue
-
-                symbol = extract_symbol(
-                    active
-                )
-
-                if not symbol:
-                    continue
-
-                if (
-                    "-OTC"
-                    not in symbol.upper()
-                ):
-                    continue
-
-                found.add(
-                    symbol
-                )
-
-    except Exception as exc:
-
-        logger.warning(
-            "Error descubriendo OTC: %s",
-            exc,
-        )
-
-    return sorted(found)
-
-
-def refresh_otc_assets(
-    force: bool = False,
-) -> None:
-
-    global AVAILABLE_OTC_PAIRS
-    global LAST_ASSET_REFRESH
-
-    now = time.time()
-
-    if (
-        not force
-        and now - LAST_ASSET_REFRESH
-        < ASSET_REFRESH_INTERVAL
-    ):
         return
 
-    pairs = discover_otc_assets()
+    if STREAMS_STARTED:
+        return
 
-    if pairs:
+    logger.info(
+        "Iniciando streams en tiempo real..."
+    )
 
-        previous = set(
-            AVAILABLE_OTC_PAIRS
+    any_started = False
+
+    for logical_pair in PAIRS:
+
+        api_pair = get_api_pair(
+            logical_pair
         )
 
-        current = set(pairs)
+        if not api_pair:
 
-        added = current - previous
-        removed = previous - current
-
-        AVAILABLE_OTC_PAIRS = pairs
-
-        if added:
-
-            logger.info(
-                "OTC añadidos: %s",
-                ", ".join(
-                    sorted(added)
-                ),
+            logger.warning(
+                "%s | no disponible para iniciar stream.",
+                logical_pair,
             )
 
-        if removed:
+            continue
 
-            logger.info(
-                "OTC eliminados: %s",
-                ", ".join(
-                    sorted(removed)
-                ),
+        try:
+
+            IQ.start_candles_stream(
+                api_pair,
+                TIMEFRAME,
+                5,
             )
 
-        logger.info(
-            "OTC disponibles: %s",
-            len(
-                AVAILABLE_OTC_PAIRS
-            ),
-        )
+            IQ.start_candles_stream(
+                api_pair,
+                MICRO_TIMEFRAME,
+                20,
+            )
 
-    LAST_ASSET_REFRESH = now
+            logger.info(
+                "%s -> %s | streams 60s + 5s iniciados",
+                logical_pair,
+                api_pair,
+            )
 
+            any_started = True
 
-# ============================================================
-# STREAM DE VELAS
-# ============================================================
+        except Exception as exc:
 
-def ensure_pair_stream(
-    pair: str,
-) -> bool:
+            logger.error(
+                "%s | error iniciando streams: %s",
+                api_pair,
+                exc,
+            )
 
-    if IQ is None:
-        return False
-
-    if STREAMS_STARTED_FOR.get(
-        pair,
-        False,
-    ):
-        return True
-
-    try:
-
-        IQ.start_candles_stream(
-            pair,
-            TIMEFRAME,
-            CANDLE_COUNT,
-        )
-
-        STREAMS_STARTED_FOR[pair] = True
-
-        logger.info(
-            "%s | stream M1 iniciado",
-            pair,
-        )
-
-        return True
-
-    except Exception as exc:
-
-        logger.warning(
-            "%s | error iniciando stream: %s",
-            pair,
-            exc,
-        )
-
-        return False
+    STREAMS_STARTED = any_started
 
 
 # ============================================================
-# DATAFRAME REALTIME
+# REALTIME DATAFRAME
 # ============================================================
 
 def realtime_dataframe(
     pair: str,
+    timeframe: int,
 ) -> Optional[pd.DataFrame]:
 
     if IQ is None:
@@ -730,11 +792,9 @@ def realtime_dataframe(
 
     try:
 
-        candles = (
-            IQ.get_realtime_candles(
-                pair,
-                TIMEFRAME,
-            )
+        candles = IQ.get_realtime_candles(
+            pair,
+            timeframe,
         )
 
         if not candles:
@@ -760,19 +820,23 @@ def realtime_dataframe(
                         "high": float(
                             candle.get(
                                 "max",
-                                candle.get("high"),
+                                candle.get(
+                                    "high"
+                                ),
                             )
                         ),
                         "low": float(
                             candle.get(
                                 "min",
-                                candle.get("low"),
+                                candle.get(
+                                    "low"
+                                ),
                             )
                         ),
                         "volume": float(
                             candle.get(
                                 "volume",
-                                0,
+                                0
                             )
                         ),
                     }
@@ -784,7 +848,9 @@ def realtime_dataframe(
         if not rows:
             return None
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(
+            rows
+        )
 
         df.sort_values(
             "from",
@@ -802,15 +868,14 @@ def realtime_dataframe(
             inplace=True,
         )
 
-        return df.tail(
-            CANDLE_COUNT
-        ).copy()
+        return df
 
     except Exception as exc:
 
         logger.warning(
-            "%s | realtime error: %s",
+            "%s | realtime %ss error: %s",
             pair,
+            timeframe,
             exc,
         )
 
@@ -818,21 +883,90 @@ def realtime_dataframe(
 
 
 # ============================================================
-# ANALIZAR VELA VIVA
+# VELAS 1M
 # ============================================================
 
-def monitor_live_market(
-    pair: str,
-    df: pd.DataFrame,
-    server_ts: int,
-) -> Optional[Dict[str, Any]]:
+def get_1m_realtime(
+    logical_pair: str,
+) -> Optional[pd.DataFrame]:
 
-    if df is None or len(df) == 0:
+    api_pair = get_api_pair(
+        logical_pair
+    )
+
+    if not api_pair:
         return None
+
+    return realtime_dataframe(
+        api_pair,
+        TIMEFRAME,
+    )
+
+
+# ============================================================
+# MICROVELAS 5S
+# ============================================================
+
+def get_5s_realtime(
+    logical_pair: str,
+    minute_timestamp: int,
+) -> Optional[pd.DataFrame]:
+
+    api_pair = get_api_pair(
+        logical_pair
+    )
+
+    if not api_pair:
+        return None
+
+    df = realtime_dataframe(
+        api_pair,
+        MICRO_TIMEFRAME,
+    )
+
+    if df is None:
+        return None
+
+    start = int(
+        minute_timestamp
+    )
+
+    end = start + TIMEFRAME
+
+    df = df[
+        (df["from"] >= start)
+        &
+        (df["from"] < end)
+    ].copy()
+
+    df.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    return df
+
+
+# ============================================================
+# MONITOREO INTRAMINUTO
+# ============================================================
+
+def monitor_live_minute(
+    logical_pair: str,
+    df_1m: pd.DataFrame,
+    server_ts: int,
+) -> None:
+
+    if (
+        df_1m is None
+        or len(df_1m) == 0
+    ):
+
+        return
 
     try:
 
-        live = df.iloc[-1]
+        live = df_1m.iloc[-1]
 
         live_ts = int(
             live["from"]
@@ -844,302 +978,202 @@ def monitor_live_market(
         ) * TIMEFRAME
 
         if live_ts != current_minute:
-            return None
+            return
 
-        live_analysis = (
-            analyze_live_candle(
-                live
-            )
+        opening = float(
+            live["open"]
         )
 
-        elapsed = int(
-            server_ts - live_ts
+        high = float(
+            live["high"]
+        )
+
+        low = float(
+            live["low"]
+        )
+
+        closing = float(
+            live["close"]
+        )
+
+        candle_range = max(
+            0.0,
+            high - low,
+        )
+
+        body = abs(
+            closing - opening
+        )
+
+        body_ratio = (
+            body / candle_range
+            if candle_range > 0
+            else 0.0
+        )
+
+        elapsed = max(
+            0,
+            min(
+                TIMEFRAME,
+                int(
+                    server_ts - live_ts
+                ),
+            ),
         )
 
         previous = LIVE_M1_STATE.get(
-            pair
+            logical_pair
         )
 
         if (
             previous is None
-            or previous.get(
-                "timestamp"
+            or int(
+                previous.get(
+                    "timestamp",
+                    -1
+                )
             ) != live_ts
         ):
 
-            LIVE_M1_STATE[pair] = {
+            LIVE_M1_STATE[
+                logical_pair
+            ] = {
+
                 "timestamp": live_ts,
+
+                "observations": 1,
+
                 "last_second": elapsed,
-                "analysis": live_analysis,
+
+                "open": opening,
+
+                "high": high,
+
+                "low": low,
+
+                "close": closing,
+
+                "body_ratio": body_ratio,
             }
 
-        else:
+            logger.info(
+                "%s | 🔎 N ABIERTA | "
+                "inicio=%s | observando durante 60s",
+                logical_pair,
+                live_ts,
+            )
 
-            previous[
-                "last_second"
-            ] = elapsed
+            return
 
-            previous[
-                "analysis"
-            ] = live_analysis
+        if int(
+            previous.get(
+                "last_second",
+                -1
+            )
+        ) != elapsed:
 
-        return live_analysis
+            previous["observations"] = int(
+                previous.get(
+                    "observations",
+                    0
+                )
+            ) + 1
+
+            previous["last_second"] = elapsed
+
+        previous["open"] = opening
+        previous["high"] = high
+        previous["low"] = low
+        previous["close"] = closing
+        previous["body_ratio"] = body_ratio
 
     except Exception:
 
         logger.exception(
-            "%s | error monitoreo live",
-            pair,
+            "%s | error monitoreando M1",
+            logical_pair,
         )
 
-        return None
-
 
 # ============================================================
-# OBTENER VELA CERRADA
+# VELAS
 # ============================================================
 
-def get_closed_candle(
+def get_closed_1m(
     df: pd.DataFrame,
-    server_ts: int,
 ) -> Optional[pd.Series]:
 
-    if df is None or len(df) < 2:
+    if (
+        df is None
+        or len(df) < 2
+    ):
+
         return None
 
-    current_minute = (
-        int(server_ts)
-        // TIMEFRAME
-    ) * TIMEFRAME
-
-    candidates = df[
-        df["from"] < current_minute
-    ]
-
-    if len(candidates) == 0:
-        return None
-
-    return candidates.iloc[-1]
+    return df.iloc[-2]
 
 
 # ============================================================
-# ANALIZAR UN PAR AL CIERRE
+# INVERTIR OPERACIÓN
 # ============================================================
 
-def analyze_pair_closed(
-    pair: str,
-    df: pd.DataFrame,
-    closed_candle: pd.Series,
-) -> Dict[str, Any]:
+def invert_signal(
+    signal: Optional[str],
+) -> Optional[str]:
 
-    closed_ts = int(
-        closed_candle["from"]
-    )
+    if signal == "call":
+        return "put"
 
-    history = df[
-        df["from"] <= closed_ts
-    ].copy()
+    if signal == "put":
+        return "call"
 
-    result = analyze_market(
-        closed_candle,
-        previous_m1=history,
-    )
-
-    result["pair"] = pair
-    result["minute_timestamp"] = closed_ts
-
-    return result
+    return None
 
 
 # ============================================================
-# ANALIZAR TODOS LOS MERCADOS
+# CREAR SEÑAL PENDIENTE
 # ============================================================
 
-def analyze_all_markets(
-    server_ts: int,
-) -> List[Dict[str, Any]]:
-
-    candidates: List[
-        Dict[str, Any]
-    ] = []
-
-    for pair in AVAILABLE_OTC_PAIRS:
-
-        if not BOT_RUNNING:
-            break
-
-        try:
-
-            if not ensure_pair_stream(
-                pair
-            ):
-                continue
-
-            df = realtime_dataframe(
-                pair
-            )
-
-            if df is None:
-                continue
-
-            if len(df) < 10:
-                continue
-
-            # ------------------------------------------------
-            # ANALIZAR LA VELA QUE ESTÁ VIVA
-            # ------------------------------------------------
-
-            monitor_live_market(
-                pair,
-                df,
-                server_ts,
-            )
-
-            # ------------------------------------------------
-            # OBTENER LA ÚLTIMA VELA CERRADA
-            # ------------------------------------------------
-
-            closed_candle = (
-                get_closed_candle(
-                    df,
-                    server_ts,
-                )
-            )
-
-            if closed_candle is None:
-                continue
-
-            result = analyze_pair_closed(
-                pair,
-                df,
-                closed_candle,
-            )
-
-            candidates.append(
-                result
-            )
-
-        except Exception:
-
-            logger.exception(
-                "%s | error analizando",
-                pair,
-            )
-
-    return candidates
-
-
-# ============================================================
-# ELEGIR EL MEJOR MERCADO
-# ============================================================
-
-def select_best_market(
-    results: List[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-
-    valid_results = [
-        result
-        for result in results
-        if result.get("valid")
-        and result.get("signal")
-        in ("call", "put")
-        and int(
-            result.get(
-                "score",
-                0,
-            )
-        ) >= MIN_MARKET_SCORE
-    ]
-
-    if not valid_results:
-        return None
-
-    valid_results.sort(
-        key=lambda item: (
-            int(item.get("score", 0)),
-            int(
-                item.get(
-                    "continuity",
-                    {},
-                ).get(
-                    "score",
-                    0,
-                )
-            ),
-            int(
-                item.get(
-                    "confirmation",
-                    {},
-                ).get(
-                    "score",
-                    0,
-                )
-            ),
-        ),
-        reverse=True,
-    )
-
-    return valid_results[0]
-
-
-# ============================================================
-# LOG RANKING
-# ============================================================
-
-def log_market_ranking(
-    results: List[Dict[str, Any]],
-) -> None:
-
-    ranking = sorted(
-        results,
-        key=lambda item: int(
-            item.get(
-                "score",
-                0,
-            )
-        ),
-        reverse=True,
-    )
-
-    for result in ranking[
-        :TOP_MARKETS_TO_LOG
-    ]:
-
-        logger.info(
-            "RANK | %s | score=%s | "
-            "direction=%s | signal=%s | %s",
-            result.get("pair"),
-            result.get("score"),
-            result.get("direction"),
-            result.get("signal"),
-            result.get("reason"),
-        )
-
-
-# ============================================================
-# CREAR SEÑAL DEL MEJOR MERCADO
-# ============================================================
-
-def create_pending_entry(
+def create_pending_signal(
+    logical_pair: str,
     result: Dict[str, Any],
 ) -> None:
 
-    global PENDING_ENTRY
-
-    pair = result.get("pair")
-    signal = result.get("signal")
-    minute_ts = result.get(
-        "minute_timestamp"
+    original_signal = result.get(
+        "signal"
     )
 
-    if not pair:
+    if original_signal not in (
+        "call",
+        "put",
+    ):
+
         return
+
+    # ========================================================
+    # AQUÍ SE INVIERTE LA OPERACIÓN
+    # ========================================================
+
+    if INVERT_OPERATIONS:
+
+        signal = invert_signal(
+            original_signal
+        )
+
+    else:
+
+        signal = original_signal
 
     if signal not in (
         "call",
         "put",
     ):
+
         return
+
+    minute_ts = result.get(
+        "minute_timestamp"
+    )
 
     if minute_ts is None:
         return
@@ -1148,163 +1182,213 @@ def create_pending_entry(
         minute_ts
     )
 
-    next_ts = (
+    next_timestamp = (
         minute_ts + TIMEFRAME
     )
 
-    if (
-        PENDING_ENTRY is not None
-        and PENDING_ENTRY.get(
-            "next_timestamp"
-        ) == next_ts
-    ):
-        return
-
-    direction = (
-        "CALL 🟢"
-        if signal == "call"
-        else "PUT 🔴"
+    existing = PENDING_ENTRY.get(
+        logical_pair
     )
 
-    PENDING_ENTRY = {
-        "pair": pair,
+    if existing is not None:
+
+        if int(
+            existing[
+                "minute_timestamp"
+            ]
+        ) == minute_ts:
+
+            return
+
+    api_pair = get_api_pair(
+        logical_pair
+    )
+
+    opening = result.get(
+        "minute_open"
+    )
+
+    closing = result.get(
+        "minute_close"
+    )
+
+    first_5s_close = result.get(
+        "first_5s_close"
+    )
+
+    pullback_count = result.get(
+        "pullback_count",
+        0,
+    )
+
+    live_state = LIVE_M1_STATE.get(
+        logical_pair,
+        {},
+    )
+
+    observations = int(
+        live_state.get(
+            "observations",
+            0
+        )
+    )
+
+    PENDING_ENTRY[
+        logical_pair
+    ] = {
+
+        # Señal que realmente se enviará a IQ Option.
         "signal": signal,
-        "score": result.get(
-            "score",
-            0,
-        ),
+
+        # Señal original generada por strategy.py.
+        "original_signal": original_signal,
+
         "minute_timestamp": minute_ts,
-        "next_timestamp": next_ts,
-        "minute_open": result.get(
-            "minute_open"
-        ),
-        "minute_close": result.get(
-            "minute_close"
-        ),
+
+        "next_timestamp": next_timestamp,
+
+        "minute_open": opening,
+
+        "minute_close": closing,
+
+        "first_5s_close": first_5s_close,
+
+        "pullback_count": pullback_count,
+
         "reason": result.get(
             "reason",
-            ""
+            "",
         ),
-        "attempts": 0,
-        "last_attempt": 0.0,
-        "last_rejection": None,
-        "entry_notified": False,
+
+        "api_pair": api_pair,
+
         "created_at": time.time(),
+
+        "entry_notified": False,
+
+        "last_rejection": None,
+
+        "attempts": 0,
+
+        "last_attempt": 0.0,
+
+        "live_observations": observations,
     }
 
-    structure = result.get(
-        "structure",
-        {}
+    original_direction = (
+        "CALL 🟢"
+        if original_signal == "call"
+        else
+        "PUT 🔴"
     )
 
-    continuity = result.get(
-        "continuity",
-        {}
-    )
-
-    confirmation = result.get(
-        "confirmation",
-        {}
+    final_direction = (
+        "CALL 🟢"
+        if signal == "call"
+        else
+        "PUT 🔴"
     )
 
     telegram_send(
-        "🏆 MEJOR MERCADO SELECCIONADO\n\n"
-        f"Par: {pair}\n"
-        f"Dirección: {direction}\n"
-        f"Score: {result.get('score')}/100\n\n"
-        "ESTRUCTURA\n"
-        f"{structure.get('reason')}\n"
-        f"Score: {structure.get('score')}\n\n"
-        "CONTINUIDAD\n"
-        f"{continuity.get('reason')}\n\n"
-        "CONFIRMACIÓN\n"
-        f"{confirmation.get('reason')}\n\n"
-        "VELA N\n"
-        f"Apertura: "
-        f"{result.get('minute_open')}\n"
-        f"Cierre: "
-        f"{result.get('minute_close')}\n\n"
-        "🎯 ENTRADA EXCLUSIVA EN N+1\n"
-        f"Timestamp N+1: {next_ts}\n"
-        "Ventana: segundos 00-05"
+        "🎯 SEÑAL CONFIRMADA\n\n"
+        f"Par: {logical_pair}\n"
+        f"Activo IQ: {api_pair}\n\n"
+        "📊 SEÑAL DE LA ESTRATEGIA\n"
+        f"{original_direction}\n\n"
+        "🔄 OPERACIÓN INVERTIDA\n"
+        f"{final_direction}\n\n"
+        "VELA N CERRADA\n"
+        f"Timestamp: {minute_ts}\n"
+        f"Apertura: {opening}\n"
+        f"Cierre: {closing}\n\n"
+        "🔎 MONITOREO INTRAMINUTO\n"
+        f"Observaciones: {observations}\n\n"
+        "PRIMERA 5S\n"
+        f"Cierre: {first_5s_close}\n\n"
+        "RETROCESOS 5S\n"
+        f"Cantidad: {pullback_count}\n\n"
+        "✅ PATRÓN CONFIRMADO\n"
+        "🚫 N NO SE OPERA\n"
+        "➡️ ENTRADA EXCLUSIVA EN N+1\n"
+        f"N+1: {next_timestamp}\n"
+        "⚡ Ventana de ejecución: 00-05s"
     )
 
     logger.info(
-        "MEJOR MERCADO | %s | %s | "
-        "score=%s | N=%s | N+1=%s",
-        pair,
+        "%s | SEÑAL ORIGINAL=%s | "
+        "OPERACIÓN INVERTIDA=%s | "
+        "API=%s | N=%s | N+1=%s | observaciones=%s",
+        logical_pair,
+        original_signal.upper(),
         signal.upper(),
-        result.get("score"),
+        api_pair,
         minute_ts,
-        next_ts,
+        next_timestamp,
+        observations,
     )
 
 
 # ============================================================
-# COMPRA
+# COMPRA BINARIA
 # ============================================================
 
 def buy_binary(
-    pair: str,
+    api_pair: str,
     signal: str,
 ) -> tuple[bool, Optional[Any], Any]:
 
     if IQ is None:
-        return (
-            False,
-            None,
-            "IQ=None",
-        )
+        return False, None, "IQ=None"
 
     try:
 
-        response = IQ.buy(
+        result = IQ.buy(
             AMOUNT,
-            pair,
+            api_pair,
             signal,
             EXPIRATION,
         )
 
         if isinstance(
-            response,
-            tuple,
+            result,
+            tuple
         ):
 
-            if len(response) >= 2:
+            if len(result) >= 2:
 
                 return (
-                    bool(response[0]),
-                    response[1],
-                    response,
+                    bool(result[0]),
+                    result[1],
+                    result,
                 )
 
-            if len(response) == 1:
+            if len(result) == 1:
 
                 return (
-                    bool(response[0]),
+                    bool(result[0]),
                     None,
-                    response,
+                    result,
                 )
 
-        if response is True:
+        if result is True:
 
             return (
                 True,
                 None,
-                response,
+                result,
             )
 
         return (
             False,
             None,
-            response,
+            result,
         )
 
     except Exception as exc:
 
         logger.exception(
-            "%s | error IQ.buy",
-            pair,
+            "%s | error buy binary",
+            api_pair,
         )
 
         return (
@@ -1315,15 +1399,16 @@ def buy_binary(
 
 
 # ============================================================
-# EJECUTAR SEÑAL PENDIENTE
+# EJECUCIÓN SNIPER N+1
 # ============================================================
 
-def execute_pending_entry() -> bool:
+def execute_pending(
+    logical_pair: str,
+) -> bool:
 
-    global PENDING_ENTRY
-    global LAST_TRADE_CANDLE
-
-    pending = PENDING_ENTRY
+    pending = PENDING_ENTRY.get(
+        logical_pair
+    )
 
     if pending is None:
         return False
@@ -1333,60 +1418,130 @@ def execute_pending_entry() -> bool:
     if server_ts is None:
         return False
 
+    server_ts = int(
+        server_ts
+    )
+
+    n_timestamp = int(
+        pending[
+            "minute_timestamp"
+        ]
+    )
+
     n1_timestamp = int(
-        pending["next_timestamp"]
+        pending[
+            "next_timestamp"
+        ]
     )
 
     if server_ts < n1_timestamp:
         return False
 
-    if (
-        LAST_TRADE_CANDLE
-        == n1_timestamp
-    ):
+    if LAST_TRADE_CANDLE.get(
+        logical_pair
+    ) == n1_timestamp:
 
-        PENDING_ENTRY = None
+        PENDING_ENTRY.pop(
+            logical_pair,
+            None,
+        )
 
         return True
 
-    elapsed = (
-        server_ts - n1_timestamp
+    signal = pending[
+        "signal"
+    ]
+
+    original_signal = pending.get(
+        "original_signal"
     )
 
-    if elapsed > MAX_ENTRY_DELAY:
+    api_pair = pending.get(
+        "api_pair"
+    )
 
-        logger.warning(
-            "%s | ventana agotada | "
-            "último rechazo=%s",
-            pending["pair"],
-            pending.get(
-                "last_rejection"
-            ),
+    if not api_pair:
+
+        api_pair = get_api_pair(
+            logical_pair
         )
 
-        telegram_send(
-            "❌ ENTRADA CANCELADA\n\n"
-            f"Par: {pending['pair']}\n"
-            f"Dirección: "
-            f"{pending['signal'].upper()}\n"
-            "Motivo: ventana N+1 agotada\n\n"
-            f"Última respuesta IQ:\n"
-            f"{pending.get('last_rejection')}"
-        )
+        pending[
+            "api_pair"
+        ] = api_pair
 
-        PENDING_ENTRY = None
+    if not api_pair:
+
+        logger.error(
+            "%s | N+1 llegó pero no hay símbolo binario disponible.",
+            logical_pair,
+        )
 
         return False
 
-    pair = pending["pair"]
-    signal = pending["signal"]
-
-    server_second = (
-        server_ts % TIMEFRAME
+    direction = (
+        "CALL 🟢"
+        if signal == "call"
+        else
+        "PUT 🔴"
     )
 
+    original_direction = (
+        "CALL 🟢"
+        if original_signal == "call"
+        else
+        "PUT 🔴"
+    )
+
+    server_second = (
+        server_ts
+        % TIMEFRAME
+    )
+
+    if server_second > int(
+        MAX_ENTRY_DELAY
+    ):
+
+        elapsed = (
+            server_ts
+            - n1_timestamp
+        )
+
+        if elapsed > MAX_ENTRY_DELAY:
+
+            telegram_send(
+                "❌ ENTRADA NO EJECUTADA\n\n"
+                f"Par: {logical_pair}\n"
+                f"Activo IQ: {api_pair}\n\n"
+                "Señal original:\n"
+                f"{original_direction}\n\n"
+                "Operación invertida:\n"
+                f"{direction}\n\n"
+                f"N+1: {n1_timestamp}\n\n"
+                "Se agotó la ventana de ejecución 00-05s.\n\n"
+                "Última respuesta IQ:\n"
+                f"{pending.get('last_rejection')}"
+            )
+
+            logger.error(
+                "%s | ❌ ventana N+1 agotada | "
+                "última respuesta=%s",
+                logical_pair,
+                pending.get(
+                    "last_rejection"
+                ),
+            )
+
+            PENDING_ENTRY.pop(
+                logical_pair,
+                None,
+            )
+
+            return False
+
     if not pending.get(
-        "entry_notified"
+        "entry_notified",
+        False,
     ):
 
         pending[
@@ -1395,15 +1550,49 @@ def execute_pending_entry() -> bool:
 
         telegram_send(
             "⚡ N+1 DETECTADA\n\n"
-            f"Par: {pair}\n"
-            f"Dirección: "
-            f"{signal.upper()}\n"
-            f"Score: "
-            f"{pending['score']}/100\n\n"
-            f"Segundo servidor: "
-            f"{server_second:02d}\n\n"
-            "🎯 Intentando entrada"
+            f"Par: {logical_pair}\n"
+            f"Activo IQ: {api_pair}\n\n"
+            "Señal original:\n"
+            f"{original_direction}\n\n"
+            "🔄 OPERACIÓN INVERTIDA:\n"
+            f"{direction}\n\n"
+            f"Servidor IQ: {server_ts}\n"
+            f"Segundo N+1: {server_second:02d}\n\n"
+            f"Timestamp N: {n_timestamp}\n"
+            f"Timestamp N+1: {n1_timestamp}\n\n"
+            "🎯 EJECUTANDO BINARIA"
         )
+
+        logger.info(
+            "%s | ⚡ N+1 DETECTADA | "
+            "API=%s | original=%s | ejecutando=%s | "
+            "server=%s | segundo=%s",
+            logical_pair,
+            api_pair,
+            original_signal.upper()
+            if original_signal
+            else "N/A",
+            signal.upper(),
+            server_ts,
+            server_second,
+        )
+
+    elapsed = (
+        server_ts
+        - n1_timestamp
+    )
+
+    if elapsed < 0:
+        return False
+
+    if elapsed > MAX_ENTRY_DELAY:
+
+        PENDING_ENTRY.pop(
+            logical_pair,
+            None,
+        )
+
+        return False
 
     last_attempt = float(
         pending.get(
@@ -1414,16 +1603,21 @@ def execute_pending_entry() -> bool:
 
     if (
         last_attempt > 0
-        and time.time() - last_attempt
+        and
+        time.time()
+        - last_attempt
         < POLL_INTERVAL
     ):
+
         return False
 
-    pending["last_attempt"] = (
-        time.time()
-    )
+    pending[
+        "last_attempt"
+    ] = time.time()
 
-    pending["attempts"] = int(
+    pending[
+        "attempts"
+    ] = int(
         pending.get(
             "attempts",
             0,
@@ -1431,20 +1625,25 @@ def execute_pending_entry() -> bool:
     ) + 1
 
     logger.info(
-        "%s | IQ.buy #%s | %s | "
-        "N+1=%s | segundo=%02d",
-        pair,
-        pending["attempts"],
+        "%s | ⚡ IQ.buy #%s | "
+        "API=%s | ORIGINAL=%s | "
+        "INVERTIDA=%s | N+1=%s | segundo=%02d",
+        logical_pair,
+        pending[
+            "attempts"
+        ],
+        api_pair,
+        original_signal.upper()
+        if original_signal
+        else "N/A",
         signal.upper(),
         n1_timestamp,
         server_second,
     )
 
-    ok, order_id, raw_result = (
-        buy_binary(
-            pair,
-            signal,
-        )
+    ok, order_id, raw_result = buy_binary(
+        api_pair,
+        signal,
     )
 
     if not ok:
@@ -1454,152 +1653,269 @@ def execute_pending_entry() -> bool:
         ] = raw_result
 
         logger.warning(
-            "%s | IQ RECHAZÓ | "
-            "intento=%s | respuesta=%s",
-            pair,
-            pending["attempts"],
+            "%s | ❌ IQ RECHAZÓ | "
+            "API=%s | intento=%s | "
+            "original=%s | ejecutada=%s | resultado=%s",
+            logical_pair,
+            api_pair,
+            pending[
+                "attempts"
+            ],
+            original_signal,
+            signal,
             raw_result,
         )
 
         return False
 
-    LAST_TRADE_CANDLE = (
-        n1_timestamp
+    LAST_TRADE_CANDLE[
+        logical_pair
+    ] = n1_timestamp
+
+    PENDING_ENTRY.pop(
+        logical_pair,
+        None,
     )
 
     telegram_send(
         "✅ OPERACIÓN ABIERTA\n\n"
-        f"🏆 Mejor mercado: {pair}\n"
-        f"Dirección: "
-        f"{signal.upper()}\n"
-        f"Score: "
-        f"{pending['score']}/100\n\n"
+        f"Par: {logical_pair}\n"
+        f"Activo IQ: {api_pair}\n\n"
+        "SEÑAL ORIGINAL\n"
+        f"{original_direction}\n\n"
+        "🔄 OPERACIÓN EJECUTADA\n"
+        f"{direction}\n\n"
         "VELA N\n"
-        f"Apertura: "
-        f"{pending['minute_open']}\n"
-        f"Cierre: "
-        f"{pending['minute_close']}\n\n"
+        f"Timestamp: {n_timestamp}\n"
+        f"Apertura: {pending['minute_open']}\n"
+        f"Cierre: {pending['minute_close']}\n\n"
         "ENTRADA N+1\n"
-        f"Timestamp: "
-        f"{n1_timestamp}\n"
-        f"Segundo: "
-        f"{server_second:02d}\n\n"
+        f"Timestamp: {n1_timestamp}\n"
+        f"Segundo: {server_second:02d}\n\n"
         f"💵 Importe: ${AMOUNT}\n"
-        f"⏱ Expiración: "
-        f"{EXPIRATION} minuto\n"
+        "⏱ Expiración: 1 minuto\n"
         f"🆔 ID: {order_id}\n"
-        f"🔁 Intentos: "
-        f"{pending['attempts']}"
+        f"🔁 Intentos: {pending['attempts']}"
     )
 
     logger.info(
-        "%s | OPERACIÓN ABIERTA | "
-        "%s | score=%s | id=%s",
-        pair,
+        "%s | ✅ BINARIA ABIERTA | "
+        "API=%s | ORIGINAL=%s | "
+        "EJECUTADA=%s | N=%s | N+1=%s | segundo=%02d",
+        logical_pair,
+        api_pair,
+        original_signal.upper()
+        if original_signal
+        else "N/A",
         signal.upper(),
-        pending["score"],
-        order_id,
+        n_timestamp,
+        n1_timestamp,
+        server_second,
     )
-
-    PENDING_ENTRY = None
 
     return True
 
 
 # ============================================================
-# PROCESAR EL CIERRE DE UN MINUTO
+# PROCESAR UN PAR
 # ============================================================
 
-def process_market_cycle() -> None:
+def process_pair(
+    logical_pair: str,
+) -> None:
 
-    global LAST_PROCESSED_MINUTE
+    # PRIMERO:
+    # ejecutar cualquier señal pendiente.
+
+    if logical_pair in PENDING_ENTRY:
+
+        execute_pending(
+            logical_pair
+        )
+
+    df_1m = get_1m_realtime(
+        logical_pair
+    )
+
+    if df_1m is None:
+        return
+
+    if len(df_1m) < 2:
+        return
 
     server_ts = get_server_timestamp()
 
     if server_ts is None:
         return
 
-    current_minute = (
-        server_ts // TIMEFRAME
-    ) * TIMEFRAME
-
     # --------------------------------------------------------
-    # SIEMPRE INTENTAR LA ENTRADA PENDIENTE PRIMERO
+    # MONITOREO CONTINUO DE LA M1 ABIERTA
     # --------------------------------------------------------
 
-    execute_pending_entry()
-
-    # --------------------------------------------------------
-    # ANALIZAR EN VIVO TODOS LOS OTC
-    # --------------------------------------------------------
-
-    refresh_otc_assets()
-
-    # Solo procesar el cierre una vez.
-    closed_minute = (
-        current_minute - TIMEFRAME
+    monitor_live_minute(
+        logical_pair,
+        df_1m,
+        server_ts,
     )
 
+    current_minute = (
+        int(server_ts)
+        // TIMEFRAME
+    ) * TIMEFRAME
+
+    closed_candle = get_closed_1m(
+        df_1m
+    )
+
+    if closed_candle is None:
+        return
+
+    try:
+
+        closed_ts = int(
+            closed_candle[
+                "from"
+            ]
+        )
+
+    except Exception:
+
+        return
+
+    if closed_ts >= current_minute:
+        return
+
     if (
-        LAST_PROCESSED_MINUTE
-        == closed_minute
+        LAST_PROCESSED_MINUTE.get(
+            logical_pair
+        )
+        == closed_ts
     ):
 
         return
 
-    results = analyze_all_markets(
-        server_ts
-    )
-
-    if not results:
-        return
-
-    LAST_PROCESSED_MINUTE = (
-        closed_minute
-    )
-
-    log_market_ranking(
-        results
-    )
-
     # --------------------------------------------------------
-    # SI YA EXISTE UNA OPERACIÓN PENDIENTE,
-    # NO CREAR OTRA
+    # VELAS 5S
     # --------------------------------------------------------
 
-    if PENDING_ENTRY is not None:
-
-        logger.info(
-            "Ya existe una entrada pendiente."
-        )
-
-        return
-
-    best_market = select_best_market(
-        results
+    candles_5s = get_5s_realtime(
+        logical_pair,
+        closed_ts,
     )
 
-    if best_market is None:
+    if candles_5s is None:
+
+        candles_5s = pd.DataFrame()
+
+    LAST_PROCESSED_MINUTE[
+        logical_pair
+    ] = closed_ts
+
+    # --------------------------------------------------------
+    # ANÁLISIS DE LA M1 CERRADA
+    # --------------------------------------------------------
+
+    result = analyze_market(
+        closed_candle,
+        candles_5s,
+    )
+
+    result[
+        "minute_timestamp"
+    ] = closed_ts
+
+    result[
+        "minute_open"
+    ] = float(
+        closed_candle[
+            "open"
+        ]
+    )
+
+    result[
+        "minute_close"
+    ] = float(
+        closed_candle[
+            "close"
+        ]
+    )
+
+    signal = result.get(
+        "signal"
+    )
+
+    reason = result.get(
+        "reason",
+        "",
+    )
+
+    logger.info(
+        "%s | N=%s | signal=%s | reason=%s",
+        logical_pair,
+        closed_ts,
+        signal,
+        reason,
+    )
+
+    if signal in (
+        "call",
+        "put",
+    ):
+
+        create_pending_signal(
+            logical_pair,
+            result,
+        )
+
+        # Si ya estamos en N+1,
+        # intenta inmediatamente.
+        execute_pending(
+            logical_pair
+        )
+
+    else:
 
         logger.info(
-            "NO TRADE | ningún OTC alcanzó "
-            "el score mínimo."
+            "%s | N=%s | SIN SEÑAL | %s",
+            logical_pair,
+            closed_ts,
+            reason,
         )
 
-        telegram_send(
-            "🔎 ANÁLISIS MULTI-OTC\n\n"
-            f"Mercados analizados: "
-            f"{len(results)}\n\n"
-            "🚫 SIN OPERACIÓN\n"
-            "Ningún mercado alcanzó las "
-            "condiciones mínimas."
-        )
+    # La observación de N ya terminó.
 
+    LIVE_M1_STATE.pop(
+        logical_pair,
+        None,
+    )
+
+
+# ============================================================
+# PROCESAR TODOS LOS PARES
+# ============================================================
+
+def analyze_all_pairs() -> None:
+
+    if not BOT_RUNNING:
         return
 
-    create_pending_entry(
-        best_market
-    )
+    for logical_pair in PAIRS:
+
+        if not BOT_RUNNING:
+            return
+
+        try:
+
+            process_pair(
+                logical_pair
+            )
+
+        except Exception:
+
+            logger.exception(
+                "%s | error procesando par",
+                logical_pair,
+            )
 
 
 # ============================================================
@@ -1611,27 +1927,36 @@ def main() -> None:
     global BOT_RUNNING
 
     logger.info(
-        "======================================"
+        "=========================================="
     )
 
     logger.info(
-        "BOT IQ OPTION MULTI-OTC"
+        "BOT IQ OPTION BINARIAS"
     )
 
     logger.info(
-        "ESTRATEGIA: CONTINUIDAD"
+        "MODO SNIPER N+1"
     )
 
     logger.info(
-        "ANÁLISIS: TODOS LOS OTC DISPONIBLES"
+        "ESTRATEGIA 1M + MONITOREO INTRAMINUTO"
     )
 
     logger.info(
-        "SELECCIÓN: MEJOR MERCADO"
+        "⚠️ OPERACIONES INVERTIDAS"
     )
 
     logger.info(
-        "TIMEFRAME: 1 MINUTO"
+        "CALL -> PUT"
+    )
+
+    logger.info(
+        "PUT -> CALL"
+    )
+
+    logger.info(
+        "PARES: %s",
+        ", ".join(PAIRS),
     )
 
     logger.info(
@@ -1640,37 +1965,28 @@ def main() -> None:
     )
 
     logger.info(
-        "EXPIRATION: %s MINUTO",
+        "EXPIRATION: %s minuto",
         EXPIRATION,
     )
 
     logger.info(
-        "MIN SCORE: %s",
-        MIN_MARKET_SCORE,
+        "VENTANA N+1: 00-05s"
     )
 
     logger.info(
-        "ENTRADA N+1: 00-%ss",
-        MAX_ENTRY_DELAY,
-    )
-
-    logger.info(
-        "======================================"
+        "=========================================="
     )
 
     required = {
         "IQ_EMAIL": IQ_EMAIL,
         "IQ_PASSWORD": IQ_PASSWORD,
         "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
-        "TELEGRAM_CHAT_ID": (
-            TELEGRAM_CHAT_ID
-        ),
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
     }
 
     missing = [
         key
-        for key, value
-        in required.items()
+        for key, value in required.items()
         if not value
     ]
 
@@ -1690,7 +2006,7 @@ def main() -> None:
     except Exception as exc:
 
         logger.exception(
-            "No se pudo conectar."
+            "No se pudo conectar a IQ Option."
         )
 
         telegram_send(
@@ -1700,33 +2016,30 @@ def main() -> None:
 
         return
 
-    telegram_thread = (
-        threading.Thread(
-            target=telegram_worker,
-            daemon=True,
-        )
+    telegram_thread = threading.Thread(
+        target=telegram_worker,
+        daemon=True,
     )
 
     telegram_thread.start()
 
     telegram_send(
         "🤖 BOT LISTO\n\n"
-        "MODO MULTI-OTC\n\n"
-        "🔎 Descubre OTC disponibles\n"
-        "📊 Analiza cada estructura\n"
-        "👁 Monitorea velas M1 en vivo\n"
-        "🏆 Compara los mercados\n"
-        "🎯 Selecciona el mejor\n"
-        "➡️ Opera a favor de la continuidad\n\n"
-        "BLOQUEOS:\n"
-        "🚫 Rango\n"
-        "🚫 Agotamiento\n"
-        "🚫 Rechazo fuerte\n"
-        "🚫 Soporte/Resistencia\n"
-        "🚫 Confirmación débil\n\n"
+        "BINARIAS\n"
+        "MODO SNIPER\n\n"
+        "⚠️ OPERACIONES INVERTIDAS\n"
+        "CALL detectada → PUT ejecutada\n"
+        "PUT detectada → CALL ejecutada\n\n"
+        "ESTRATEGIA:\n"
+        "M1 + monitoreo intraminuto\n\n"
+        "🔎 N se observa durante todo el minuto\n"
+        "✅ Decisión definitiva al cierre de N\n"
+        "🎯 Entrada SOLO en N+1\n"
+        "⚡ Ejecución en segundos 00-05\n"
+        "🔄 Reintento rápido dentro de la ventana\n"
+        "🔎 Activo binario resuelto automáticamente\n"
         f"💵 ${AMOUNT}\n"
-        "⏱ 1 minuto\n"
-        "⚡ Entrada N+1 segundos 00-05"
+        "⏱ 1 minuto"
     )
 
     while True:
@@ -1735,17 +2048,23 @@ def main() -> None:
 
             if not BOT_RUNNING:
 
-                time.sleep(0.20)
+                time.sleep(
+                    0.20
+                )
 
                 continue
 
             if not ensure_connection():
 
-                time.sleep(1)
+                time.sleep(
+                    1
+                )
 
                 continue
 
-            process_market_cycle()
+            resolve_all_binary_assets()
+
+            analyze_all_pairs()
 
             time.sleep(
                 POLL_INTERVAL
@@ -1771,7 +2090,9 @@ def main() -> None:
                 "Error principal"
             )
 
-            time.sleep(0.5)
+            time.sleep(
+                0.5
+            )
 
 
 # ============================================================
@@ -1779,5 +2100,4 @@ def main() -> None:
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
