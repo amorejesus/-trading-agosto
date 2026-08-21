@@ -34,7 +34,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TIMEFRAME = 60
 
 # Máximo de velas utilizadas.
-CANDLE_COUNT = 60
+CANDLE_COUNT = 62
 
 
 # ============================================================
@@ -59,7 +59,7 @@ MAX_ENTRY_DELAY = 5
 # SELECCIÓN DEL MERCADO
 # ============================================================
 
-MIN_MARKET_SCORE = 70
+MIN_MARKET_SCORE = 82
 
 # Número máximo de candidatos para registrar.
 TOP_MARKETS_TO_LOG = 5
