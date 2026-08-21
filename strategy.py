@@ -6,21 +6,18 @@ import pandas as pd
 
 
 # ============================================================
-# ESTRATEGIA M1
+# ESTRATEGIA M1 - SOLO REVERSIÓN
 # ============================================================
 #
 # N inicia      -> recopilar datos de la M1
-# N continúa    -> monitorear su evolución
+# N continúa    -> NO se genera señal
 # N cierra      -> calcular toda la estructura de N
-# decidir       -> CALL / PUT
+# decidir       -> SOLO REVERSIÓN
 # N+1           -> ejecutar la señal calculada
 #
-# IMPORTANTE:
-# El monitoreo intraminuto permite observar la evolución de N
-# mientras está abierta, pero NO cambia la lógica de decisión.
-#
-# La decisión definitiva continúa usando exclusivamente el OHLC
-# de la M1 N ya cerrada.
+# La decisión usa exclusivamente OHLC de la M1 N ya cerrada.
+# N+1 nunca participa en la decisión.
+# Las velas 5S no participan en la decisión.
 # ============================================================
 
 DOJI_BODY_RATIO = 0.10
@@ -44,49 +41,21 @@ def _to_float(value: Any) -> Optional[float]:
 def _get_ohlc(
     candle: pd.Series,
 ) -> Optional[tuple[float, float, float, float]]:
-
     if candle is None:
         return None
 
-    opening = _to_float(
-        candle.get("open")
-    )
+    opening = _to_float(candle.get("open"))
+    closing = _to_float(candle.get("close"))
+    high = _to_float(candle.get("high", candle.get("max")))
+    low = _to_float(candle.get("low", candle.get("min")))
 
-    closing = _to_float(
-        candle.get("close")
-    )
-
-    high = _to_float(
-        candle.get(
-            "high",
-            candle.get("max"),
-        )
-    )
-
-    low = _to_float(
-        candle.get(
-            "low",
-            candle.get("min"),
-        )
-    )
-
-    if None in (
-        opening,
-        closing,
-        high,
-        low,
-    ):
+    if None in (opening, closing, high, low):
         return None
 
     if high < low:
         return None
 
-    return (
-        opening,
-        high,
-        low,
-        closing,
-    )
+    return opening, high, low, closing
 
 
 # ============================================================
@@ -99,10 +68,20 @@ def analyze_minute(
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
-    Analiza la M1 N después de su cierre.
+    Analiza únicamente la M1 N después de su cierre.
 
-    candles_5s y previous_m1 se mantienen por compatibilidad,
-    pero no cambian la decisión final.
+    ÚNICA CONDICIÓN QUE PUEDE GENERAR ENTRADA:
+        REVERSIÓN
+
+    Reversión alcista:
+        - dirección BULLISH
+        - mecha inferior > cuerpo * 1.5
+        - cierre en la mitad superior
+
+    Reversión bajista:
+        - dirección BEARISH
+        - mecha superior > cuerpo * 1.5
+        - cierre en la mitad inferior
     """
 
     result: Dict[str, Any] = {
@@ -131,16 +110,10 @@ def analyze_minute(
         "quality_checks": {},
     }
 
-    ohlc = _get_ohlc(
-        candle_1m
-    )
+    ohlc = _get_ohlc(candle_1m)
 
     if ohlc is None:
-
-        result["reason"] = (
-            "OHLC de M1 inválido"
-        )
-
+        result["reason"] = "OHLC de M1 inválido"
         return result
 
     opening, high, low, closing = ohlc
@@ -151,45 +124,24 @@ def analyze_minute(
     result["low"] = low
 
     if "from" in candle_1m.index:
-
         try:
-
-            result[
-                "minute_timestamp"
-            ] = int(
-                float(
-                    candle_1m["from"]
-                )
+            result["minute_timestamp"] = int(
+                float(candle_1m["from"])
             )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
+        except (TypeError, ValueError):
             pass
 
-    candle_range = (
-        high - low
-    )
-
-    body = abs(
-        closing - opening
-    )
+    candle_range = high - low
+    body = abs(closing - opening)
 
     upper_wick = max(
         0.0,
-        high - max(
-            opening,
-            closing,
-        ),
+        high - max(opening, closing),
     )
 
     lower_wick = max(
         0.0,
-        min(
-            opening,
-            closing,
-        ) - low,
+        min(opening, closing) - low,
     )
 
     result["range"] = candle_range
@@ -197,61 +149,48 @@ def analyze_minute(
     result["upper_wick"] = upper_wick
     result["lower_wick"] = lower_wick
 
-    if candle_range <= 0:
+    # --------------------------------------------------------
+    # SIN RANGO
+    # --------------------------------------------------------
 
+    if candle_range <= 0:
         result["direction"] = "NEUTRAL"
         result["state"] = "DOJI"
         result["doji"] = True
         result["indecision"] = True
-        result["reason"] = (
-            "sin señal: M1 sin rango"
-        )
-
+        result["reason"] = "sin señal: M1 sin rango"
         return result
 
-    body_ratio = (
-        body / candle_range
-    )
-
+    body_ratio = body / candle_range
     close_position = (
-        (closing - low)
-        / candle_range
+        (closing - low) / candle_range
     )
 
     result["body_ratio"] = body_ratio
     result["close_position"] = close_position
 
+    # --------------------------------------------------------
+    # DIRECCIÓN
+    # --------------------------------------------------------
+
     if closing > opening:
-
         direction = "BULLISH"
-
     elif closing < opening:
-
         direction = "BEARISH"
-
     else:
-
         direction = "NEUTRAL"
 
     result["direction"] = direction
 
-    # ========================================================
-    # ESTADOS DE LA M1 YA CERRADA
-    # ========================================================
+    # --------------------------------------------------------
+    # ESTADOS
+    # --------------------------------------------------------
 
-    doji = (
-        body_ratio
-        <= DOJI_BODY_RATIO
-    )
-
-    indecision = (
-        body_ratio
-        <= INDECISION_BODY_RATIO
-    )
+    doji = body_ratio <= DOJI_BODY_RATIO
+    indecision = body_ratio <= INDECISION_BODY_RATIO
 
     fuerza = (
-        body_ratio
-        >= FORCE_BODY_RATIO
+        body_ratio >= FORCE_BODY_RATIO
         and (
             close_position >= 0.75
             or close_position <= 0.25
@@ -259,8 +198,7 @@ def analyze_minute(
     )
 
     continuidad = (
-        body_ratio
-        >= CONTINUITY_BODY_RATIO
+        body_ratio >= CONTINUITY_BODY_RATIO
         and (
             (
                 direction == "BULLISH"
@@ -274,28 +212,31 @@ def analyze_minute(
         )
     )
 
+    # --------------------------------------------------------
+    # ÚNICA CONDICIÓN DE ENTRADA: REVERSIÓN
+    # --------------------------------------------------------
+
+    reversion_alcista = (
+        direction == "BULLISH"
+        and lower_wick > body * 1.5
+        and close_position >= 0.50
+    )
+
+    reversion_bajista = (
+        direction == "BEARISH"
+        and upper_wick > body * 1.5
+        and close_position <= 0.50
+    )
+
     reversion = (
-        (
-            direction == "BULLISH"
-            and lower_wick > body * 1.5
-            and close_position >= 0.50
-        )
-        or
-        (
-            direction == "BEARISH"
-            and upper_wick > body * 1.5
-            and close_position <= 0.50
-        )
+        reversion_alcista
+        or reversion_bajista
     )
 
     debilidad = (
         not doji
-        and body_ratio
-        < WEAKNESS_BODY_RATIO
-        and max(
-            upper_wick,
-            lower_wick,
-        ) > body
+        and body_ratio < WEAKNESS_BODY_RATIO
+        and max(upper_wick, lower_wick) > body
     )
 
     result["fuerza"] = fuerza
@@ -305,79 +246,62 @@ def analyze_minute(
     result["debilidad"] = debilidad
     result["doji"] = doji
 
-    # Se conserva exactamente la prioridad original.
-    if doji:
+    result["quality_checks"] = {
+        "reversion_alcista": reversion_alcista,
+        "reversion_bajista": reversion_bajista,
+    }
 
-        state = "DOJI"
-
-    elif fuerza:
-
-        state = "FUERZA"
-
-    elif reversion:
-
+    if reversion:
         state = "REVERSIÓN"
-
+    elif doji:
+        state = "DOJI"
+    elif fuerza:
+        state = "FUERZA"
     elif continuidad:
-
         state = "CONTINUIDAD"
-
     elif debilidad:
-
         state = "DEBILIDAD"
-
     elif indecision:
-
         state = "INDECISIÓN"
-
     else:
-
         state = "MOVIMIENTO"
 
     result["state"] = state
 
-    # ========================================================
+    # --------------------------------------------------------
     # DECISIÓN FINAL
-    # ========================================================
+    # SOLO REVERSIÓN PUEDE GENERAR SEÑAL
+    # --------------------------------------------------------
 
-    if (
-        doji
-        or direction == "NEUTRAL"
-    ):
-
+    if not reversion:
         result["reason"] = (
-            "sin señal: M1 neutral/doji"
+            "sin señal: no hay REVERSIÓN confirmada"
         )
-
         return result
 
-    if direction == "BULLISH":
-
+    if reversion_alcista:
         result["signal"] = "call"
         result["valid"] = True
         result["reason"] = (
-            f"CALL confirmada al cierre de N: {state}"
+            "CALL confirmada al cierre de N: REVERSIÓN"
         )
-
         return result
 
-    result["signal"] = "put"
-    result["valid"] = True
-    result["reason"] = (
-        f"PUT confirmada al cierre de N: {state}"
-    )
+    if reversion_bajista:
+        result["signal"] = "put"
+        result["valid"] = True
+        result["reason"] = (
+            "PUT confirmada al cierre de N: REVERSIÓN"
+        )
+        return result
 
     return result
 
 
-# ============================================================
-# COMPATIBILIDAD
-# ============================================================
-
 def check_pattern(candles_5s=None):
-    """
-    La estrategia no usa 5S para cambiar la señal.
-    El bot puede monitorearlas, pero la decisión sigue siendo M1.
+    """Compatibilidad con versiones anteriores.
+
+    Las velas 5S no generan señales.
     """
     return None
 
@@ -387,7 +311,7 @@ def build_n1_signal(
     candles_5s: Optional[pd.DataFrame] = None,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-
+    """Compatibilidad con versiones anteriores de bot.py."""
     return analyze_market(
         candle_1m,
         candles_5s,
@@ -404,7 +328,6 @@ def analyze_market(
     candles_5s: Optional[pd.DataFrame] = None,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-
     return analyze_minute(
         candle_1m,
         candles_5s,
@@ -412,47 +335,36 @@ def analyze_market(
     )
 
 
-def get_m1_direction(
-    candle_1m=None,
-):
+def get_m1_direction(candle_1m=None):
+    """Compatibilidad con versiones anteriores de bot.py.
 
+    Devuelve BULLISH, BEARISH o NEUTRAL.
+    """
     if candle_1m is None:
         return None
 
     try:
-
         if (
             hasattr(candle_1m, "columns")
             and hasattr(candle_1m, "iloc")
         ):
-
             if len(candle_1m) == 0:
                 return None
-
             candle_1m = candle_1m.iloc[-1]
-
     except Exception:
-
         return None
 
     try:
-
         opening = _to_float(
             candle_1m.get("open")
         )
-
         closing = _to_float(
             candle_1m.get("close")
         )
-
     except AttributeError:
-
         return None
 
-    if (
-        opening is None
-        or closing is None
-    ):
+    if opening is None or closing is None:
         return None
 
     if closing > opening:
@@ -469,7 +381,6 @@ def get_signal(
     candles_5s: Optional[pd.DataFrame] = None,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
-
     return analyze_market(
         candle_1m,
         candles_5s,
@@ -482,7 +393,6 @@ def signal(
     candles_5s: Optional[pd.DataFrame] = None,
     previous_m1: Optional[pd.DataFrame] = None,
 ) -> Optional[str]:
-
     return get_signal(
         candle_1m,
         candles_5s,
@@ -491,13 +401,5 @@ def signal(
 
 
 if __name__ == "__main__":
-
-    print(
-        "strategy.py cargado correctamente."
-    )
-
-    print(
-        "Estrategia: M1 completa -> "
-        "monitoreo durante N -> "
-        "cierre -> decisión -> N+1"
-    )
+    print("strategy.py cargado correctamente.")
+    print("Estrategia: SOLO REVERSIÓN -> N+1")
