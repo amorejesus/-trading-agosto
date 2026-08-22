@@ -92,10 +92,8 @@ def confirmation(df):
     # CALL
     if last["bull"]:
         score += 15
-
         if last["body_ratio"] > 0.4:
             score += 10
-
         if last["close"] > prev["close"]:
             score += 5
 
@@ -105,10 +103,8 @@ def confirmation(df):
     # PUT
     if last["bear"]:
         score += 15
-
         if last["body_ratio"] > 0.4:
             score += 10
-
         if last["close"] < prev["close"]:
             score += 5
 
@@ -119,7 +115,50 @@ def confirmation(df):
 
 
 # ============================================
-# ANALISIS PRINCIPAL
+# 🔥 FILTRO DE CALIDAD DEL PAR
+# ============================================
+
+def evaluate_pair_quality(df):
+    df = safe_dataframe(df)
+
+    if len(df) < 10:
+        return 0
+
+    last = get_candle(df.iloc[-1])
+    prev = get_candle(df.iloc[-2])
+
+    if not last or not prev:
+        return 0
+
+    score = 0
+
+    # Volatilidad
+    avg_range = (df["high"] - df["low"]).mean()
+    last_range = last["range"]
+
+    if last_range > avg_range:
+        score += 10
+
+    # Cuerpo fuerte
+    if last["body_ratio"] > 0.5:
+        score += 10
+
+    # Cambio de intención
+    if last["bull"] and prev["bear"]:
+        score += 15
+
+    if last["bear"] and prev["bull"]:
+        score += 15
+
+    # Evitar mercado muerto
+    if last_range < avg_range * 0.5:
+        score -= 15
+
+    return score
+
+
+# ============================================
+# MAIN SNIPER
 # ============================================
 
 def analyze_market(
@@ -139,7 +178,6 @@ def analyze_market(
         return result
 
     df = safe_dataframe(previous_m1)
-
     df = pd.concat([df, pd.DataFrame([candle_1m])], ignore_index=True)
 
     conf = confirmation(df)
@@ -166,26 +204,22 @@ def analyze_market(
 
 
 # ============================================
-# 🔥 ESTA ES LA QUE TE FALTABA
+# ANALISIS LIVE (NECESARIO PARA TU BOT)
 # ============================================
 
 def analyze_live_candle(candle_1m):
-    """
-    Compatibilidad con bot.py
-    NO ejecuta operaciones, solo describe la vela
-    """
 
     data = get_candle(candle_1m)
 
     if not data:
         return {"state": "INVALID"}
 
+    direction = "NEUTRAL"
+
     if data["bull"]:
         direction = "BULLISH"
     elif data["bear"]:
         direction = "BEARISH"
-    else:
-        direction = "NEUTRAL"
 
     return {
         "direction": direction,
@@ -220,4 +254,4 @@ def check_pattern(candles_5s=None):
 # ============================================
 
 if __name__ == "__main__":
-    print("✅ STRATEGY SNIPER REVERSIÓN COMPATIBLE ACTIVA")
+    print("✅ STRATEGY SNIPER + FILTRO DE PAR ACTIVA")
