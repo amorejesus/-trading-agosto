@@ -72,7 +72,7 @@ def get_candle(c):
 
 
 # ============================================
-# CONFIRMACIÓN DE REVERSIÓN (CLAVE)
+# CONFIRMACIÓN DE REVERSIÓN
 # ============================================
 
 def confirmation(df):
@@ -89,7 +89,7 @@ def confirmation(df):
 
     score = 0
 
-    # REVERSIÓN ALCISTA (CALL)
+    # CALL
     if last["bull"]:
         score += 15
 
@@ -100,13 +100,9 @@ def confirmation(df):
             score += 5
 
         if score >= MIN_CONFIRMATION_SCORE:
-            return {
-                "valid": True,
-                "dir": "CALL",
-                "score": score
-            }
+            return {"valid": True, "dir": "CALL", "score": score}
 
-    # REVERSIÓN BAJISTA (PUT)
+    # PUT
     if last["bear"]:
         score += 15
 
@@ -117,17 +113,13 @@ def confirmation(df):
             score += 5
 
         if score >= MIN_CONFIRMATION_SCORE:
-            return {
-                "valid": True,
-                "dir": "PUT",
-                "score": score
-            }
+            return {"valid": True, "dir": "PUT", "score": score}
 
     return {"valid": False}
 
 
 # ============================================
-# MAIN SNIPER
+# ANALISIS PRINCIPAL
 # ============================================
 
 def analyze_market(
@@ -148,19 +140,13 @@ def analyze_market(
 
     df = safe_dataframe(previous_m1)
 
-    # agregar vela actual
     df = pd.concat([df, pd.DataFrame([candle_1m])], ignore_index=True)
 
-    # 🔥 SOLO CONFIRMACIÓN
     conf = confirmation(df)
 
     if not conf["valid"]:
         result["reason"] = "sin confirmación"
         return result
-
-    # ============================================
-    # SNIPER ENTRY
-    # ============================================
 
     if conf["dir"] == "CALL":
         result.update({
@@ -177,6 +163,35 @@ def analyze_market(
         })
 
     return result
+
+
+# ============================================
+# 🔥 ESTA ES LA QUE TE FALTABA
+# ============================================
+
+def analyze_live_candle(candle_1m):
+    """
+    Compatibilidad con bot.py
+    NO ejecuta operaciones, solo describe la vela
+    """
+
+    data = get_candle(candle_1m)
+
+    if not data:
+        return {"state": "INVALID"}
+
+    if data["bull"]:
+        direction = "BULLISH"
+    elif data["bear"]:
+        direction = "BEARISH"
+    else:
+        direction = "NEUTRAL"
+
+    return {
+        "direction": direction,
+        "body_ratio": data["body_ratio"],
+        "state": "LIVE"
+    }
 
 
 # ============================================
@@ -205,4 +220,4 @@ def check_pattern(candles_5s=None):
 # ============================================
 
 if __name__ == "__main__":
-    print("✅ STRATEGY SNIPER REVERSIÓN ACTIVA")
+    print("✅ STRATEGY SNIPER REVERSIÓN COMPATIBLE ACTIVA")
