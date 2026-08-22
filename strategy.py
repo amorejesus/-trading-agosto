@@ -6,36 +6,35 @@ import pandas as pd
 
 
 # ============================================================
-# ESTRATEGIA M1 - MULTI MARKET CONTINUITY
+# ESTRATEGIA M1 - SOLO REVERSIÓN
 # ============================================================
 #
 # OBJETIVO
 # ------------------------------------------------------------
-# Analizar la estructura de un mercado y devolver:
+# Buscar únicamente posibles REVERSIÓNES de mercado.
 #
-# - Dirección probable: CALL / PUT
-# - Tendencia
-# - Continuidad
-# - Calidad de la estructura
-# - Calidad de la vela M1
-# - Riesgos: agotamiento, rechazo, S/R, rango
-# - Score total para comparar este mercado con otros
+# La estrategia NO opera continuidad.
+#
+# EJEMPLO:
+#
+# Tendencia alcista + agotamiento + rechazo superior
+# + confirmación bajista
+# = PUT en la siguiente vela.
+#
+# Tendencia bajista + agotamiento + rechazo inferior
+# + confirmación alcista
+# = CALL en la siguiente vela.
 #
 # IMPORTANTE
 # ------------------------------------------------------------
-# La vela M1 actual puede analizarse EN VIVO para observar:
+# La vela de confirmación es la última vela M1 CERRADA.
 #
-# - apertura
-# - máximo
-# - mínimo
-# - precio actual
-# - cuerpo
-# - mechas
-# - fuerza
-# - continuidad
+# La estrategia genera la señal usando esa vela cerrada.
 #
-# La señal definitiva se genera utilizando la M1 cerrada.
-# La entrada corresponde a N+1.
+# La operación debe ejecutarse en N+1.
+#
+# Este archivo NO ejecuta operaciones. Solamente analiza
+# y devuelve la señal.
 # ============================================================
 
 
@@ -45,7 +44,7 @@ import pandas as pd
 
 TREND_LOOKBACK = 15
 STRUCTURE_LOOKBACK = 20
-CONTINUITY_LOOKBACK = 6
+REVERSAL_LOOKBACK = 8
 EXHAUSTION_LOOKBACK = 8
 SR_LOOKBACK = 20
 ATR_PERIOD = 14
@@ -57,15 +56,20 @@ ATR_PERIOD = 14
 
 DOJI_BODY_RATIO = 0.10
 INDECISION_BODY_RATIO = 0.25
-WEAKNESS_BODY_RATIO = 0.35
-MIN_CONTINUITY_BODY_RATIO = 0.40
+
+MIN_REVERSAL_BODY_RATIO = 0.40
 STRONG_BODY_RATIO = 0.55
 FORCE_BODY_RATIO = 0.65
 
-MAX_COUNTER_WICK_RATIO = 0.45
+# Mecha de rechazo en el extremo
+MIN_REJECTION_WICK_RATIO = 0.35
+STRONG_REJECTION_WICK_RATIO = 0.45
+
+# Máximo permitido para evitar perseguir velas demasiado fuertes
 MAX_CONFIRMATION_RANGE_ATR = 1.60
 MAX_CONFIRMATION_BODY_ATR = 1.20
 
+# Distancia para considerar precio cerca de soporte/resistencia
 SR_TOLERANCE_ATR = 0.35
 
 
@@ -75,9 +79,9 @@ SR_TOLERANCE_ATR = 0.35
 
 MAX_SCORE = 100
 
-MIN_STRUCTURE_SCORE = 8
-MIN_CONTINUITY_SCORE = 5
-MIN_FINAL_SCORE = 82
+MIN_STRUCTURE_SCORE = 7
+MIN_REVERSAL_SCORE = 6
+MIN_FINAL_SCORE = 78
 
 
 # ============================================================
@@ -261,7 +265,11 @@ def get_candle_data(
 
 
 # ============================================================
-# ANALIZAR ESTRUCTURA
+# ANALIZAR ESTRUCTURA PREVIA
+# ============================================================
+#
+# Esta función determina hacia dónde venía el mercado
+# ANTES de la posible reversión.
 # ============================================================
 
 def analyze_structure(
@@ -284,9 +292,6 @@ def analyze_structure(
     work = df.tail(
         TREND_LOOKBACK
     ).reset_index(drop=True)
-
-    bullish_score = 0
-    bearish_score = 0
 
     highs = work["high"].tolist()
     lows = work["low"].tolist()
@@ -328,25 +333,28 @@ def analyze_structure(
         if closes[i] < closes[i - 1]
     )
 
-    if higher_highs >= 8:
+    bullish_score = 0
+    bearish_score = 0
+
+    if higher_highs >= 7:
         bullish_score += 3
 
-    if higher_lows >= 8:
+    if higher_lows >= 7:
         bullish_score += 3
 
-    if bullish_closes >= 8:
+    if bullish_closes >= 7:
         bullish_score += 2
 
     if closes[-1] > closes[0]:
         bullish_score += 2
 
-    if lower_highs >= 8:
+    if lower_highs >= 7:
         bearish_score += 3
 
-    if lower_lows >= 8:
+    if lower_lows >= 7:
         bearish_score += 3
 
-    if bearish_closes >= 8:
+    if bearish_closes >= 7:
         bearish_score += 2
 
     if closes[-1] < closes[0]:
@@ -362,9 +370,7 @@ def analyze_structure(
 
         result["direction"] = "BULLISH"
         result["score"] = bullish_score
-        result["reason"] = (
-            "estructura alcista"
-        )
+        result["reason"] = "tendencia previa alcista"
 
     elif (
         bearish_score >= MIN_STRUCTURE_SCORE
@@ -373,9 +379,7 @@ def analyze_structure(
 
         result["direction"] = "BEARISH"
         result["score"] = bearish_score
-        result["reason"] = (
-            "estructura bajista"
-        )
+        result["reason"] = "tendencia previa bajista"
 
     else:
 
@@ -385,17 +389,24 @@ def analyze_structure(
             bearish_score,
         )
         result["reason"] = (
-            "estructura lateral o mezclada"
+            "mercado lateral o estructura mezclada"
         )
 
     return result
 
 
 # ============================================================
-# CONTINUIDAD
+# DETECTAR EXTREMO DEL MERCADO
+# ============================================================
+#
+# Para una reversión necesitamos que el precio esté cerca
+# de un extremo:
+#
+# Tendencia alcista -> cerca de máximo/resistencia.
+# Tendencia bajista -> cerca de mínimo/soporte.
 # ============================================================
 
-def check_continuity(
+def check_reversal_zone(
     df: pd.DataFrame,
     direction: str,
 ) -> Dict[str, Any]:
@@ -403,104 +414,128 @@ def check_continuity(
     result = {
         "valid": False,
         "score": 0,
-        "reason": "sin continuidad",
+        "reason": "",
+        "support": None,
+        "resistance": None,
+        "atr": 0.0,
     }
 
     df = safe_dataframe(df)
 
-    if len(df) < CONTINUITY_LOOKBACK:
-        result["reason"] = (
-            "pocas velas para continuidad"
-        )
+    if len(df) < 6:
+        result["reason"] = "historial insuficiente para zona"
         return result
 
-    work = df.tail(
-        CONTINUITY_LOOKBACK
-    ).reset_index(drop=True)
+    historical = df.iloc[:-1].tail(
+        SR_LOOKBACK
+    )
 
-    highs = work["high"].tolist()
-    lows = work["low"].tolist()
-    closes = work["close"].tolist()
+    if len(historical) < 3:
+        result["reason"] = "poco historial para zona"
+        return result
+
+    last = get_candle_data(
+        df.iloc[-1]
+    )
+
+    if last is None:
+        result["reason"] = "vela actual inválida"
+        return result
+
+    atr = calculate_atr(
+        historical
+    )
+
+    if atr <= 0:
+        result["reason"] = "ATR inválido"
+        return result
+
+    support = float(
+        historical["low"].min()
+    )
+
+    resistance = float(
+        historical["high"].max()
+    )
+
+    tolerance = atr * SR_TOLERANCE_ATR
+
+    result["support"] = support
+    result["resistance"] = resistance
+    result["atr"] = atr
+
+    score = 0
 
     if direction == "BULLISH":
 
-        higher_highs = sum(
-            1
-            for i in range(1, len(highs))
-            if highs[i] >= highs[i - 1]
+        # Para buscar PUT queremos que el precio esté arriba.
+        distance_to_resistance = (
+            resistance - last["high"]
         )
 
-        higher_lows = sum(
-            1
-            for i in range(1, len(lows))
-            if lows[i] >= lows[i - 1]
-        )
+        if distance_to_resistance <= tolerance:
+            score += 6
 
-        price_continues = (
-            closes[-1] >= closes[-2]
-        )
-
-        score = 0
-
-        if higher_highs >= 3:
-            score += 3
-
-        if higher_lows >= 3:
-            score += 3
-
-        if price_continues:
+        if last["high"] >= resistance:
             score += 2
 
-        result["score"] = score
-        result["valid"] = score >= MIN_CONTINUITY_SCORE
-        result["reason"] = (
-            f"continuidad alcista score={score}"
-        )
+        if score >= 6:
+            result["valid"] = True
+            result["score"] = score
+            result["reason"] = (
+                "precio en zona alta para posible reversión PUT"
+            )
+            return result
 
+        result["reason"] = (
+            "precio no está suficientemente alto para reversión"
+        )
         return result
 
     if direction == "BEARISH":
 
-        lower_highs = sum(
-            1
-            for i in range(1, len(highs))
-            if highs[i] <= highs[i - 1]
+        # Para buscar CALL queremos que el precio esté abajo.
+        distance_to_support = (
+            last["low"] - support
         )
 
-        lower_lows = sum(
-            1
-            for i in range(1, len(lows))
-            if lows[i] <= lows[i - 1]
-        )
+        if distance_to_support <= tolerance:
+            score += 6
 
-        price_continues = (
-            closes[-1] <= closes[-2]
-        )
-
-        score = 0
-
-        if lower_highs >= 3:
-            score += 3
-
-        if lower_lows >= 3:
-            score += 3
-
-        if price_continues:
+        if last["low"] <= support:
             score += 2
 
-        result["score"] = score
-        result["valid"] = score >= MIN_CONTINUITY_SCORE
-        result["reason"] = (
-            f"continuidad bajista score={score}"
-        )
+        if score >= 6:
+            result["valid"] = True
+            result["score"] = score
+            result["reason"] = (
+                "precio en zona baja para posible reversión CALL"
+            )
+            return result
 
+        result["reason"] = (
+            "precio no está suficientemente bajo para reversión"
+        )
         return result
+
+    result["reason"] = "dirección neutral"
 
     return result
 
 
 # ============================================================
-# AGOTAMIENTO
+# DETECTAR AGOTAMIENTO
+# ============================================================
+#
+# BULLISH agotado:
+# - rechazo superior
+# - cuerpo débil
+# - pérdida de fuerza
+#
+# BEARISH agotado:
+# - rechazo inferior
+# - cuerpo débil
+# - pérdida de fuerza
 # ============================================================
 
 def detect_end_of_trend(
@@ -511,12 +546,14 @@ def detect_end_of_trend(
     result = {
         "exhausted": False,
         "penalty": 0,
+        "score": 0,
         "reason": "",
     }
 
     df = safe_dataframe(df)
 
     if len(df) < 3:
+        result["reason"] = "pocas velas para agotamiento"
         return result
 
     work = df.tail(
@@ -532,159 +569,111 @@ def detect_end_of_trend(
     )
 
     if last is None or previous is None:
+        result["reason"] = "velas inválidas"
         return result
 
-    penalty = 0
+    score = 0
     reasons = []
 
     if direction == "BULLISH":
 
-        if last["upper_wick_ratio"] >= 0.50:
-            penalty += 8
-            reasons.append(
-                "rechazo superior"
-            )
-
-        if last["body_ratio"] < 0.20:
-            penalty += 6
-            reasons.append(
-                "cuerpo muy débil"
-            )
-
+        # Rechazo superior
         if (
-            last["close"]
-            < previous["low"]
+            last["upper_wick_ratio"]
+            >= MIN_REJECTION_WICK_RATIO
         ):
-            penalty += 10
-            reasons.append(
-                "pérdida de estructura"
-            )
+            score += 5
+            reasons.append("rechazo superior")
+
+        # Vela con cuerpo pequeño después del impulso
+        if (
+            last["body_ratio"]
+            <= INDECISION_BODY_RATIO
+        ):
+            score += 3
+            reasons.append("indecisión en máximos")
+
+        # Pérdida de fuerza frente a la vela anterior
+        if (
+            last["body"]
+            < previous["body"]
+            and previous["close"] > previous["open"]
+        ):
+            score += 2
+            reasons.append("pérdida de fuerza alcista")
+
+        # Cierre bajista
+        if last["close"] < last["open"]:
+            score += 3
+            reasons.append("presión bajista")
+
+        # Rompe el mínimo de la vela anterior
+        if last["close"] < previous["low"]:
+            score += 4
+            reasons.append("ruptura bajista de estructura corta")
 
     elif direction == "BEARISH":
 
-        if last["lower_wick_ratio"] >= 0.50:
-            penalty += 8
-            reasons.append(
-                "rechazo inferior"
-            )
-
-        if last["body_ratio"] < 0.20:
-            penalty += 6
-            reasons.append(
-                "cuerpo muy débil"
-            )
-
+        # Rechazo inferior
         if (
-            last["close"]
-            > previous["high"]
+            last["lower_wick_ratio"]
+            >= MIN_REJECTION_WICK_RATIO
         ):
-            penalty += 10
-            reasons.append(
-                "pérdida de estructura"
-            )
+            score += 5
+            reasons.append("rechazo inferior")
 
-    result["penalty"] = penalty
-    result["exhausted"] = penalty >= 10
+        # Indecisión en mínimos
+        if (
+            last["body_ratio"]
+            <= INDECISION_BODY_RATIO
+        ):
+            score += 3
+            reasons.append("indecisión en mínimos")
+
+        # Pérdida de fuerza bajista
+        if (
+            last["body"]
+            < previous["body"]
+            and previous["close"] < previous["open"]
+        ):
+            score += 2
+            reasons.append("pérdida de fuerza bajista")
+
+        # Cierre alcista
+        if last["close"] > last["open"]:
+            score += 3
+            reasons.append("presión alcista")
+
+        # Rompe el máximo de la vela anterior
+        if last["close"] > previous["high"]:
+            score += 4
+            reasons.append("ruptura alcista de estructura corta")
+
+    result["score"] = score
+
+    # 5 puntos ya indican una posible pérdida clara de fuerza.
+    result["exhausted"] = score >= 5
+
+    result["penalty"] = 0
+
     result["reason"] = (
         ", ".join(reasons)
         if reasons
-        else "sin agotamiento evidente"
+        else "sin agotamiento suficiente"
     )
 
     return result
 
 
 # ============================================================
-# SOPORTE / RESISTENCIA
+# CONFIRMACIÓN DE REVERSIÓN
 # ============================================================
-
-def check_support_resistance(
-    df: pd.DataFrame,
-    direction: str,
-) -> Dict[str, Any]:
-
-    result = {
-        "blocked": False,
-        "penalty": 0,
-        "reason": "",
-        "support": None,
-        "resistance": None,
-    }
-
-    df = safe_dataframe(df)
-
-    if len(df) < 5:
-        return result
-
-    historical = df.iloc[:-1].tail(
-        SR_LOOKBACK
-    )
-
-    if len(historical) == 0:
-        return result
-
-    last = df.iloc[-1]
-
-    price = float(last["close"])
-
-    atr = calculate_atr(
-        historical
-    )
-
-    if atr <= 0:
-        return result
-
-    support = float(
-        historical["low"].min()
-    )
-
-    resistance = float(
-        historical["high"].max()
-    )
-
-    tolerance = (
-        atr * SR_TOLERANCE_ATR
-    )
-
-    result["support"] = support
-    result["resistance"] = resistance
-
-    if direction == "BULLISH":
-
-        if (
-            resistance - price
-            <= tolerance
-        ):
-
-            result["blocked"] = True
-            result["penalty"] = 12
-            result["reason"] = (
-                "CALL cerca de resistencia"
-            )
-
-    elif direction == "BEARISH":
-
-        if (
-            price - support
-            <= tolerance
-        ):
-
-            result["blocked"] = True
-            result["penalty"] = 12
-            result["reason"] = (
-                "PUT cerca de soporte"
-            )
-
-    if not result["reason"]:
-        result["reason"] = (
-            "sin bloqueo S/R"
-        )
-
-    return result
-
-
-# ============================================================
-# CONFIRMACIÓN DE LA VELA
+#
+# Tendencia previa BULLISH:
+# buscamos confirmación BEARISH para PUT.
+#
+# Tendencia previa BEARISH:
+# buscamos confirmación BULLISH para CALL.
 # ============================================================
 
 def confirmation_score(
@@ -698,11 +687,12 @@ def confirmation_score(
         "reason": "",
         "range_atr": 0.0,
         "body_atr": 0.0,
+        "reversal_direction": "NEUTRAL",
     }
 
     df = safe_dataframe(df)
 
-    if len(df) < 2:
+    if len(df) < 3:
         result["reason"] = (
             "pocas velas para confirmación"
         )
@@ -712,10 +702,12 @@ def confirmation_score(
         df.iloc[-1]
     )
 
-    if candle is None:
-        result["reason"] = (
-            "vela inválida"
-        )
+    previous = get_candle_data(
+        df.iloc[-2]
+    )
+
+    if candle is None or previous is None:
+        result["reason"] = "vela inválida"
         return result
 
     atr = calculate_atr(
@@ -726,18 +718,11 @@ def confirmation_score(
         atr = candle["range"]
 
     if atr <= 0:
-        result["reason"] = (
-            "ATR inválido"
-        )
+        result["reason"] = "ATR inválido"
         return result
 
-    range_atr = (
-        candle["range"] / atr
-    )
-
-    body_atr = (
-        candle["body"] / atr
-    )
+    range_atr = candle["range"] / atr
+    body_atr = candle["body"] / atr
 
     result["range_atr"] = range_atr
     result["body_atr"] = body_atr
@@ -745,81 +730,286 @@ def confirmation_score(
     score = 0
     reasons = []
 
+    # --------------------------------------------------------
+    # REVERSIÓN BAJISTA
+    # Tendencia previa alcista -> PUT
+    # --------------------------------------------------------
+
     if direction == "BULLISH":
 
-        if candle["close"] > candle["open"]:
-            score += 5
+        result["reversal_direction"] = "BEARISH"
 
-        if (
-            candle["body_ratio"]
-            >= MIN_CONTINUITY_BODY_RATIO
-        ):
-            score += 5
-
-        if candle["close_position"] >= 0.65:
-            score += 4
-
-        if (
-            candle["upper_wick_ratio"]
-            <= MAX_COUNTER_WICK_RATIO
-        ):
-            score += 3
-
-    elif direction == "BEARISH":
-
+        # La confirmación debe cerrar bajista.
         if candle["close"] < candle["open"]:
             score += 5
 
+        # Cuerpo suficiente.
         if (
             candle["body_ratio"]
-            >= MIN_CONTINUITY_BODY_RATIO
+            >= MIN_REVERSAL_BODY_RATIO
         ):
-            score += 5
+            score += 4
 
+        # Cierre cerca del mínimo.
         if candle["close_position"] <= 0.35:
             score += 4
 
+        # Rechazo superior.
+        if (
+            candle["upper_wick_ratio"]
+            >= MIN_REJECTION_WICK_RATIO
+        ):
+            score += 4
+
+        # Debilidad respecto al máximo anterior.
+        if candle["high"] >= previous["high"]:
+            score += 2
+
+        # Confirmación más fuerte si rompe el mínimo previo.
+        if candle["close"] < previous["low"]:
+            score += 5
+
+        # No queremos cierre alcista.
+        if candle["close"] >= candle["open"]:
+            reasons.append("confirmación no bajista")
+
+    # --------------------------------------------------------
+    # REVERSIÓN ALCISTA
+    # Tendencia previa bajista -> CALL
+    # --------------------------------------------------------
+
+    elif direction == "BEARISH":
+
+        result["reversal_direction"] = "BULLISH"
+
+        # La confirmación debe cerrar alcista.
+        if candle["close"] > candle["open"]:
+            score += 5
+
+        # Cuerpo suficiente.
+        if (
+            candle["body_ratio"]
+            >= MIN_REVERSAL_BODY_RATIO
+        ):
+            score += 4
+
+        # Cierre cerca del máximo.
+        if candle["close_position"] >= 0.65:
+            score += 4
+
+        # Rechazo inferior.
         if (
             candle["lower_wick_ratio"]
-            <= MAX_COUNTER_WICK_RATIO
+            >= MIN_REJECTION_WICK_RATIO
         ):
-            score += 3
+            score += 4
+
+        # Barrida o test del mínimo.
+        if candle["low"] <= previous["low"]:
+            score += 2
+
+        # Confirmación fuerte si rompe máximo previo.
+        if candle["close"] > previous["high"]:
+            score += 5
+
+        # No queremos cierre bajista.
+        if candle["close"] <= candle["open"]:
+            reasons.append("confirmación no alcista")
+
+    else:
+        result["reason"] = "dirección previa neutral"
+        return result
+
+    # --------------------------------------------------------
+    # FILTROS DE MOVIMIENTO
+    # --------------------------------------------------------
 
     if range_atr > MAX_CONFIRMATION_RANGE_ATR:
-        reasons.append(
-            "movimiento demasiado extendido"
-        )
-        score -= 8
+        score -= 6
+        reasons.append("movimiento demasiado extendido")
 
     if body_atr > MAX_CONFIRMATION_BODY_ATR:
-        reasons.append(
-            "cuerpo demasiado extendido"
-        )
-        score -= 6
+        score -= 5
+        reasons.append("cuerpo demasiado extendido")
 
     if candle["body_ratio"] <= INDECISION_BODY_RATIO:
-        reasons.append(
-            "vela indecisa"
-        )
         score -= 8
+        reasons.append("vela indecisa")
 
-    result["score"] = max(
-        0,
-        score,
-    )
+    result["score"] = max(0, score)
 
     result["valid"] = (
-        result["score"] >= 12
+        result["score"] >= 13
         and not reasons
     )
 
     result["reason"] = (
         ", ".join(reasons)
         if reasons
-        else f"confirmación score={result['score']}"
+        else f"confirmación reversión score={result['score']}"
     )
 
     return result
+
+
+# ============================================================
+# VALIDAR REVERSIÓN COMPLETA
+# ============================================================
+
+def check_reversal(
+    df: pd.DataFrame,
+    direction: str,
+) -> Dict[str, Any]:
+
+    result = {
+        "valid": False,
+        "score": 0,
+        "reason": "sin reversión",
+    }
+
+    df = safe_dataframe(df)
+
+    if len(df) < 4:
+        result["reason"] = "pocas velas para reversión"
+        return result
+
+    work = df.tail(
+        REVERSAL_LOOKBACK
+    ).reset_index(drop=True)
+
+    last = get_candle_data(
+        work.iloc[-1]
+    )
+
+    previous = get_candle_data(
+        work.iloc[-2]
+    )
+
+    if last is None or previous is None:
+        result["reason"] = "velas inválidas"
+        return result
+
+    score = 0
+    reasons = []
+
+    if direction == "BULLISH":
+
+        # Buscamos giro hacia abajo.
+
+        if last["close"] < last["open"]:
+            score += 3
+
+        if (
+            last["close_position"]
+            <= 0.35
+        ):
+            score += 2
+
+        if (
+            last["upper_wick_ratio"]
+            >= MIN_REJECTION_WICK_RATIO
+        ):
+            score += 2
+
+        if last["close"] < previous["low"]:
+            score += 3
+
+        if score >= MIN_REVERSAL_SCORE:
+            result["valid"] = True
+            result["score"] = score
+            result["reason"] = (
+                "reversión bajista confirmada"
+            )
+            return result
+
+        reasons.append("reversión bajista insuficiente")
+
+    elif direction == "BEARISH":
+
+        # Buscamos giro hacia arriba.
+
+        if last["close"] > last["open"]:
+            score += 3
+
+        if (
+            last["close_position"]
+            >= 0.65
+        ):
+            score += 2
+
+        if (
+            last["lower_wick_ratio"]
+            >= MIN_REJECTION_WICK_RATIO
+        ):
+            score += 2
+
+        if last["close"] > previous["high"]:
+            score += 3
+
+        if score >= MIN_REVERSAL_SCORE:
+            result["valid"] = True
+            result["score"] = score
+            result["reason"] = (
+                "reversión alcista confirmada"
+            )
+            return result
+
+        reasons.append("reversión alcista insuficiente")
+
+    result["score"] = score
+    result["reason"] = (
+        ", ".join(reasons)
+        if reasons
+        else "sin reversión"
+    )
+
+    return result
+
+
+# ============================================================
+# COMPATIBILIDAD SOPORTE / RESISTENCIA
+# ============================================================
+#
+# En estrategia de reversión S/R no es necesariamente bloqueo.
+#
+# De hecho:
+# - resistencia ayuda a buscar PUT
+# - soporte ayuda a buscar CALL
+#
+# ============================================================
+
+def check_support_resistance(
+    df: pd.DataFrame,
+    direction: str,
+) -> Dict[str, Any]:
+
+    zone = check_reversal_zone(
+        df,
+        direction,
+    )
+
+    return {
+        "blocked": False,
+        "penalty": 0,
+        "reason": zone.get(
+            "reason",
+            "",
+        ),
+        "support": zone.get(
+            "support",
+        ),
+        "resistance": zone.get(
+            "resistance",
+        ),
+        "valid_reversal_zone": zone.get(
+            "valid",
+            False,
+        ),
+        "score": zone.get(
+            "score",
+            0,
+        ),
+    }
 
 
 # ============================================================
@@ -857,8 +1047,10 @@ def analyze_live_candle(
 
     if data["close"] > data["open"]:
         direction = "BULLISH"
+
     elif data["close"] < data["open"]:
         direction = "BEARISH"
+
     else:
         direction = "NEUTRAL"
 
@@ -866,38 +1058,51 @@ def analyze_live_candle(
 
     score = 0
 
-    if direction == "BULLISH":
+    # Posible rechazo bajista.
+    if (
+        data["upper_wick_ratio"]
+        >= MIN_REJECTION_WICK_RATIO
+    ):
+        score += 4
 
-        if data["body_ratio"] >= 0.40:
-            score += 5
+    # Posible rechazo alcista.
+    if (
+        data["lower_wick_ratio"]
+        >= MIN_REJECTION_WICK_RATIO
+    ):
+        score += 4
 
-        if data["close_position"] >= 0.65:
-            score += 5
-
-        if data["upper_wick_ratio"] <= 0.30:
-            score += 3
-
-    elif direction == "BEARISH":
-
-        if data["body_ratio"] >= 0.40:
-            score += 5
-
-        if data["close_position"] <= 0.35:
-            score += 5
-
-        if data["lower_wick_ratio"] <= 0.30:
-            score += 3
+    # Cuerpo significativo.
+    if (
+        data["body_ratio"]
+        >= MIN_REVERSAL_BODY_RATIO
+    ):
+        score += 3
 
     if data["body_ratio"] <= DOJI_BODY_RATIO:
+
         result["state"] = "DOJI"
 
     elif data["body_ratio"] <= INDECISION_BODY_RATIO:
+
         result["state"] = "INDECISION"
 
-    elif score >= 10:
-        result["state"] = "LIVE_CONTINUITY"
+    elif (
+        data["upper_wick_ratio"]
+        >= STRONG_REJECTION_WICK_RATIO
+    ):
+
+        result["state"] = "UPPER_REJECTION"
+
+    elif (
+        data["lower_wick_ratio"]
+        >= STRONG_REJECTION_WICK_RATIO
+    ):
+
+        result["state"] = "LOWER_REJECTION"
 
     else:
+
         result["state"] = "MOVEMENT"
 
     result["score"] = score
@@ -907,6 +1112,16 @@ def analyze_live_candle(
 
 # ============================================================
 # ANÁLISIS PRINCIPAL DE MERCADO
+# ============================================================
+#
+# FLUJO:
+#
+# 1. Detectar tendencia previa.
+# 2. Verificar que el precio esté en un extremo.
+# 3. Buscar agotamiento.
+# 4. Buscar reversión real.
+# 5. Confirmar la vela contraria.
+# 6. Generar señal para N+1.
 # ============================================================
 
 def analyze_market(
@@ -930,12 +1145,14 @@ def analyze_market(
         "confirmation": {},
         "exhaustion": {},
         "support_resistance": {},
+        "reversal": {},
+        "reversal_zone": {},
     }
 
     if candle_1m is None:
-        result["reason"] = (
-            "vela M1 no disponible"
-        )
+
+        result["reason"] = "vela M1 no disponible"
+
         return result
 
     current = get_candle_data(
@@ -943,42 +1160,63 @@ def analyze_market(
     )
 
     if current is None:
-        result["reason"] = (
-            "OHLC inválido"
-        )
+
+        result["reason"] = "OHLC inválido"
+
         return result
 
     if "from" in candle_1m.index:
+
         try:
+
             result["minute_timestamp"] = int(
-                float(candle_1m["from"])
+                float(
+                    candle_1m["from"]
+                )
             )
+
         except Exception:
             pass
 
     result["minute_open"] = current["open"]
     result["minute_close"] = current["close"]
 
+    # --------------------------------------------------------
+    # CONSTRUIR HISTORIAL
+    # --------------------------------------------------------
+
     historical = safe_dataframe(
         previous_m1
     )
 
     if len(historical) == 0:
+
         historical = pd.DataFrame(
             [dict(candle_1m)]
         )
 
+    # Agregar la vela de confirmación si aún no está.
     if len(historical) > 0:
 
+        should_append = True
+
         if (
-            "from" not in historical.columns
-            or result["minute_timestamp"] is None
-            or result["minute_timestamp"]
-            not in historical.get(
-                "from",
-                pd.Series(dtype=float),
-            ).values
+            "from" in historical.columns
+            and result["minute_timestamp"] is not None
         ):
+
+            timestamps = pd.to_numeric(
+                historical["from"],
+                errors="coerce",
+            )
+
+            if (
+                result["minute_timestamp"]
+                in timestamps.values
+            ):
+                should_append = False
+
+        if should_append:
 
             historical = pd.concat(
                 [
@@ -994,178 +1232,238 @@ def analyze_market(
         historical
     )
 
-    if len(historical) < 6:
+    if len(historical) < 8:
+
+        result["reason"] = "historial insuficiente"
+
+        return result
+
+    # --------------------------------------------------------
+    # LA ÚLTIMA VELA ES LA CONFIRMACIÓN.
+    #
+    # Para detectar la tendencia previa usamos las velas
+    # anteriores, para no dejar que la vela de reversión
+    # cambie artificialmente la tendencia.
+    # --------------------------------------------------------
+
+    trend_history = historical.iloc[:-1]
+
+    if len(trend_history) < 6:
 
         result["reason"] = (
-            "historial insuficiente"
+            "historial previo insuficiente"
         )
 
         return result
 
     structure = analyze_structure(
-        historical.iloc[:-1]
+        trend_history
     )
 
-    direction = structure["direction"]
+    previous_direction = structure["direction"]
 
     result["structure"] = structure
-    result["direction"] = direction
+    result["direction"] = previous_direction
 
-    if direction == "NEUTRAL":
+    # --------------------------------------------------------
+    # NO OPERAR MERCADO LATERAL
+    # --------------------------------------------------------
 
-        result["reason"] = (
-            "mercado sin estructura clara"
-        )
+    if previous_direction == "NEUTRAL":
 
         result["state"] = "RANGE"
 
+        result["reason"] = (
+            "no hay tendencia previa clara para revertir"
+        )
+
         return result
 
-    continuity = check_continuity(
-        historical.iloc[:-1],
-        direction,
+    # --------------------------------------------------------
+    # ZONA DE REVERSIÓN
+    # --------------------------------------------------------
+
+    reversal_zone = check_reversal_zone(
+        historical,
+        previous_direction,
     )
 
-    confirmation = confirmation_score(
-        historical,
-        direction,
-    )
+    result["reversal_zone"] = reversal_zone
+
+    result["support_resistance"] = {
+        "blocked": False,
+        "penalty": 0,
+        "reason": reversal_zone["reason"],
+        "support": reversal_zone["support"],
+        "resistance": reversal_zone["resistance"],
+        "valid_reversal_zone": reversal_zone["valid"],
+        "score": reversal_zone["score"],
+    }
+
+    if not reversal_zone["valid"]:
+
+        result["state"] = "NO_REVERSAL_ZONE"
+
+        result["reason"] = (
+            reversal_zone["reason"]
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # AGOTAMIENTO
+    # --------------------------------------------------------
 
     exhaustion = detect_end_of_trend(
         historical,
-        direction,
+        previous_direction,
     )
 
-    support_resistance = check_support_resistance(
-        historical,
-        direction,
-    )
-
-    result["continuity"] = continuity
-    result["confirmation"] = confirmation
     result["exhaustion"] = exhaustion
-    result[
-        "support_resistance"
-    ] = support_resistance
+
+    if not exhaustion["exhausted"]:
+
+        result["state"] = "NO_EXHAUSTION"
+
+        result["reason"] = (
+            f"tendencia todavía sin agotamiento: "
+            f"{exhaustion['reason']}"
+        )
+
+        return result
 
     # --------------------------------------------------------
-    # SCORE BASE
+    # REVERSIÓN
+    # --------------------------------------------------------
+
+    reversal = check_reversal(
+        historical,
+        previous_direction,
+    )
+
+    result["reversal"] = reversal
+
+    # Compatibilidad con el bot anterior.
+    result["continuity"] = {
+        "valid": reversal["valid"],
+        "score": reversal["score"],
+        "reason": reversal["reason"],
+    }
+
+    if not reversal["valid"]:
+
+        result["state"] = "NO_REVERSAL"
+
+        result["reason"] = reversal["reason"]
+
+        return result
+
+    # --------------------------------------------------------
+    # CONFIRMACIÓN
+    # --------------------------------------------------------
+
+    confirmation = confirmation_score(
+        historical,
+        previous_direction,
+    )
+
+    result["confirmation"] = confirmation
+
+    if not confirmation["valid"]:
+
+        result["state"] = "WEAK_CONFIRMATION"
+
+        result["reason"] = (
+            f"confirmación de reversión débil: "
+            f"{confirmation['reason']}"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # SCORE FINAL
     # --------------------------------------------------------
 
     score = 0
 
-    # Estructura
-    score += min(
-        30,
-        structure["score"] * 3,
-    )
-
-    # Continuidad
+    # Tendencia previa.
     score += min(
         25,
-        continuity["score"] * 3,
+        structure["score"] * 2.5,
     )
 
-    # Confirmación
+    # Zona extrema.
     score += min(
-        30,
-        confirmation["score"] * 2,
+        20,
+        reversal_zone["score"] * 2.5,
     )
 
-    # Penalización agotamiento
-    score -= exhaustion["penalty"]
+    # Agotamiento.
+    score += min(
+        20,
+        exhaustion["score"] * 2.5,
+    )
 
-    # Penalización S/R
-    score -= support_resistance["penalty"]
+    # Reversión.
+    score += min(
+        20,
+        reversal["score"] * 2.5,
+    )
+
+    # Confirmación.
+    score += min(
+        25,
+        confirmation["score"] * 1.5,
+    )
 
     score = max(
         0,
-        min(MAX_SCORE, score),
+        min(
+            MAX_SCORE,
+            int(score),
+        ),
     )
 
     result["score"] = score
 
-    # --------------------------------------------------------
-    # BLOQUEOS
-    # --------------------------------------------------------
-
-    if not continuity["valid"]:
-
-        result["reason"] = (
-            "sin continuidad suficiente"
-        )
-
-        result["state"] = "NO_CONTINUITY"
-
-        return result
-
-    if exhaustion["exhausted"]:
-
-        result["reason"] = (
-            f"tendencia agotada: "
-            f"{exhaustion['reason']}"
-        )
-
-        result["state"] = "EXHAUSTION"
-
-        return result
-
-    if support_resistance["blocked"]:
-
-        result["reason"] = (
-            support_resistance["reason"]
-        )
-
-        result["state"] = "SUPPORT_RESISTANCE"
-
-        return result
-
-    if not confirmation["valid"]:
-
-        result["reason"] = (
-            f"confirmación débil: "
-            f"{confirmation['reason']}"
-        )
-
-        result["state"] = "WEAK_CONFIRMATION"
-
-        return result
-
     if score < MIN_FINAL_SCORE:
-
-        result["reason"] = (
-            f"calidad insuficiente score={score}"
-        )
 
         result["state"] = "LOW_SCORE"
 
-        return result
-
-    # --------------------------------------------------------
-    # SEÑAL FINAL
-    # --------------------------------------------------------
-
-    if direction == "BULLISH":
-
-        result["signal"] = "call"
-        result["valid"] = True
-        result["state"] = "BULLISH_CONTINUITY"
-
         result["reason"] = (
-            f"CALL continuidad alcista "
+            f"reversión detectada pero calidad insuficiente "
             f"score={score}"
         )
 
         return result
 
-    if direction == "BEARISH":
+    # --------------------------------------------------------
+    # SEÑAL FINAL - INVERSIÓN DE LA TENDENCIA PREVIA
+    # --------------------------------------------------------
+
+    # Tendencia previa alcista -> buscamos reversión bajista.
+    if previous_direction == "BULLISH":
 
         result["signal"] = "put"
         result["valid"] = True
-        result["state"] = "BEARISH_CONTINUITY"
+        result["state"] = "BEARISH_REVERSAL"
 
         result["reason"] = (
-            f"PUT continuidad bajista "
+            f"PUT reversión bajista confirmada "
+            f"score={score}"
+        )
+
+        return result
+
+    # Tendencia previa bajista -> buscamos reversión alcista.
+    if previous_direction == "BEARISH":
+
+        result["signal"] = "call"
+        result["valid"] = True
+        result["state"] = "BULLISH_REVERSAL"
+
+        result["reason"] = (
+            f"CALL reversión alcista confirmada "
             f"score={score}"
         )
 
@@ -1175,7 +1473,7 @@ def analyze_market(
 
 
 # ============================================================
-# COMPATIBILIDAD
+# COMPATIBILIDAD CON BOT.PY
 # ============================================================
 
 def analyze_minute(
@@ -1230,6 +1528,10 @@ def signal(
     )
 
 
+# ============================================================
+# DIRECCIÓN DE VELA M1
+# ============================================================
+
 def get_m1_direction(
     candle_1m=None,
 ):
@@ -1270,6 +1572,10 @@ def get_m1_direction(
     return "NEUTRAL"
 
 
+# ============================================================
+# COMPATIBILIDAD
+# ============================================================
+
 def check_pattern(
     candles_5s=None,
 ):
@@ -1277,9 +1583,20 @@ def check_pattern(
     return None
 
 
+# ============================================================
+# EJECUCIÓN DIRECTA
+# ============================================================
+
 if __name__ == "__main__":
 
     print("strategy.py cargado correctamente.")
+    print("Estrategia: SOLO REVERSIÓN M1")
     print(
-        "Estrategia: MULTI MARKET CONTINUITY"
+        "BULLISH agotado -> posible PUT"
+    )
+    print(
+        "BEARISH agotado -> posible CALL"
+    )
+    print(
+        "La señal se genera con vela cerrada y se ejecuta en N+1."
     )
