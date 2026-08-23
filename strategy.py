@@ -19,23 +19,26 @@ import pandas as pd
 # - Calidad de la estructura
 # - Calidad de la vela M1
 # - Riesgos: agotamiento, rechazo, S/R, rango
-# - Score total para comparar este mercado con otros
+# - Inicio del impulso
+# - Calidad de estructura reciente
+# - Score total para comparar mercados
+#
+# MEJORAS
+# ------------------------------------------------------------
+# 1. Priorizar el inicio de un impulso.
+# 2. Evitar entrar cuando el impulso ya está avanzado.
+# 3. Exigir estructura reciente.
+# 4. Evitar mercados con demasiadas velas consecutivas.
+# 5. Mantener la lógica original de CALL / PUT.
+# 6. Mantener expiración externa de 1 minuto.
 #
 # IMPORTANTE
 # ------------------------------------------------------------
-# La vela M1 actual puede analizarse EN VIVO para observar:
+# Este archivo analiza UN mercado.
 #
-# - apertura
-# - máximo
-# - mínimo
-# - precio actual
-# - cuerpo
-# - mechas
-# - fuerza
-# - continuidad
-#
-# La señal definitiva se genera utilizando la M1 cerrada.
-# La entrada corresponde a N+1.
+# El recorrido de todos los pares, actualización de velas,
+# apertura de operaciones y expiración de 1 minuto debe estar
+# en el ejecutor/bot que llama a esta estrategia.
 # ============================================================
 
 
@@ -49,6 +52,33 @@ CONTINUITY_LOOKBACK = 6
 EXHAUSTION_LOOKBACK = 8
 SR_LOOKBACK = 20
 ATR_PERIOD = 14
+
+
+# ============================================================
+# FILTRO DE INICIO DE IMPULSO
+# ============================================================
+
+IMPULSE_LOOKBACK = 8
+
+# Máximo de velas desde el inicio detectado del impulso.
+MAX_IMPULSE_AGE = 4
+
+# Cuerpo mínimo para considerar una vela como iniciadora
+# de un impulso.
+MIN_IMPULSE_BODY_RATIO = 0.45
+
+# Evita impulsos demasiado grandes/extendidos.
+MAX_IMPULSE_TOTAL_ATR = 3.50
+
+# Estructura mínima reciente.
+MIN_RECENT_STRUCTURE_SCORE = 5
+
+# Evita entrar después de demasiadas velas consecutivas
+# en una misma dirección.
+MAX_CONSECUTIVE_DIRECTION_CANDLES = 5
+
+# Cantidad de velas recientes para validar estructura.
+BREAK_LOOKBACK = 5
 
 
 # ============================================================
@@ -392,6 +422,398 @@ def analyze_structure(
 
 
 # ============================================================
+# ESTRUCTURA RECIENTE
+# ============================================================
+
+def recent_structure_quality(
+    df: pd.DataFrame,
+    direction: str,
+) -> Dict[str, Any]:
+
+    result = {
+        "valid": False,
+        "score": 0,
+        "reason": "estructura reciente insuficiente",
+    }
+
+    df = safe_dataframe(df)
+
+    if len(df) < BREAK_LOOKBACK + 2:
+        return result
+
+    work = df.tail(
+        BREAK_LOOKBACK
+    ).reset_index(drop=True)
+
+    score = 0
+
+    highs = work["high"].tolist()
+    lows = work["low"].tolist()
+    closes = work["close"].tolist()
+
+    if direction == "BULLISH":
+
+        higher_highs = sum(
+            1
+            for i in range(1, len(highs))
+            if highs[i] > highs[i - 1]
+        )
+
+        higher_lows = sum(
+            1
+            for i in range(1, len(lows))
+            if lows[i] > lows[i - 1]
+        )
+
+        if higher_highs >= 2:
+            score += 3
+
+        if higher_lows >= 2:
+            score += 3
+
+        if closes[-1] > closes[-2]:
+            score += 2
+
+    elif direction == "BEARISH":
+
+        lower_highs = sum(
+            1
+            for i in range(1, len(highs))
+            if highs[i] < highs[i - 1]
+        )
+
+        lower_lows = sum(
+            1
+            for i in range(1, len(lows))
+            if lows[i] < lows[i - 1]
+        )
+
+        if lower_highs >= 2:
+            score += 3
+
+        if lower_lows >= 2:
+            score += 3
+
+        if closes[-1] < closes[-2]:
+            score += 2
+
+    result["score"] = score
+
+    result["valid"] = (
+        score >= MIN_RECENT_STRUCTURE_SCORE
+    )
+
+    result["reason"] = (
+        f"estructura reciente score={score}"
+    )
+
+    return result
+
+
+# ============================================================
+# DETECCIÓN DE INICIO DE IMPULSO
+# ============================================================
+
+def analyze_impulse_start(
+    df: pd.DataFrame,
+    direction: str,
+) -> Dict[str, Any]:
+
+    result = {
+        "valid": False,
+        "score": 0,
+        "age": 99,
+        "extended": False,
+        "reason": "sin impulso reciente",
+    }
+
+    df = safe_dataframe(df)
+
+    if len(df) < IMPULSE_LOOKBACK + 2:
+        return result
+
+    work = df.tail(
+        IMPULSE_LOOKBACK
+    ).reset_index(drop=True)
+
+    atr = calculate_atr(
+        df.iloc[:-1]
+    )
+
+    if atr <= 0:
+        return result
+
+    candles = []
+
+    for i in range(len(work)):
+
+        data = get_candle_data(
+            work.iloc[i]
+        )
+
+        if data is not None:
+            candles.append(data)
+
+    if len(candles) < IMPULSE_LOOKBACK:
+        return result
+
+    # --------------------------------------------------------
+    # BUSCAR LA ÚLTIMA RUPTURA QUE INICIA IMPULSO
+    # --------------------------------------------------------
+
+    impulse_start = None
+
+    for i in range(1, len(candles)):
+
+        current = candles[i]
+        previous = candles[i - 1]
+
+        bullish = (
+            current["close"]
+            > current["open"]
+        )
+
+        bearish = (
+            current["close"]
+            < current["open"]
+        )
+
+        strong_body = (
+            current["body_ratio"]
+            >= MIN_IMPULSE_BODY_RATIO
+        )
+
+        if direction == "BULLISH":
+
+            breakout = (
+                current["close"]
+                > previous["high"]
+            )
+
+            if (
+                bullish
+                and strong_body
+                and breakout
+            ):
+                impulse_start = i
+
+        elif direction == "BEARISH":
+
+            breakout = (
+                current["close"]
+                < previous["low"]
+            )
+
+            if (
+                bearish
+                and strong_body
+                and breakout
+            ):
+                impulse_start = i
+
+    if impulse_start is None:
+
+        result["reason"] = (
+            "no existe ruptura reciente de impulso"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # EDAD DEL IMPULSO
+    # --------------------------------------------------------
+
+    age = (
+        len(candles)
+        - 1
+        - impulse_start
+    )
+
+    result["age"] = age
+
+    if age > MAX_IMPULSE_AGE:
+
+        result["reason"] = (
+            f"impulso demasiado antiguo age={age}"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # EXTENSIÓN
+    # --------------------------------------------------------
+
+    impulse_high = max(
+        candle["high"]
+        for candle in candles[impulse_start:]
+    )
+
+    impulse_low = min(
+        candle["low"]
+        for candle in candles[impulse_start:]
+    )
+
+    impulse_range = (
+        impulse_high
+        - impulse_low
+    )
+
+    extension_atr = (
+        impulse_range / atr
+    )
+
+    if extension_atr > MAX_IMPULSE_TOTAL_ATR:
+
+        result["extended"] = True
+
+        result["reason"] = (
+            f"impulso demasiado extendido "
+            f"{extension_atr:.2f} ATR"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # FUERZA DEL IMPULSO
+    # --------------------------------------------------------
+
+    recent = candles[
+        impulse_start:
+    ]
+
+    directional = 0
+    weak = 0
+
+    for candle in recent:
+
+        if direction == "BULLISH":
+
+            if candle["close"] > candle["open"]:
+                directional += 1
+
+        elif direction == "BEARISH":
+
+            if candle["close"] < candle["open"]:
+                directional += 1
+
+        if (
+            candle["body_ratio"]
+            < MIN_CONTINUITY_BODY_RATIO
+        ):
+            weak += 1
+
+    score = 0
+
+    # Ruptura reciente
+    score += 4
+
+    # Impulso joven
+    if age <= 1:
+        score += 5
+
+    elif age <= 2:
+        score += 4
+
+    elif age <= 3:
+        score += 2
+
+    # Velas direccionales
+    if directional >= 2:
+        score += 3
+
+    # Pocas velas débiles
+    if weak <= 1:
+        score += 2
+
+    # Impulso no extendido
+    if extension_atr <= 2.0:
+        score += 3
+
+    result["score"] = score
+
+    result["valid"] = (
+        score >= 8
+        and age <= MAX_IMPULSE_AGE
+        and not result["extended"]
+    )
+
+    if result["valid"]:
+
+        result["reason"] = (
+            f"inicio de impulso válido "
+            f"age={age} "
+            f"score={score}"
+        )
+
+    else:
+
+        result["reason"] = (
+            f"impulso débil o avanzado "
+            f"age={age} "
+            f"score={score}"
+        )
+
+    return result
+
+
+# ============================================================
+# DETECTAR TENDENCIA DEMASIADO AVANZADA
+# ============================================================
+
+def detect_late_trend(
+    df: pd.DataFrame,
+    direction: str,
+) -> Dict[str, Any]:
+
+    result = {
+        "late": False,
+        "penalty": 0,
+        "reason": "sin tendencia avanzada",
+    }
+
+    df = safe_dataframe(df)
+
+    if len(df) < MAX_CONSECUTIVE_DIRECTION_CANDLES:
+        return result
+
+    work = df.tail(
+        MAX_CONSECUTIVE_DIRECTION_CANDLES
+    )
+
+    consecutive = 0
+
+    for _, candle in work.iterrows():
+
+        opening = float(candle["open"])
+        closing = float(candle["close"])
+
+        if direction == "BULLISH":
+
+            if closing > opening:
+                consecutive += 1
+            else:
+                break
+
+        elif direction == "BEARISH":
+
+            if closing < opening:
+                consecutive += 1
+            else:
+                break
+
+    if consecutive >= MAX_CONSECUTIVE_DIRECTION_CANDLES:
+
+        result["late"] = True
+        result["penalty"] = 12
+        result["reason"] = (
+            f"{consecutive} velas consecutivas "
+            f"en la misma dirección"
+        )
+
+    return result
+
+
+# ============================================================
 # CONTINUIDAD
 # ============================================================
 
@@ -452,7 +874,11 @@ def check_continuity(
             score += 2
 
         result["score"] = score
-        result["valid"] = score >= MIN_CONTINUITY_SCORE
+
+        result["valid"] = (
+            score >= MIN_CONTINUITY_SCORE
+        )
+
         result["reason"] = (
             f"continuidad alcista score={score}"
         )
@@ -489,7 +915,11 @@ def check_continuity(
             score += 2
 
         result["score"] = score
-        result["valid"] = score >= MIN_CONTINUITY_SCORE
+
+        result["valid"] = (
+            score >= MIN_CONTINUITY_SCORE
+        )
+
         result["reason"] = (
             f"continuidad bajista score={score}"
         )
@@ -585,6 +1015,7 @@ def detect_end_of_trend(
 
     result["penalty"] = penalty
     result["exhausted"] = penalty >= 10
+
     result["reason"] = (
         ", ".join(reasons)
         if reasons
@@ -703,9 +1134,11 @@ def confirmation_score(
     df = safe_dataframe(df)
 
     if len(df) < 2:
+
         result["reason"] = (
             "pocas velas para confirmación"
         )
+
         return result
 
     candle = get_candle_data(
@@ -713,9 +1146,11 @@ def confirmation_score(
     )
 
     if candle is None:
+
         result["reason"] = (
             "vela inválida"
         )
+
         return result
 
     atr = calculate_atr(
@@ -726,9 +1161,11 @@ def confirmation_score(
         atr = candle["range"]
 
     if atr <= 0:
+
         result["reason"] = (
             "ATR inválido"
         )
+
         return result
 
     range_atr = (
@@ -786,21 +1223,27 @@ def confirmation_score(
             score += 3
 
     if range_atr > MAX_CONFIRMATION_RANGE_ATR:
+
         reasons.append(
             "movimiento demasiado extendido"
         )
+
         score -= 8
 
     if body_atr > MAX_CONFIRMATION_BODY_ATR:
+
         reasons.append(
             "cuerpo demasiado extendido"
         )
+
         score -= 6
 
     if candle["body_ratio"] <= INDECISION_BODY_RATIO:
+
         reasons.append(
             "vela indecisa"
         )
+
         score -= 8
 
     result["score"] = max(
@@ -857,8 +1300,10 @@ def analyze_live_candle(
 
     if data["close"] > data["open"]:
         direction = "BULLISH"
+
     elif data["close"] < data["open"]:
         direction = "BEARISH"
+
     else:
         direction = "NEUTRAL"
 
@@ -889,15 +1334,19 @@ def analyze_live_candle(
             score += 3
 
     if data["body_ratio"] <= DOJI_BODY_RATIO:
+
         result["state"] = "DOJI"
 
     elif data["body_ratio"] <= INDECISION_BODY_RATIO:
+
         result["state"] = "INDECISION"
 
     elif score >= 10:
+
         result["state"] = "LIVE_CONTINUITY"
 
     else:
+
         result["state"] = "MOVEMENT"
 
     result["score"] = score
@@ -926,6 +1375,9 @@ def analyze_market(
         "minute_open": None,
         "minute_close": None,
         "structure": {},
+        "recent_structure": {},
+        "impulse": {},
+        "late_trend": {},
         "continuity": {},
         "confirmation": {},
         "exhaustion": {},
@@ -933,9 +1385,11 @@ def analyze_market(
     }
 
     if candle_1m is None:
+
         result["reason"] = (
             "vela M1 no disponible"
         )
+
         return result
 
     current = get_candle_data(
@@ -943,16 +1397,21 @@ def analyze_market(
     )
 
     if current is None:
+
         result["reason"] = (
             "OHLC inválido"
         )
+
         return result
 
     if "from" in candle_1m.index:
+
         try:
+
             result["minute_timestamp"] = int(
                 float(candle_1m["from"])
             )
+
         except Exception:
             pass
 
@@ -964,6 +1423,7 @@ def analyze_market(
     )
 
     if len(historical) == 0:
+
         historical = pd.DataFrame(
             [dict(candle_1m)]
         )
@@ -1002,6 +1462,10 @@ def analyze_market(
 
         return result
 
+    # --------------------------------------------------------
+    # ESTRUCTURA PRINCIPAL
+    # --------------------------------------------------------
+
     structure = analyze_structure(
         historical.iloc[:-1]
     )
@@ -1021,32 +1485,119 @@ def analyze_market(
 
         return result
 
+    # --------------------------------------------------------
+    # ESTRUCTURA RECIENTE
+    # --------------------------------------------------------
+
+    recent_structure = recent_structure_quality(
+        historical.iloc[:-1],
+        direction,
+    )
+
+    result["recent_structure"] = (
+        recent_structure
+    )
+
+    if not recent_structure["valid"]:
+
+        result["reason"] = (
+            "estructura reciente débil"
+        )
+
+        result["state"] = (
+            "WEAK_RECENT_STRUCTURE"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # INICIO DEL IMPULSO
+    # --------------------------------------------------------
+
+    impulse = analyze_impulse_start(
+        historical.iloc[:-1],
+        direction,
+    )
+
+    result["impulse"] = impulse
+
+    if not impulse["valid"]:
+
+        result["reason"] = (
+            impulse["reason"]
+        )
+
+        result["state"] = (
+            "NO_EARLY_IMPULSE"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # EVITAR FINAL DE TENDENCIA
+    # --------------------------------------------------------
+
+    late_trend = detect_late_trend(
+        historical.iloc[:-1],
+        direction,
+    )
+
+    result["late_trend"] = late_trend
+
+    if late_trend["late"]:
+
+        result["reason"] = (
+            late_trend["reason"]
+        )
+
+        result["state"] = "LATE_TREND"
+
+        return result
+
+    # --------------------------------------------------------
+    # CONTINUIDAD
+    # --------------------------------------------------------
+
     continuity = check_continuity(
         historical.iloc[:-1],
         direction,
     )
+
+    # --------------------------------------------------------
+    # CONFIRMACIÓN
+    # --------------------------------------------------------
 
     confirmation = confirmation_score(
         historical,
         direction,
     )
 
+    # --------------------------------------------------------
+    # AGOTAMIENTO
+    # --------------------------------------------------------
+
     exhaustion = detect_end_of_trend(
         historical,
         direction,
     )
 
-    support_resistance = check_support_resistance(
-        historical,
-        direction,
+    # --------------------------------------------------------
+    # SOPORTE / RESISTENCIA
+    # --------------------------------------------------------
+
+    support_resistance = (
+        check_support_resistance(
+            historical,
+            direction,
+        )
     )
 
     result["continuity"] = continuity
     result["confirmation"] = confirmation
     result["exhaustion"] = exhaustion
-    result[
-        "support_resistance"
-    ] = support_resistance
+    result["support_resistance"] = (
+        support_resistance
+    )
 
     # --------------------------------------------------------
     # SCORE BASE
@@ -1116,7 +1667,9 @@ def analyze_market(
             support_resistance["reason"]
         )
 
-        result["state"] = "SUPPORT_RESISTANCE"
+        result["state"] = (
+            "SUPPORT_RESISTANCE"
+        )
 
         return result
 
@@ -1127,7 +1680,9 @@ def analyze_market(
             f"{confirmation['reason']}"
         )
 
-        result["state"] = "WEAK_CONFIRMATION"
+        result["state"] = (
+            "WEAK_CONFIRMATION"
+        )
 
         return result
 
@@ -1149,10 +1704,13 @@ def analyze_market(
 
         result["signal"] = "call"
         result["valid"] = True
-        result["state"] = "BULLISH_CONTINUITY"
+        result["state"] = (
+            "BULLISH_CONTINUITY"
+        )
 
         result["reason"] = (
             f"CALL continuidad alcista "
+            f"e inicio de impulso "
             f"score={score}"
         )
 
@@ -1162,10 +1720,13 @@ def analyze_market(
 
         result["signal"] = "put"
         result["valid"] = True
-        result["state"] = "BEARISH_CONTINUITY"
+        result["state"] = (
+            "BEARISH_CONTINUITY"
+        )
 
         result["reason"] = (
             f"PUT continuidad bajista "
+            f"e inicio de impulso "
             f"score={score}"
         )
 
@@ -1277,9 +1838,22 @@ def check_pattern(
     return None
 
 
+# ============================================================
+# EJECUCIÓN DIRECTA
+# ============================================================
+
 if __name__ == "__main__":
 
-    print("strategy.py cargado correctamente.")
+    print(
+        "strategy.py cargado correctamente."
+    )
+
     print(
         "Estrategia: MULTI MARKET CONTINUITY"
+    )
+
+    print(
+        "Filtro: inicio de impulso + "
+        "estructura reciente + "
+        "protección contra agotamiento."
     )
