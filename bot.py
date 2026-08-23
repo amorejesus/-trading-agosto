@@ -16,13 +16,18 @@ from strategy import analyze_market
 # ============================================================
 # CORRECCIÓN IQOPTIONAPI: DESACTIVAR HILO DIGITAL
 # ============================================================
+#
 # Este bot utiliza BINARIAS/TURBO con expiración de 1 minuto.
+#
 # Algunas versiones de iqoptionapi arrancan internamente el hilo
 # __get_digital_open(), que intenta leer datos DIGITAL y puede
 # recibir None desde IQ Option, provocando:
+#
 # TypeError: 'NoneType' object is not subscriptable
 #
-# Se desactiva únicamente ese hilo interno. No afecta a:
+# Se desactiva únicamente ese hilo interno.
+#
+# No afecta:
 # - binarias/turbo
 # - velas M1
 # - descubrimiento OTC
@@ -56,19 +61,40 @@ IQ_PASSWORD = os.getenv("IQ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Los pares NO se fijan manualmente. Se descubren en IQ Option.
-# Para EXPIRATION=1, iqoptionapi utiliza el mercado turbo (1-5 minutos).
-PAIRS = []
+
+# ============================================================
+# MERCADOS
+# ============================================================
+#
+# Los pares NO se fijan manualmente.
+#
+# El bot los descubre directamente desde IQ Option.
+#
+# Solo acepta:
+# - OTC
+# - mercado turbo
+# - activo abierto
+#
+# La operación se realiza con:
+# EXPIRATION = 1
+#
+# Por lo tanto:
+# EXPIRACIÓN = 1 MINUTO
+# ============================================================
+
+PAIRS: list[str] = []
 
 MARKET_REFRESH_INTERVAL = 30.0
+
 LAST_MARKET_REFRESH = 0.0
 
 
 # ============================================================
-# TEMPORALIDADES
+# TEMPORALIDAD
 # ============================================================
 
 TIMEFRAME = 60
+
 CANDLE_COUNT = 60
 
 
@@ -76,7 +102,8 @@ CANDLE_COUNT = 60
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 30
+AMOUNT = 300
+
 EXPIRATION = 1
 
 
@@ -85,6 +112,7 @@ EXPIRATION = 1
 # ============================================================
 
 POLL_INTERVAL = 0.05
+
 MAX_ENTRY_DELAY = 0.0
 
 
@@ -93,6 +121,7 @@ MAX_ENTRY_DELAY = 0.0
 # ============================================================
 
 TELEGRAM_POLL_INTERVAL = 1.0
+
 TELEGRAM_HTTP_TIMEOUT = 5.0
 
 
@@ -137,7 +166,9 @@ logger = logging.getLogger(__name__)
 # TELEGRAM
 # ============================================================
 
-def telegram_send(message: str) -> bool:
+def telegram_send(
+    message: str,
+) -> bool:
 
     if not TELEGRAM_TOKEN:
         return False
@@ -183,7 +214,7 @@ def telegram_send(message: str) -> bool:
 
 
 # ============================================================
-# TELEGRAM EN HILO SEPARADO
+# TELEGRAM WORKER
 # ============================================================
 
 def telegram_worker() -> None:
@@ -192,6 +223,11 @@ def telegram_worker() -> None:
     global BOT_RUNNING
 
     if not TELEGRAM_TOKEN:
+
+        logger.warning(
+            "TELEGRAM_TOKEN no configurado."
+        )
+
         return
 
     logger.info(
@@ -277,24 +313,34 @@ def telegram_worker() -> None:
                 ):
                     continue
 
+                # ====================================================
+                # /START
+                # ====================================================
+
                 if text == "/start":
 
                     BOT_RUNNING = True
 
                     telegram_send(
                         "🟢 BOT ACTIVADO\n\n"
-                        "ESTRATEGIA 2 MINUTOS\n\n"
-                        "N inicia → recopilar datos → N cierra\n"
-                        "analizar N → decidir CALL/PUT → N+1\n\n"
-                        "🎯 SNIPER N+1 POR RETROCESO\n"
-                        "CALL: precio < apertura N+1\n"
-                        "PUT: precio > apertura N+1\n"
-                        "Entrada dentro de N+1 cuando se cumple el disparador."
+                        "ESTRATEGIA M1 - 1 MINUTO\n\n"
+                        "N inicia → recopilar datos\n"
+                        "N cierra → analizar N\n"
+                        "decidir CALL/PUT\n"
+                        "N+1 → ejecutar señal\n\n"
+                        "🎯 SNIPER N+1\n"
+                        "La dirección se calcula exclusivamente "
+                        "con la vela N cerrada.\n\n"
+                        "⏱ Expiración: 1 minuto."
                     )
 
                     logger.info(
                         "BOT ACTIVADO"
                     )
+
+                # ====================================================
+                # /STOP
+                # ====================================================
 
                 elif text == "/stop":
 
@@ -309,6 +355,10 @@ def telegram_worker() -> None:
                         "BOT DETENIDO"
                     )
 
+                # ====================================================
+                # /STATUS
+                # ====================================================
+
                 elif text == "/status":
 
                     status = (
@@ -321,13 +371,14 @@ def telegram_worker() -> None:
                     telegram_send(
                         "📊 ESTADO\n\n"
                         f"Estado: {status}\n"
-                        "Modo: SNIPER\n"
-                        "Principal: M1 completa\n"
+                        "Estrategia: M1\n"
+                        "Análisis: N cerrada\n"
                         "Entrada: N+1\n"
-                        "Mercado: OTC con expiración 1 minuto\n"
+                        "Mercado: OTC\n"
                         "Tipo: BINARIA\n"
+                        "Expiración: 1 minuto\n"
                         f"Importe: ${AMOUNT}\n"
-                        f"OTC 1M disponibles: {len(PAIRS)}"
+                        f"OTC disponibles: {len(PAIRS)}"
                     )
 
         except Exception as exc:
@@ -343,7 +394,7 @@ def telegram_worker() -> None:
 
 
 # ============================================================
-# SERVIDOR IQ OPTION
+# TIMESTAMP SERVIDOR
 # ============================================================
 
 def get_server_timestamp() -> Optional[int]:
@@ -373,24 +424,30 @@ def get_server_timestamp() -> Optional[int]:
 
 
 # ============================================================
-# DESCUBRIR OTC CON EXPIRACIÓN REAL DE 1 MINUTO
+# DESCUBRIR OTC CON EXPIRACIÓN DE 1 MINUTO
 # ============================================================
 
-def refresh_1m_otc_pairs(force: bool = False) -> list[str]:
+def refresh_1m_otc_pairs(
+    force: bool = False,
+) -> list[str]:
     """
-    Obtiene directamente de IQ Option los OTC disponibles para
-    operaciones de 1 minuto.
+    Descubre directamente en IQ Option los pares OTC abiertos
+    dentro del mercado turbo.
 
-    En iqoptionapi, las expiraciones de 1 a 5 minutos se enrutan
-    por el mercado turbo; por eso NO se usan aquí pares fijos ni
-    se toman todos los activos binary abiertos, ya que binary puede
-    corresponder a expiraciones largas.
+    El bot no utiliza una lista fija de pares.
+
+    Solo conserva:
+        - pares OTC
+        - mercado abierto
+        - disponibles para el flujo de operación de 1 minuto
     """
+
     global PAIRS
     global LAST_MARKET_REFRESH
     global STREAMS_STARTED
 
     if IQ is None:
+
         return list(PAIRS)
 
     now = time.monotonic()
@@ -398,44 +455,90 @@ def refresh_1m_otc_pairs(force: bool = False) -> list[str]:
     if (
         not force
         and PAIRS
-        and (now - LAST_MARKET_REFRESH) < MARKET_REFRESH_INTERVAL
+        and (
+            now - LAST_MARKET_REFRESH
+            < MARKET_REFRESH_INTERVAL
+        )
     ):
+
         return list(PAIRS)
 
     try:
-        open_time = IQ.get_all_open_time()
-        turbo = open_time.get("turbo", {})
 
-        discovered = []
+        open_time = IQ.get_all_open_time()
+
+        if not isinstance(
+            open_time,
+            dict,
+        ):
+
+            return list(PAIRS)
+
+        turbo = open_time.get(
+            "turbo",
+            {},
+        )
+
+        if not isinstance(
+            turbo,
+            dict,
+        ):
+
+            return list(PAIRS)
+
+        discovered: list[str] = []
 
         for pair, data in turbo.items():
-            name = str(pair).upper()
 
-            if not name.endswith("-OTC"):
+            name = str(
+                pair
+            ).upper()
+
+            if not name.endswith(
+                "-OTC"
+            ):
                 continue
 
-            if not isinstance(data, dict):
+            if not isinstance(
+                data,
+                dict,
+            ):
                 continue
 
-            if data.get("open") is not True:
+            if data.get(
+                "open"
+            ) is not True:
+
                 continue
 
-            discovered.append(name)
+            discovered.append(
+                name
+            )
 
-        discovered = sorted(set(discovered))
+        discovered = sorted(
+            set(discovered)
+        )
+
         previous = set(PAIRS)
+
         current = set(discovered)
 
         if current != previous:
+
             PAIRS = discovered
+
             STREAMS_STARTED = False
 
             logger.info(
                 "OTC 1M actualizado | %s pares: %s",
                 len(PAIRS),
-                ", ".join(PAIRS) if PAIRS else "ninguno",
+                ", ".join(PAIRS)
+                if PAIRS
+                else "ninguno",
             )
+
         else:
+
             PAIRS = discovered
 
         LAST_MARKET_REFRESH = now
@@ -443,10 +546,12 @@ def refresh_1m_otc_pairs(force: bool = False) -> list[str]:
         return list(PAIRS)
 
     except Exception as exc:
+
         logger.warning(
             "Error descubriendo OTC 1M: %s",
             exc,
         )
+
         return list(PAIRS)
 
 
@@ -460,11 +565,13 @@ def connect_iq() -> bool:
     global STREAMS_STARTED
 
     if not IQ_EMAIL:
+
         raise ValueError(
             "Falta IQ_EMAIL"
         )
 
     if not IQ_PASSWORD:
+
         raise ValueError(
             "Falta IQ_PASSWORD"
         )
@@ -492,7 +599,10 @@ def connect_iq() -> bool:
 
     STREAMS_STARTED = False
 
-    refresh_1m_otc_pairs(force=True)
+    refresh_1m_otc_pairs(
+        force=True
+    )
+
     start_realtime_streams()
 
     server_ts = get_server_timestamp()
@@ -504,6 +614,10 @@ def connect_iq() -> bool:
 
     return True
 
+
+# ============================================================
+# ASEGURAR CONEXIÓN
+# ============================================================
 
 def ensure_connection() -> bool:
 
@@ -541,10 +655,14 @@ def ensure_connection() -> bool:
 
         STREAMS_STARTED = False
 
+        refresh_1m_otc_pairs(
+            force=True
+        )
+
         start_realtime_streams()
 
-        telegram_send(
-            "🟢 IQ OPTION RECONectado"
+        logger.info(
+            "IQ Option reconectado."
         )
 
         return True
@@ -560,7 +678,7 @@ def ensure_connection() -> bool:
 
 
 # ============================================================
-# STREAMS DE VELAS
+# STREAMS M1
 # ============================================================
 
 def start_realtime_streams() -> None:
@@ -574,13 +692,15 @@ def start_realtime_streams() -> None:
         return
 
     if not PAIRS:
+
         logger.info(
-            "No hay OTC disponibles para expiración de 1 minuto."
+            "No hay OTC disponibles para 1 minuto."
         )
+
         return
 
     logger.info(
-        "Iniciando streams M1 para OTC con expiración de 1 minuto..."
+        "Iniciando streams M1..."
     )
 
     started = 0
@@ -588,6 +708,7 @@ def start_realtime_streams() -> None:
     for pair in PAIRS:
 
         try:
+
             IQ.start_candles_stream(
                 pair,
                 TIMEFRAME,
@@ -609,11 +730,13 @@ def start_realtime_streams() -> None:
                 exc,
             )
 
-    STREAMS_STARTED = started > 0
+    STREAMS_STARTED = (
+        started > 0
+    )
 
 
 # ============================================================
-# REALTIME DATAFRAME
+# DATAFRAME DE VELAS
 # ============================================================
 
 def realtime_dataframe(
@@ -640,6 +763,26 @@ def realtime_dataframe(
 
             try:
 
+                high_value = candle.get(
+                    "max",
+                    candle.get(
+                        "high"
+                    ),
+                )
+
+                low_value = candle.get(
+                    "min",
+                    candle.get(
+                        "low"
+                    ),
+                )
+
+                if high_value is None:
+                    continue
+
+                if low_value is None:
+                    continue
+
                 rows.append(
                     {
                         "from": int(
@@ -655,21 +798,11 @@ def realtime_dataframe(
                         ),
 
                         "high": float(
-                            candle.get(
-                                "max",
-                                candle.get(
-                                    "high"
-                                ),
-                            )
+                            high_value
                         ),
 
                         "low": float(
-                            candle.get(
-                                "min",
-                                candle.get(
-                                    "low"
-                                ),
-                            )
+                            low_value
                         ),
 
                         "volume": float(
@@ -723,7 +856,7 @@ def realtime_dataframe(
 
 
 # ============================================================
-# VELAS 1M
+# OBTENER M1
 # ============================================================
 
 def get_1m_realtime(
@@ -736,12 +869,20 @@ def get_1m_realtime(
     )
 
 
+# ============================================================
+# HISTORIAL M1
+# ============================================================
+
 def get_intrabar_1m(
     pair: str,
 ) -> Optional[pd.DataFrame]:
+    """
+    Obtiene historial M1 anterior utilizado por strategy.py.
 
-    # Estas velas de 1 minuto se usan solo para describir
-    # los movimientos internos de la vela N de 2 minutos.
+    No representa una vela de 2 minutos.
+    Cada vela corresponde a 60 segundos.
+    """
+
     return realtime_dataframe(
         pair,
         60,
@@ -749,7 +890,7 @@ def get_intrabar_1m(
 
 
 # ============================================================
-# OBTENER VELA VIVA
+# VELA VIVA
 # ============================================================
 
 def get_live_1m(
@@ -766,7 +907,7 @@ def get_live_1m(
 
 
 # ============================================================
-# OBTENER VELA CERRADA
+# VELA CERRADA
 # ============================================================
 
 def get_closed_1m(
@@ -781,15 +922,28 @@ def get_closed_1m(
         return None
 
     if expected_timestamp is not None:
+
         try:
-            expected_timestamp = int(expected_timestamp)
+
+            expected_timestamp = int(
+                expected_timestamp
+            )
+
             matches = df[
-                df["from"].astype(int) == expected_timestamp
+                df["from"].astype(int)
+                == expected_timestamp
             ]
+
             if matches.empty:
                 return None
+
             return matches.iloc[-1]
-        except (TypeError, ValueError):
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
             return None
 
     if len(df) < 2:
@@ -815,6 +969,7 @@ def create_pending_signal(
         "call",
         "put",
     ):
+
         return
 
     minute_ts = result.get(
@@ -828,6 +983,7 @@ def create_pending_signal(
         minute_ts
     )
 
+    # N+1 = siguiente vela M1
     next_timestamp = (
         minute_ts + TIMEFRAME
     )
@@ -839,7 +995,9 @@ def create_pending_signal(
     if existing is not None:
 
         if int(
-            existing["minute_timestamp"]
+            existing[
+                "minute_timestamp"
+            ]
         ) == minute_ts:
 
             return
@@ -869,6 +1027,11 @@ def create_pending_signal(
             "",
         ),
 
+        "score": result.get(
+            "score",
+            0,
+        ),
+
         "created_at": time.time(),
     }
 
@@ -888,10 +1051,19 @@ def create_pending_signal(
 def buy_binary(
     pair: str,
     signal: str,
-) -> tuple[bool, Optional[Any], Any]:
+) -> tuple[
+    bool,
+    Optional[Any],
+    Any,
+]:
 
     if IQ is None:
-        return False, None, "IQ=None"
+
+        return (
+            False,
+            None,
+            "IQ=None",
+        )
 
     try:
 
@@ -924,7 +1096,9 @@ def buy_binary(
             if len(result) == 1:
 
                 return (
-                    bool(result[0]),
+                    bool(
+                        result[0]
+                    ),
                     None,
                     result,
                 )
@@ -958,70 +1132,139 @@ def buy_binary(
 
 
 # ============================================================
-# EJECUCIÓN SNIPER N+1 POR RETROCESO DE PRECIO
+# EJECUCIÓN N+1
 # ============================================================
 
 def execute_pending(
     pair: str,
 ) -> bool:
     """
-    Ejecuta la señal calculada al cierre de N exclusivamente en N+1.
+    Ejecuta exclusivamente la señal calculada con N cerrada.
 
-    La dirección ya fue determinada con N cerrada:
-    - N completa se analiza.
-    - CALL/PUT queda fijado.
-    - N+1 solo es la vela de ejecución.
-    - Ningún dato de N+1 cambia la dirección.
+    Flujo:
+
+        N inicia
+        ↓
+        N se completa
+        ↓
+        N cierra
+        ↓
+        strategy.py analiza N
+        ↓
+        CALL / PUT
+        ↓
+        N+1 inicia
+        ↓
+        ejecutar operación
+        ↓
+        expiración = 1 minuto
+
+    Los datos de N+1 NO cambian la dirección.
     """
 
-    pending = PENDING_ENTRY.get(pair)
+    pending = PENDING_ENTRY.get(
+        pair
+    )
 
     if pending is None:
         return False
 
     server_ts = get_server_timestamp()
+
     if server_ts is None:
         return False
 
-    server_ts = int(server_ts)
+    server_ts = int(
+        server_ts
+    )
 
-    n_timestamp = int(pending["minute_timestamp"])
-    n1_timestamp = int(pending["next_timestamp"])
+    n_timestamp = int(
+        pending[
+            "minute_timestamp"
+        ]
+    )
+
+    n1_timestamp = int(
+        pending[
+            "next_timestamp"
+        ]
+    )
 
     current_candle = (
         server_ts // TIMEFRAME
     ) * TIMEFRAME
 
-    # Esperar hasta el comienzo exacto de N+1.
+    # --------------------------------------------------------
+    # ESPERAR A N+1
+    # --------------------------------------------------------
+
     if current_candle < n1_timestamp:
+
         return False
 
-    # Si N+1 ya terminó, la señal se cancela y no pasa a N+2.
+    # --------------------------------------------------------
+    # N+1 YA TERMINÓ
+    # --------------------------------------------------------
+
     if current_candle > n1_timestamp:
+
         logger.info(
-            "%s | SEÑAL CANCELADA | N+1 terminó sin ejecución | "
+            "%s | SEÑAL CANCELADA | "
+            "N+1 terminó sin ejecución | "
             "N=%s | N+1=%s",
             pair,
             n_timestamp,
             n1_timestamp,
         )
-        PENDING_ENTRY.pop(pair, None)
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    if LAST_TRADE_CANDLE.get(pair) == n1_timestamp:
-        PENDING_ENTRY.pop(pair, None)
+    # --------------------------------------------------------
+    # EVITAR DUPLICADOS
+    # --------------------------------------------------------
+
+    if (
+        LAST_TRADE_CANDLE.get(
+            pair
+        )
+        == n1_timestamp
+    ):
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    signal = pending["signal"]
+    signal = pending.get(
+        "signal"
+    )
 
-    if signal not in ("call", "put"):
-        PENDING_ENTRY.pop(pair, None)
+    if signal not in (
+        "call",
+        "put",
+    ):
+
+        PENDING_ENTRY.pop(
+            pair,
+            None,
+        )
+
         return False
 
-    # La entrada se hace en N+1. No se usa el precio de N+1
-    # para cambiar la dirección calculada.
+    # --------------------------------------------------------
+    # EJECUTAR
+    # --------------------------------------------------------
+
     logger.info(
-        "%s | 🚀 EJECUTANDO N+1 | signal=%s | N=%s | N+1=%s",
+        "%s | EJECUTANDO N+1 | "
+        "signal=%s | N=%s | N+1=%s",
         pair,
         signal.upper(),
         n_timestamp,
@@ -1033,11 +1276,12 @@ def execute_pending(
         signal,
     )
 
+    # --------------------------------------------------------
+    # IQ OPTION RECHAZÓ
+    # --------------------------------------------------------
+
     if not ok:
-        # Mantener la señal pendiente si IQ Option rechaza el primer intento.
-        # Esto permite reintentar dentro de la misma N+1 si el activo tarda
-        # unos instantes en quedar disponible. La dirección sigue siendo la
-        # calculada exclusivamente con N cerrada.
+
         logger.warning(
             "%s | BINARIA NO EJECUTADA TODAVÍA | "
             "signal=%s | N=%s | N+1=%s | result=%s",
@@ -1048,17 +1292,31 @@ def execute_pending(
             raw_result,
         )
 
-        # NO eliminar PENDING_ENTRY aquí.
-        # El siguiente ciclo vuelve a intentar mientras N+1 siga abierta.
+        # Mantener pendiente para reintentar dentro de N+1.
         return False
 
-    LAST_TRADE_CANDLE[pair] = n1_timestamp
-    PENDING_ENTRY.pop(pair, None)
+    # --------------------------------------------------------
+    # OPERACIÓN CONFIRMADA
+    # --------------------------------------------------------
+
+    LAST_TRADE_CANDLE[
+        pair
+    ] = n1_timestamp
+
+    PENDING_ENTRY.pop(
+        pair,
+        None,
+    )
+
+    # ========================================================
+    # TELEGRAM SOLO PARA OPERACIÓN EJECUTADA
+    # ========================================================
 
     telegram_send(
         "✅ OPERACIÓN ABIERTA\n\n"
         f"Par: {pair}\n"
-        f"Dirección: {signal.upper()}\n\n"
+        f"Dirección: {signal.upper()}\n"
+        f"Score: {pending.get('score', 0)}/100\n\n"
         "ANÁLISIS DE N CERRADA\n"
         f"Timestamp N: {n_timestamp}\n"
         f"Apertura N: {pending['minute_open']}\n"
@@ -1071,7 +1329,8 @@ def execute_pending(
     )
 
     logger.info(
-        "%s | ✅ BINARIA ABIERTA | %s | N=%s | N+1=%s | ID=%s",
+        "%s | BINARIA ABIERTA | %s | "
+        "N=%s | N+1=%s | ID=%s",
         pair,
         signal.upper(),
         n_timestamp,
@@ -1085,99 +1344,241 @@ def execute_pending(
 # ============================================================
 # PROCESAR UN PAR
 # ============================================================
-# PROCESAR UN PAR
-# ============================================================
 
 def process_pair(
     pair: str,
 ) -> Optional[Dict[str, Any]]:
-    """Analiza una sola vela M1 cerrada y devuelve su resultado.
+    """
+    Analiza una sola vela M1 cerrada.
 
-    La señal se calcula exclusivamente con N cerrada. La ejecución
-    queda para N+1 y no se crea una operación aquí; el selector
-    multi-OTC decide primero cuál es el mejor candidato.
+    N:
+        vela M1 cerrada.
+
+    N+1:
+        únicamente ejecución.
+
+    La dirección CALL/PUT se determina exclusivamente con N
+    cerrada y el historial anterior.
     """
 
+    # Si existe una operación pendiente, ejecutar N+1.
     if pair in PENDING_ENTRY:
-        execute_pending(pair)
+
+        execute_pending(
+            pair
+        )
+
         return None
 
     server_ts = get_server_timestamp()
+
     if server_ts is None:
         return None
 
-    server_ts = int(server_ts)
-    current_minute = (server_ts // TIMEFRAME) * TIMEFRAME
+    server_ts = int(
+        server_ts
+    )
 
-    df_1m = get_1m_realtime(pair)
+    current_minute = (
+        server_ts // TIMEFRAME
+    ) * TIMEFRAME
 
-    if df_1m is not None and not df_1m.empty:
-        live_candle = get_live_1m(df_1m)
+    # --------------------------------------------------------
+    # OBTENER VELAS M1
+    # --------------------------------------------------------
+
+    df_1m = get_1m_realtime(
+        pair
+    )
+
+    if (
+        df_1m is not None
+        and not df_1m.empty
+    ):
+
+        live_candle = get_live_1m(
+            df_1m
+        )
 
         if live_candle is not None:
+
             try:
-                live_ts = int(float(live_candle["from"]))
-            except (TypeError, ValueError, KeyError):
+
+                live_ts = int(
+                    float(
+                        live_candle[
+                            "from"
+                        ]
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+                KeyError,
+            ):
+
                 live_ts = None
 
             if live_ts == current_minute:
-                previous_live = LAST_LIVE_M1.get(pair)
+
+                previous_live = LAST_LIVE_M1.get(
+                    pair
+                )
 
                 if previous_live is not None:
+
                     try:
-                        previous_ts = int(float(previous_live.get("from")))
-                    except (TypeError, ValueError):
+
+                        previous_ts = int(
+                            float(
+                                previous_live.get(
+                                    "from"
+                                )
+                            )
+                        )
+
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+
                         previous_ts = None
 
-                    if previous_ts is not None and previous_ts < live_ts:
-                        LAST_CLOSED_M1[pair] = previous_live
+                    if (
+                        previous_ts is not None
+                        and previous_ts < live_ts
+                    ):
 
-                LAST_LIVE_M1[pair] = live_candle.to_dict()
+                        LAST_CLOSED_M1[
+                            pair
+                        ] = previous_live
 
-    closed_timestamp = current_minute - TIMEFRAME
+                LAST_LIVE_M1[
+                    pair
+                ] = live_candle.to_dict()
 
-    if LAST_PROCESSED_MINUTE.get(pair) == closed_timestamp:
+    # --------------------------------------------------------
+    # N = MINUTO ANTERIOR YA CERRADO
+    # --------------------------------------------------------
+
+    closed_timestamp = (
+        current_minute - TIMEFRAME
+    )
+
+    if (
+        LAST_PROCESSED_MINUTE.get(
+            pair
+        )
+        == closed_timestamp
+    ):
+
         return None
 
-    cached = LAST_CLOSED_M1.get(pair)
+    cached = LAST_CLOSED_M1.get(
+        pair
+    )
+
+    # --------------------------------------------------------
+    # RECUPERAR N SI ESTÁ EN LA VELA VIVA CACHEADA
+    # --------------------------------------------------------
 
     if cached is None:
-        live = LAST_LIVE_M1.get(pair)
+
+        live = LAST_LIVE_M1.get(
+            pair
+        )
 
         if live is not None:
+
             try:
-                live_ts = int(float(live.get("from")))
-            except (TypeError, ValueError):
+
+                live_ts = int(
+                    float(
+                        live.get(
+                            "from"
+                        )
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
                 live_ts = None
 
             if live_ts == closed_timestamp:
+
                 cached = live
 
     if not cached:
         return None
 
     try:
-        cached_ts = int(float(cached.get("from")))
-    except (TypeError, ValueError):
+
+        cached_ts = int(
+            float(
+                cached.get(
+                    "from"
+                )
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
         return None
 
     if cached_ts != closed_timestamp:
         return None
 
-    closed_candle = pd.Series(cached)
+    closed_candle = pd.Series(
+        cached
+    )
 
-    if int(float(closed_candle["from"])) != closed_timestamp:
+    if int(
+        float(
+            closed_candle[
+                "from"
+            ]
+        )
+    ) != closed_timestamp:
+
         return None
 
-    LAST_PROCESSED_MINUTE[pair] = closed_timestamp
+    LAST_PROCESSED_MINUTE[
+        pair
+    ] = closed_timestamp
 
-    # Historial exclusivamente anterior a N. N+1 nunca participa.
-    previous_m1 = get_intrabar_1m(pair)
+    # --------------------------------------------------------
+    # HISTORIAL ANTERIOR A N
+    # --------------------------------------------------------
+    #
+    # N+1 nunca entra en el análisis.
+    # --------------------------------------------------------
 
-    if previous_m1 is not None and not previous_m1.empty:
+    previous_m1 = get_intrabar_1m(
+        pair
+    )
+
+    if (
+        previous_m1 is not None
+        and not previous_m1.empty
+    ):
+
         previous_m1 = previous_m1[
-            previous_m1["from"].astype(int) < closed_timestamp
+            previous_m1[
+                "from"
+            ].astype(int)
+            < closed_timestamp
         ].copy()
+
+    # --------------------------------------------------------
+    # ANALIZAR N
+    # --------------------------------------------------------
 
     result = analyze_market(
         closed_candle,
@@ -1185,86 +1586,185 @@ def process_pair(
         previous_m1,
     )
 
-    result["minute_timestamp"] = closed_timestamp
-    result["minute_open"] = float(closed_candle["open"])
-    result["minute_close"] = float(closed_candle["close"])
-    result["pair"] = pair
+    # Forzar timestamp de la vela realmente cerrada.
+    result[
+        "minute_timestamp"
+    ] = closed_timestamp
+
+    result[
+        "minute_open"
+    ] = float(
+        closed_candle[
+            "open"
+        ]
+    )
+
+    result[
+        "minute_close"
+    ] = float(
+        closed_candle[
+            "close"
+        ]
+    )
+
+    result[
+        "pair"
+    ] = pair
 
     logger.info(
-        "%s | N CERRADA=%s | signal=%s | score=%s | reason=%s",
+        "%s | N CERRADA=%s | "
+        "signal=%s | score=%s | reason=%s",
         pair,
         closed_timestamp,
-        result.get("signal"),
-        result.get("score"),
-        result.get("reason", ""),
+        result.get(
+            "signal"
+        ),
+        result.get(
+            "score"
+        ),
+        result.get(
+            "reason",
+            "",
+        ),
     )
 
     return result
 
 
 # ============================================================
-# PROCESAR TODOS LOS PARES
+# ANALIZAR TODOS LOS PARES
 # ============================================================
 
 def analyze_all_pairs() -> None:
     """
-    Descubre los OTC con expiración de 1 minuto, analiza todos los
-    candidatos y conserva únicamente el mejor resultado válido.
+    Descubre los OTC disponibles para el flujo de 1 minuto.
+
+    Analiza todos los mercados disponibles.
+
+    Conserva únicamente el mejor candidato válido.
+
+    No envía mensajes de análisis a Telegram.
+
+    Telegram solo recibe la notificación cuando una operación
+    realmente fue abierta.
     """
 
     if not BOT_RUNNING:
         return
+
+    # --------------------------------------------------------
+    # ACTUALIZAR OTC
+    # --------------------------------------------------------
 
     refresh_1m_otc_pairs()
 
     if not PAIRS:
         return
 
+    # --------------------------------------------------------
+    # STREAMS
+    # --------------------------------------------------------
+
     if not STREAMS_STARTED:
+
         start_realtime_streams()
 
-    # Solo puede existir una entrada pendiente: el mejor candidato.
+    # --------------------------------------------------------
+    # SI EXISTE UNA ENTRADA PENDIENTE
+    # --------------------------------------------------------
+
     if PENDING_ENTRY:
-        for pair in list(PENDING_ENTRY):
-            execute_pending(pair)
+
+        for pair in list(
+            PENDING_ENTRY
+        ):
+
+            execute_pending(
+                pair
+            )
+
         return
 
-    candidates: list[Dict[str, Any]] = []
+    # --------------------------------------------------------
+    # CANDIDATOS
+    # --------------------------------------------------------
 
-    for pair in list(PAIRS):
+    candidates: list[
+        Dict[str, Any]
+    ] = []
+
+    for pair in list(
+        PAIRS
+    ):
+
         if not BOT_RUNNING:
             return
 
         try:
-            result = process_pair(pair)
+
+            result = process_pair(
+                pair
+            )
 
             if result is None:
                 continue
 
-            if result.get("valid") is not True:
+            if result.get(
+                "valid"
+            ) is not True:
+
                 continue
 
-            if result.get("signal") not in ("call", "put"):
+            if result.get(
+                "signal"
+            ) not in (
+                "call",
+                "put",
+            ):
+
                 continue
 
-            candidates.append(result)
+            candidates.append(
+                result
+            )
 
         except Exception:
+
             logger.exception(
                 "%s | error procesando par",
                 pair,
             )
 
+    # --------------------------------------------------------
+    # SIN CANDIDATOS
+    # --------------------------------------------------------
+
     if not candidates:
         return
 
-    # Mayor score primero. En empate, se mantiene el primer candidato.
+    # --------------------------------------------------------
+    # MEJOR CANDIDATO
+    # --------------------------------------------------------
+
     best = max(
         candidates,
-        key=lambda item: float(item.get("score", 0)),
+        key=lambda item: float(
+            item.get(
+                "score",
+                0,
+            )
+        ),
     )
 
-    best_pair = str(best.get("pair"))
+    best_pair = str(
+        best.get(
+            "pair"
+        )
+    )
+
+    # --------------------------------------------------------
+    # CREAR ENTRADA N+1
+    # --------------------------------------------------------
 
     create_pending_signal(
         best_pair,
@@ -1272,11 +1772,21 @@ def analyze_all_pairs() -> None:
     )
 
     logger.info(
-        "MEJOR OTC 1M | %s | signal=%s | score=%s | %s",
+        "MEJOR OTC 1M | %s | "
+        "signal=%s | score=%s | %s",
         best_pair,
-        str(best.get("signal")).upper(),
-        best.get("score"),
-        best.get("reason", ""),
+        str(
+            best.get(
+                "signal"
+            )
+        ).upper(),
+        best.get(
+            "score"
+        ),
+        best.get(
+            "reason",
+            "",
+        ),
     )
 
 
@@ -1297,16 +1807,19 @@ def main() -> None:
     )
 
     logger.info(
-        "MODO N+1 SEGÚN ANÁLISIS COMPLETO DE N"
+        "ESTRATEGIA M1"
     )
 
     logger.info(
-        "EXPIRACIÓN REAL 1 MINUTO | OTC DINÁMICO"
+        "ANÁLISIS DE N CERRADA"
     )
 
     logger.info(
-        "PARES: %s",
-        ", ".join(PAIRS),
+        "ENTRADA EN N+1"
+    )
+
+    logger.info(
+        "EXPIRACIÓN 1 MINUTO | OTC DINÁMICO"
     )
 
     logger.info(
@@ -1322,6 +1835,10 @@ def main() -> None:
     logger.info(
         "=========================================="
     )
+
+    # --------------------------------------------------------
+    # VARIABLES DE ENTORNO
+    # --------------------------------------------------------
 
     required = {
 
@@ -1349,14 +1866,17 @@ def main() -> None:
 
         logger.error(
             "Faltan variables: %s",
-            ", ".join(missing),
+            ", ".join(
+                missing
+            ),
         )
 
         return
 
-    # Telegram debe arrancar ANTES de conectar a IQ Option.
-    # Así /start, /stop y /status siguen funcionando aunque IQ Option
-    # tarde en conectar, falle la conexión o falle el descubrimiento OTC.
+    # --------------------------------------------------------
+    # TELEGRAM ANTES DE IQ OPTION
+    # --------------------------------------------------------
+
     telegram_thread = threading.Thread(
         target=telegram_worker,
         name="telegram-worker",
@@ -1364,6 +1884,10 @@ def main() -> None:
     )
 
     telegram_thread.start()
+
+    # --------------------------------------------------------
+    # CONEXIÓN IQ OPTION
+    # --------------------------------------------------------
 
     try:
 
@@ -1375,20 +1899,25 @@ def main() -> None:
             "No se pudo conectar a IQ Option."
         )
 
+        # Este mensaje NO es un análisis.
+        # Informa únicamente de un error de conexión.
         telegram_send(
             "❌ ERROR IQ OPTION\n\n"
             f"{exc}\n\n"
-            "Telegram continúa activo: usa /status o /stop."
+            "Telegram continúa activo."
         )
 
-        # No detener el proceso: el worker de Telegram permanece vivo
-        # y permite controlar el estado mientras IQ Option se recupera.
-
-    # Telegram queda reservado para control y para la operación realmente abierta.
+    # --------------------------------------------------------
+    # LOOP PRINCIPAL
+    # --------------------------------------------------------
 
     while True:
 
         try:
+
+            # ----------------------------------------------
+            # BOT DETENIDO
+            # ----------------------------------------------
 
             if not BOT_RUNNING:
 
@@ -1398,13 +1927,21 @@ def main() -> None:
 
                 continue
 
+            # ----------------------------------------------
+            # CONEXIÓN
+            # ----------------------------------------------
+
             if not ensure_connection():
 
                 time.sleep(
-                    1
+                    1.0
                 )
 
                 continue
+
+            # ----------------------------------------------
+            # ANALIZAR Y EJECUTAR
+            # ----------------------------------------------
 
             analyze_all_pairs()
 
