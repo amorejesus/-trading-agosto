@@ -1,394 +1,202 @@
 from __future__ import annotations
 
-import logging
-import os
-import threading
-import time
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, Optional
 import pandas as pd
-import requests
-
-from iqoptionapi.stable_api import IQ_Option
-from strategy import (
-    analyze_live_candle,
-    analyze_market,
-)
 
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
-IQ_EMAIL = os.getenv("IQ_EMAIL")
-IQ_PASSWORD = os.getenv("IQ_PASSWORD")
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-
-TIMEFRAME = 60
-CANDLE_COUNT = 62
-
-AMOUNT = 116
-EXPIRATION = 1
-
-POLL_INTERVAL = 0.05
-MAX_ENTRY_DELAY = 5
-
-MIN_MARKET_SCORE = 82
-TOP_MARKETS_TO_LOG = 5
-
-ASSET_REFRESH_INTERVAL = 60
-
-TELEGRAM_POLL_INTERVAL = 1.0
-TELEGRAM_HTTP_TIMEOUT = 3.0
+MICRO_CANDLES_REQUIRED = 12
+FINAL_CONTROL_CANDLES = 3
+DOMINANCE_THRESHOLD = 0.25
+EFFICIENCY_THRESHOLD = 0.45
+MIN_RANGE_RATIO = 0.60
+CLOSE_POSITION_CALL = 0.65
+CLOSE_POSITION_PUT = 0.35
+PREVIOUS_M1_COUNT = 5
 
 
-# ============================================================
-# ESTADO GLOBAL
-# ============================================================
-
-BOT_RUNNING = False
-IQ: Optional[IQ_Option] = None
-
-PENDING_ENTRY: Optional[Dict[str, Any]] = None
-AVAILABLE_OTC_PAIRS: List[str] = []
-
-LAST_PROCESSED_MINUTE: Optional[int] = None
-LAST_TRADE_CANDLE: Optional[int] = None
-
-STREAMS_STARTED_FOR: Dict[str, bool] = {}
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-
-logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def telegram_send(msg: str):
-
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
+def _to_float(value: Any) -> Optional[float]:
     try:
-        requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
-            timeout=TELEGRAM_HTTP_TIMEOUT,
-        )
-        return True
-    except Exception:
-        return False
-
-
-# ============================================================
-# CONEXIÓN IQ
-# ============================================================
-
-def connect_iq():
-
-    global IQ
-
-    IQ = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
-    ok, reason = IQ.connect()
-
-    if not ok:
-        raise Exception(f"No conecta: {reason}")
-
-    logger.info("IQ conectado")
-
-
-def ensure_connection():
-
-    global IQ
-
-    try:
-        if IQ is None:
-            return connect_iq()
-
-        if IQ.check_connect():
-            return True
-
-        IQ.connect()
-        return True
-
-    except Exception:
-        return False
-
-
-# ============================================================
-# DATA REALTIME
-# ============================================================
-
-def realtime_dataframe(pair: str):
-
-    try:
-        candles = IQ.get_realtime_candles(pair, TIMEFRAME)
-
-        rows = []
-
-        for ts, c in candles.items():
-            rows.append({
-                "from": int(float(ts)),
-                "open": float(c["open"]),
-                "close": float(c["close"]),
-                "high": float(c["max"]),
-                "low": float(c["min"]),
-            })
-
-        df = pd.DataFrame(rows)
-        df.sort_values("from", inplace=True)
-        df.drop_duplicates("from", inplace=True)
-
-        return df.tail(CANDLE_COUNT)
-
-    except Exception:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
-# ============================================================
-# STREAM
-# ============================================================
+def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-def ensure_pair_stream(pair: str):
+    out = df.copy()
 
-    if STREAMS_STARTED_FOR.get(pair):
-        return True
+    rename = {}
+    if "max" in out.columns and "high" not in out.columns:
+        rename["max"] = "high"
+    if "min" in out.columns and "low" not in out.columns:
+        rename["min"] = "low"
+
+    if rename:
+        out.rename(columns=rename, inplace=True)
+
+    for col in ["open", "close", "high", "low", "from"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    out.dropna(subset=["open", "close", "from"], inplace=True)
+    out.sort_values("from", inplace=True)
+
+    # FIX: elimina duplicados reales de tiempo (evita falsas 12 velas)
+    out.drop_duplicates(subset=["from"], keep="last", inplace=True)
+
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+
+def _validate_5s_sequence(micro: pd.DataFrame) -> bool:
+    if len(micro) != MICRO_CANDLES_REQUIRED:
+        return False
+
+    if "from" not in micro.columns:
+        return False
+
+    timestamps = micro["from"].astype(int).tolist()
+
+    # FIX: asegura orden correcto y continuidad real
+    for i in range(1, len(timestamps)):
+        if timestamps[i] <= timestamps[i - 1]:
+            return False
+        if timestamps[i] - timestamps[i - 1] != 5:
+            return False
+
+    return True
+
+
+def _get_minute_micro_candles(candle_1m, candles_5s) -> pd.DataFrame:
+    micro = _normalize_5s(candles_5s)
+
+    if micro.empty:
+        return pd.DataFrame()
 
     try:
-        IQ.start_candles_stream(pair, TIMEFRAME, CANDLE_COUNT)
-        STREAMS_STARTED_FOR[pair] = True
-        return True
+        minute_timestamp = int(float(candle_1m["from"]))
     except:
-        return False
+        return pd.DataFrame()
+
+    start_time = minute_timestamp
+    end_time = minute_timestamp + 60
+
+    # FIX: asegura que solo use velas del minuto correcto
+    micro = micro[(micro["from"] >= start_time) & (micro["from"] < end_time)]
+
+    micro = micro.sort_values("from")
+    micro.drop_duplicates(subset=["from"], keep="last", inplace=True)
+    micro.reset_index(drop=True, inplace=True)
+
+    # FIX: evita señales con datos incompletos
+    if len(micro) != MICRO_CANDLES_REQUIRED:
+        return pd.DataFrame()
+
+    return micro
 
 
-# ============================================================
-# CIERRE DE VELA
-# ============================================================
+def _calculate_global_dominance(micro: pd.DataFrame) -> Dict[str, Any]:
+    result = {
+        "dominant": "neutral",
+        "buy_score": 0.0,
+        "sell_score": 0.0,
+        "dominance_ratio": 0.0,
+    }
 
-def get_closed_candle(df, server_ts):
+    if len(micro) != MICRO_CANDLES_REQUIRED:
+        return result
 
-    current_minute = (server_ts // TIMEFRAME) * TIMEFRAME
-    closed = df[df["from"] < current_minute]
+    buy = 0.0
+    sell = 0.0
 
-    if len(closed) == 0:
-        return None
+    for _, c in micro.iterrows():
+        o = _to_float(c["open"])
+        cl = _to_float(c["close"])
 
-    return closed.iloc[-1]
+        if o is None or cl is None:
+            return result
 
+        body = cl - o
 
-# ============================================================
-# ANALIZAR PAR
-# ============================================================
+        if body > 0:
+            buy += body
+        else:
+            sell += abs(body)
 
-def analyze_pair(pair, df, candle):
+    total = buy + sell
 
-    history = df[df["from"] <= candle["from"]]
+    if total <= 0:
+        return result
 
-    result = analyze_market(
-        candle,
-        previous_m1=history
-    )
+    ratio = abs(buy - sell) / total
 
-    result["pair"] = pair
-    result["minute_timestamp"] = candle["from"]
+    result["buy_score"] = buy
+    result["sell_score"] = sell
+    result["dominance_ratio"] = ratio
+
+    if ratio >= DOMINANCE_THRESHOLD:
+        result["dominant"] = "buyer" if buy > sell else "seller"
 
     return result
 
 
-# ============================================================
-# ANALIZAR TODOS
-# ============================================================
+def analyze_market(candle_1m, candles_5s, previous_m1=None):
 
-def analyze_all_markets(server_ts):
-
-    results = []
-
-    for pair in AVAILABLE_OTC_PAIRS:
-
-        if not BOT_RUNNING:
-            break
-
-        try:
-
-            ensure_pair_stream(pair)
-
-            df = realtime_dataframe(pair)
-            if df is None or len(df) < 10:
-                continue
-
-            closed = get_closed_candle(df, server_ts)
-            if closed is None:
-                continue
-
-            res = analyze_pair(pair, df, closed)
-
-            results.append(res)
-
-        except Exception:
-            continue
-
-    return results
-
-
-# ============================================================
-# SELECCIÓN
-# ============================================================
-
-def select_best_market(results):
-
-    valid = [
-        r for r in results
-        if r.get("valid") and r.get("score", 0) >= MIN_MARKET_SCORE
-    ]
-
-    if not valid:
-        return None
-
-    return sorted(valid, key=lambda x: x["score"], reverse=True)[0]
-
-
-# ============================================================
-# PENDING ENTRY
-# ============================================================
-
-def create_pending_entry(result):
-
-    global PENDING_ENTRY
-
-    pair = result["pair"]
-    signal = result["signal"]
-    minute_ts = result["minute_timestamp"]
-
-    PENDING_ENTRY = {
-        "pair": pair,
-        "signal": signal,
-        "minute_timestamp": minute_ts,
-        "next_timestamp": minute_ts + TIMEFRAME,
-        "score": result["score"],
-        "created_at": time.time(),
-        "entry_notified": False,
+    result = {
+        "signal": None,
+        "valid": False,
+        "reason": "sin señal",
     }
 
-    telegram_send(
-        f"🏆 MEJOR MERCADO\n{pair}\n{signal}\nScore {result['score']}\nN+1 activo"
-    )
+    micro = _get_minute_micro_candles(candle_1m, candles_5s)
+
+    if micro.empty:
+        result["reason"] = "micro inválido"
+        return result
+
+    if not _validate_5s_sequence(micro):
+        result["reason"] = "secuencia 5s inválida"
+        return result
+
+    dominance = _calculate_global_dominance(micro)
+
+    if dominance["dominant"] == "neutral":
+        result["reason"] = "sin dominancia"
+        return result
+
+    m1_open = _to_float(candle_1m.get("open"))
+    m1_close = _to_float(candle_1m.get("close"))
+
+    if m1_open is None or m1_close is None:
+        result["reason"] = "M1 inválido"
+        return result
+
+    # =========================
+    # ✔ LÓGICA ORIGINAL INTACTA
+    # =========================
+
+    if dominance["dominant"] == "buyer" and m1_close > m1_open:
+        result["signal"] = "call"
+        result["valid"] = True
+        result["reason"] = "CALL confirmada"
+        return result
+
+    if dominance["dominant"] == "seller" and m1_close < m1_open:
+        result["signal"] = "put"
+        result["valid"] = True
+        result["reason"] = "PUT confirmada"
+        return result
+
+    result["reason"] = "no confirma dirección"
+    return result
 
 
-# ============================================================
-# EJECUCIÓN
-# ============================================================
+def check_pattern(candles_5s):
+    candle_1m, micro = _build_strategy_inputs(candles_5s)
 
-def execute_pending_entry():
+    if candle_1m is None or micro is None:
+        return None
 
-    global PENDING_ENTRY
-    global LAST_TRADE_CANDLE
-
-    if not PENDING_ENTRY:
-        return False
-
-    ts = int(time.time())
-
-    if ts < PENDING_ENTRY["next_timestamp"]:
-        return False
-
-    if LAST_TRADE_CANDLE == PENDING_ENTRY["next_timestamp"]:
-        PENDING_ENTRY = None
-        return True
-
-    pair = PENDING_ENTRY["pair"]
-    signal = PENDING_ENTRY["signal"]
-
-    try:
-        ok, order_id = IQ.buy(
-            AMOUNT,
-            pair,
-            signal,
-            EXPIRATION
-        )
-
-        if ok:
-
-            LAST_TRADE_CANDLE = PENDING_ENTRY["next_timestamp"]
-
-            telegram_send(
-                f"✅ ENTRADA EJECUTADA\n{pair}\n{signal}\nID {order_id}"
-            )
-
-            PENDING_ENTRY = None
-
-            return True
-
-    except Exception:
-        pass
-
-    return False
-
-
-# ============================================================
-# CICLO
-# ============================================================
-
-def process_cycle():
-
-    server_ts = int(time.time())
-
-    execute_pending_entry()
-
-    results = analyze_all_markets(server_ts)
-
-    if not results:
-        return
-
-    best = select_best_market(results)
-
-    if best and not PENDING_ENTRY:
-        create_pending_entry(best)
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    global BOT_RUNNING
-
-    connect_iq()
-
-    BOT_RUNNING = True
-
-    telegram_send("🤖 BOT SNIPER ACTIVO")
-
-    while True:
-
-        if not BOT_RUNNING:
-            time.sleep(0.2)
-            continue
-
-        if not ensure_connection():
-            time.sleep(1)
-            continue
-
-        process_cycle()
-
-        time.sleep(POLL_INTERVAL)
-
-
-if __name__ == "__main__":
-    main()
+    return analyze_market(candle_1m, micro).get("signal")
