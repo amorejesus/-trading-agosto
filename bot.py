@@ -14,6 +14,39 @@ from strategy import analyze_market
 
 
 # ============================================================
+# CORRECCIÓN IQOPTIONAPI: DESACTIVAR HILO DIGITAL
+# ============================================================
+# Este bot utiliza BINARIAS/TURBO con expiración de 1 minuto.
+# Algunas versiones de iqoptionapi arrancan internamente el hilo
+# __get_digital_open(), que intenta leer datos DIGITAL y puede
+# recibir None desde IQ Option, provocando:
+# TypeError: 'NoneType' object is not subscriptable
+#
+# Se desactiva únicamente ese hilo interno. No afecta a:
+# - binarias/turbo
+# - velas M1
+# - descubrimiento OTC
+# - análisis
+# - ejecución buy()
+# ============================================================
+
+def _disabled_digital_open(
+    self,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    return None
+
+
+try:
+    IQ_Option._IQ_Option__get_digital_open = (
+        _disabled_digital_open
+    )
+except Exception:
+    pass
+
+
+# ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
@@ -43,7 +76,7 @@ CANDLE_COUNT = 60
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 300
+AMOUNT = 30
 EXPIRATION = 1
 
 
@@ -61,13 +94,6 @@ MAX_ENTRY_DELAY = 0.0
 
 TELEGRAM_POLL_INTERVAL = 1.0
 TELEGRAM_HTTP_TIMEOUT = 0.5
-
-# Telegram queda BLOQUEADO para análisis, escaneos, señales,
-# cancelaciones, reintentos, conexión y estado.
-# SOLO se permite el mensaje enviado después de que IQ Option
-# confirme que la operación binaria fue abierta correctamente.
-TELEGRAM_EXECUTION_ONLY = True
-TELEGRAM_EXECUTION_MARKER = "✅ OPERACIÓN ABIERTA"
 
 
 # ============================================================
@@ -112,13 +138,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def telegram_send(message: str) -> bool:
-
-    # BLOQUEO CENTRAL DE TELEGRAM:
-    # No enviar absolutamente ningún mensaje automático salvo
-    # el mensaje de una operación que YA fue abierta por IQ Option.
-    if TELEGRAM_EXECUTION_ONLY:
-        if TELEGRAM_EXECUTION_MARKER not in str(message):
-            return False
 
     if not TELEGRAM_TOKEN:
         return False
@@ -1036,12 +1055,16 @@ def execute_pending(
     LAST_TRADE_CANDLE[pair] = n1_timestamp
     PENDING_ENTRY.pop(pair, None)
 
-    # ÚNICO mensaje automático permitido en Telegram.
-    # Se ejecuta solamente después de que buy_binary() devuelve ok=True.
     telegram_send(
         "✅ OPERACIÓN ABIERTA\n\n"
         f"Par: {pair}\n"
-        f"Dirección: {signal.upper()}\n"
+        f"Dirección: {signal.upper()}\n\n"
+        "ANÁLISIS DE N CERRADA\n"
+        f"Timestamp N: {n_timestamp}\n"
+        f"Apertura N: {pending['minute_open']}\n"
+        f"Cierre N: {pending['minute_close']}\n\n"
+        "ENTRADA N+1\n"
+        f"Timestamp N+1: {n1_timestamp}\n\n"
         f"💵 Importe: ${AMOUNT}\n"
         "⏱ Expiración: 1 minuto\n"
         f"🆔 ID: {order_id}"
