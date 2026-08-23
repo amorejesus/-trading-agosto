@@ -28,7 +28,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 # ============================================================
-# TEMPORALIDADES
+# TEMPORALIDAD
 # ============================================================
 
 TIMEFRAME = 60
@@ -39,20 +39,15 @@ CANDLE_COUNT = 62
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 1160
+AMOUNT = 116
 EXPIRATION = 1
 
-
-# ============================================================
-# EJECUCIÓN
-# ============================================================
-
 POLL_INTERVAL = 0.05
-MAX_ENTRY_DELAY = 5  # N+1: segundos 00-05
+MAX_ENTRY_DELAY = 5
 
 
 # ============================================================
-# SELECCIÓN DEL MERCADO
+# MERCADOS
 # ============================================================
 
 MIN_MARKET_SCORE = 82
@@ -73,27 +68,18 @@ TELEGRAM_HTTP_TIMEOUT = 3.0
 # ============================================================
 
 BOT_RUNNING = False
-
 IQ: Optional[IQ_Option] = None
-
 LAST_UPDATE_ID: Optional[int] = None
 
 AVAILABLE_OTC_PAIRS: List[str] = []
-
 LAST_ASSET_REFRESH = 0.0
-
 STREAMS_STARTED_FOR: Dict[str, bool] = {}
 
 LAST_PROCESSED_MINUTE: Optional[int] = None
-
 PENDING_ENTRY: Optional[Dict[str, Any]] = None
-
 LAST_TRADE_CANDLE: Optional[int] = None
 
 LIVE_M1_STATE: Dict[str, Dict[str, Any]] = {}
-
-# ===================== SNIPER =====================
-SNIPER_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================
@@ -102,11 +88,7 @@ SNIPER_STATE: Dict[str, Dict[str, Any]] = {}
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +105,7 @@ def telegram_send(message: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
     try:
-        response = requests.post(
+        r = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -131,9 +113,9 @@ def telegram_send(message: str) -> bool:
             },
             timeout=TELEGRAM_HTTP_TIMEOUT,
         )
-        return response.status_code == 200
+        return r.status_code == 200
     except Exception as exc:
-        logger.warning("Telegram no disponible: %s", exc)
+        logger.warning("Telegram error: %s", exc)
         return False
 
 
@@ -142,13 +124,10 @@ def telegram_send(message: str) -> bool:
 # ============================================================
 
 def telegram_worker() -> None:
-    global LAST_UPDATE_ID
-    global BOT_RUNNING
+    global LAST_UPDATE_ID, BOT_RUNNING
 
     if not TELEGRAM_TOKEN:
         return
-
-    logger.info("Telegram worker iniciado.")
 
     while True:
         try:
@@ -158,203 +137,181 @@ def telegram_worker() -> None:
             if LAST_UPDATE_ID is not None:
                 params["offset"] = LAST_UPDATE_ID + 1
 
-            response = requests.get(
-                url,
-                params=params,
-                timeout=TELEGRAM_HTTP_TIMEOUT,
-            )
-
-            if response.status_code != 200:
+            r = requests.get(url, params=params, timeout=TELEGRAM_HTTP_TIMEOUT)
+            if r.status_code != 200:
                 time.sleep(TELEGRAM_POLL_INTERVAL)
                 continue
 
-            data = response.json()
+            data = r.json()
             if not data.get("ok"):
-                time.sleep(TELEGRAM_POLL_INTERVAL)
                 continue
 
             for update in data.get("result", []):
                 LAST_UPDATE_ID = update.get("update_id")
 
-                message = update.get("message", {})
-                text = str(message.get("text", "")).strip().lower()
-                chat_id = str(message.get("chat", {}).get("id", ""))
+                msg = update.get("message", {})
+                text = str(msg.get("text", "")).strip().lower()
+                chat_id = str(msg.get("chat", {}).get("id", ""))
 
                 if chat_id != str(TELEGRAM_CHAT_ID):
                     continue
 
                 if text == "/start":
                     BOT_RUNNING = True
-                    telegram_send(
-                        "🟢 BOT ACTIVADO\n\n"
-                        "MODO MULTI-OTC + SNIPER\n"
-                        "Pre-señal y confirmación en vivo.\n"
-                        "Entrada solo en N+1."
-                    )
+                    telegram_send("🟢 BOT ACTIVADO")
 
                 elif text == "/stop":
                     BOT_RUNNING = False
                     telegram_send("🔴 BOT DETENIDO")
 
                 elif text == "/status":
-                    status = "🟢 ACTIVO" if BOT_RUNNING else "🔴 DETENIDO"
                     telegram_send(
-                        f"Estado: {status}\n"
-                        f"OTC: {len(AVAILABLE_OTC_PAIRS)}\n"
-                        f"Importe: ${AMOUNT}"
+                        f"Estado: {'ACTIVO' if BOT_RUNNING else 'DETENIDO'}\n"
+                        f"Mercados: {len(AVAILABLE_OTC_PAIRS)}\n"
+                        f"Score min: {MIN_MARKET_SCORE}"
                     )
 
         except Exception as exc:
-            logger.warning("Telegram worker: %s", exc)
+            logger.warning("Telegram worker error: %s", exc)
 
         time.sleep(TELEGRAM_POLL_INTERVAL)
 
 
 # ============================================================
-# TIMESTAMP
-# ============================================================
-
-def get_server_timestamp() -> Optional[int]:
-    if IQ is None:
-        return None
-    try:
-        return int(float(IQ.get_server_timestamp()))
-    except Exception:
-        return None
-
-
-# ============================================================
-# CONEXIÓN
+# IQ CONNECTION
 # ============================================================
 
 def connect_iq() -> bool:
     global IQ
 
+    if not IQ_EMAIL or not IQ_PASSWORD:
+        raise ValueError("Faltan credenciales")
+
     IQ = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
-    connected, _ = IQ.connect()
+    ok, reason = IQ.connect()
 
-    if not connected:
-        raise ConnectionError("No se pudo conectar")
+    if not ok:
+        raise ConnectionError(reason)
 
-    logger.info("IQ conectado.")
+    logger.info("IQ conectado")
     return True
 
 
 def ensure_connection() -> bool:
-    if IQ is None:
-        return connect_iq()
-    if IQ.check_connect():
-        return True
-    return connect_iq()
+    global IQ
 
-
-# ============================================================
-# STREAM
-# ============================================================
-
-def ensure_pair_stream(pair: str) -> bool:
-    if STREAMS_STARTED_FOR.get(pair):
-        return True
     try:
-        IQ.start_candles_stream(pair, TIMEFRAME, CANDLE_COUNT)
-        STREAMS_STARTED_FOR[pair] = True
-        return True
-    except:
+        if IQ is None:
+            return connect_iq()
+
+        if IQ.check_connect():
+            return True
+
+        return connect_iq()
+
+    except Exception as exc:
+        logger.error("Conexion error: %s", exc)
         return False
 
 
 # ============================================================
-# DATAFRAME
+# STREAMS Y DATA
 # ============================================================
 
-def realtime_dataframe(pair: str) -> Optional[pd.DataFrame]:
+def ensure_pair_stream(pair: str) -> bool:
+    if IQ is None:
+        return False
+
+    if STREAMS_STARTED_FOR.get(pair):
+        return True
+
     try:
-        candles = IQ.get_realtime_candles(pair, TIMEFRAME)
-        rows = []
-        for ts, c in candles.items():
+        IQ.start_candles_stream(pair, TIMEFRAME, CANDLE_COUNT)
+        STREAMS_STARTED_FOR[pair] = True
+        return True
+    except Exception:
+        return False
+
+
+def realtime_dataframe(pair: str) -> Optional[pd.DataFrame]:
+    if IQ is None:
+        return None
+
+    candles = IQ.get_realtime_candles(pair, TIMEFRAME)
+    if not candles:
+        return None
+
+    rows = []
+
+    for ts, c in candles.items():
+        try:
             rows.append({
                 "from": int(float(ts)),
                 "open": float(c["open"]),
                 "close": float(c["close"]),
-                "high": float(c["max"]),
-                "low": float(c["min"]),
+                "high": float(c.get("max", c.get("high"))),
+                "low": float(c.get("min", c.get("low"))),
             })
-        df = pd.DataFrame(rows)
-        df.sort_values("from", inplace=True)
-        return df.tail(CANDLE_COUNT)
-    except:
+        except Exception:
+            continue
+
+    df = pd.DataFrame(rows)
+    df.sort_values("from", inplace=True)
+    df.drop_duplicates(subset=["from"], keep="last", inplace=True)
+
+    return df.tail(CANDLE_COUNT)
+
+
+# ============================================================
+# LIVE + CIERRE
+# ============================================================
+
+def get_closed_candle(df: pd.DataFrame, ts: int):
+    current_minute = (ts // TIMEFRAME) * TIMEFRAME
+    valid = df[df["from"] < current_minute]
+    if len(valid) == 0:
         return None
+    return valid.iloc[-1]
+
+
+def analyze_all_markets(server_ts: int):
+    results = []
+
+    for pair in AVAILABLE_OTC_PAIRS:
+        if not BOT_RUNNING:
+            break
+
+        if not ensure_pair_stream(pair):
+            continue
+
+        df = realtime_dataframe(pair)
+        if df is None:
+            continue
+
+        closed = get_closed_candle(df, server_ts)
+        if closed is None:
+            continue
+
+        history = df[df["from"] <= closed["from"]]
+        res = analyze_market(closed, previous_m1=history)
+
+        res["pair"] = pair
+        results.append(res)
+
+    return results
 
 
 # ============================================================
-# 🔥 MONITOR SNIPER
-# ============================================================
-
-def monitor_live_market(pair, df, server_ts):
-
-    live = df.iloc[-1]
-    live_ts = int(live["from"])
-    current_minute = (server_ts // 60) * 60
-
-    if live_ts != current_minute:
-        return None
-
-    live_analysis = analyze_live_candle(live)
-    sec = int(server_ts - live_ts)
-
-    # INIT
-    if pair not in SNIPER_STATE:
-        SNIPER_STATE[pair] = {
-            "pre": False,
-            "confirm": False,
-            "direction": None,
-            "timestamp": live_ts,
-        }
-
-    sniper = SNIPER_STATE[pair]
-
-    if sniper["timestamp"] != live_ts:
-        sniper.update({
-            "pre": False,
-            "confirm": False,
-            "direction": None,
-            "timestamp": live_ts,
-        })
-
-    # ================= PRE-SEÑAL =================
-    if 5 <= sec <= 25 and not sniper["pre"]:
-        if live_analysis["state"] == "LIVE_CONTINUITY":
-            sniper["pre"] = True
-            sniper["direction"] = live_analysis["direction"]
-            logger.info("%s | PRE-SEÑAL %s", pair, sniper["direction"])
-
-    # ================= CONFIRMACIÓN =================
-    if 25 <= sec <= 45 and sniper["pre"] and not sniper["confirm"]:
-        if live_analysis["score"] >= 10:
-            sniper["confirm"] = True
-            logger.info("%s | CONFIRMADO %s", pair, sniper["direction"])
-
-    return live_analysis
-
-
-# ============================================================
-# SELECCIÓN CON SNIPER
+# SELECCIÓN
 # ============================================================
 
 def select_best_market(results):
-
-    valid = []
-
-    for r in results:
-        if not (r.get("valid") and r.get("score", 0) >= MIN_MARKET_SCORE):
-            continue
-
-        sniper = SNIPER_STATE.get(r.get("pair"), {})
-
-        if not sniper.get("confirm"):
-            continue
-
-        valid.append(r)
+    valid = [
+        r for r in results
+        if r.get("valid")
+        and r.get("signal") in ("call", "put")
+        and r.get("score", 0) >= MIN_MARKET_SCORE
+    ]
 
     if not valid:
         return None
@@ -363,41 +320,50 @@ def select_best_market(results):
 
 
 # ============================================================
-# MAIN LOOP (resumido)
+# CICLO PRINCIPAL
+# ============================================================
+
+def process_market_cycle():
+    server_ts = int(time.time())
+
+    results = analyze_all_markets(server_ts)
+    if not results:
+        return
+
+    best = select_best_market(results)
+
+    if not best:
+        return
+
+    telegram_send(
+        f"🏆 MEJOR MERCADO\n"
+        f"{best['pair']} | {best['signal']} | {best['score']}"
+    )
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
+    global BOT_RUNNING
 
     connect_iq()
 
-    threading.Thread(
-        target=telegram_worker,
-        daemon=True
-    ).start()
+    threading.Thread(target=telegram_worker, daemon=True).start()
+
+    telegram_send("🤖 BOT LISTO")
 
     while True:
-
         if not BOT_RUNNING:
             time.sleep(0.2)
             continue
 
         if not ensure_connection():
+            time.sleep(1)
             continue
 
-        server_ts = get_server_timestamp()
-        if not server_ts:
-            continue
-
-        for pair in AVAILABLE_OTC_PAIRS:
-
-            ensure_pair_stream(pair)
-
-            df = realtime_dataframe(pair)
-            if df is None or len(df) < 10:
-                continue
-
-            monitor_live_market(pair, df, server_ts)
-
+        process_market_cycle()
         time.sleep(POLL_INTERVAL)
 
 
