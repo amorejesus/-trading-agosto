@@ -33,6 +33,12 @@ import pandas as pd
 # - mechas
 # - fuerza
 # - continuidad
+# - presión compradora/vendedora
+# - microestructura de velas de 5 segundos
+# - momentum
+# - aceleración
+# - retrocesos
+# - extensión respecto al ATR
 #
 # La señal definitiva se genera utilizando la M1 cerrada.
 # La entrada corresponde a N+1.
@@ -67,6 +73,24 @@ MAX_CONFIRMATION_RANGE_ATR = 1.60
 MAX_CONFIRMATION_BODY_ATR = 1.20
 
 SR_TOLERANCE_ATR = 0.35
+
+
+# ============================================================
+# CONFIGURACIÓN ANÁLISIS EN VIVO
+# ============================================================
+
+LIVE_MIN_BODY_RATIO = 0.35
+LIVE_STRONG_BODY_RATIO = 0.55
+LIVE_FORCE_BODY_RATIO = 0.70
+
+LIVE_MIN_SCORE = 65
+LIVE_READY_SCORE = 75
+
+LIVE_MAX_RANGE_ATR = 1.35
+LIVE_MAX_BODY_ATR = 1.05
+
+LIVE_MICRO_MIN_CANDLES = 4
+LIVE_MICRO_STRONG_RATIO = 0.65
 
 
 # ============================================================
@@ -362,9 +386,7 @@ def analyze_structure(
 
         result["direction"] = "BULLISH"
         result["score"] = bullish_score
-        result["reason"] = (
-            "estructura alcista"
-        )
+        result["reason"] = "estructura alcista"
 
     elif (
         bearish_score >= MIN_STRUCTURE_SCORE
@@ -373,9 +395,7 @@ def analyze_structure(
 
         result["direction"] = "BEARISH"
         result["score"] = bearish_score
-        result["reason"] = (
-            "estructura bajista"
-        )
+        result["reason"] = "estructura bajista"
 
     else:
 
@@ -823,27 +843,289 @@ def confirmation_score(
 
 
 # ============================================================
+# MICROESTRUCTURA EN VIVO - VELAS 5 SEGUNDOS
+# ============================================================
+
+def _get_micro_candle_data(
+    candles_5s: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+
+    return safe_dataframe(candles_5s)
+
+
+def analyze_live_microstructure(
+    candles_5s: Optional[pd.DataFrame],
+    direction: str,
+) -> Dict[str, Any]:
+
+    result = {
+        "valid": False,
+        "direction": direction,
+        "score": 0,
+        "bullish_candles": 0,
+        "bearish_candles": 0,
+        "aligned_candles": 0,
+        "opposite_candles": 0,
+        "micro_trend": "NEUTRAL",
+        "momentum": 0.0,
+        "acceleration": 0.0,
+        "pullback": False,
+        "reason": "sin microestructura",
+    }
+
+    df = _get_micro_candle_data(candles_5s)
+
+    if len(df) < LIVE_MICRO_MIN_CANDLES:
+        result["reason"] = "pocas velas micro"
+        return result
+
+    work = df.tail(12).reset_index(drop=True)
+
+    bullish = 0
+    bearish = 0
+
+    for _, candle in work.iterrows():
+
+        data = get_candle_data(candle)
+
+        if data is None:
+            continue
+
+        if data["close"] > data["open"]:
+            bullish += 1
+
+        elif data["close"] < data["open"]:
+            bearish += 1
+
+    total_directional = bullish + bearish
+
+    if total_directional == 0:
+        result["reason"] = "microestructura neutral"
+        return result
+
+    if bullish > bearish:
+        micro_trend = "BULLISH"
+
+    elif bearish > bullish:
+        micro_trend = "BEARISH"
+
+    else:
+        micro_trend = "NEUTRAL"
+
+    result["bullish_candles"] = bullish
+    result["bearish_candles"] = bearish
+    result["micro_trend"] = micro_trend
+
+    if direction == "BULLISH":
+        aligned = bullish
+        opposite = bearish
+
+    elif direction == "BEARISH":
+        aligned = bearish
+        opposite = bullish
+
+    else:
+        aligned = 0
+        opposite = 0
+
+    result["aligned_candles"] = aligned
+    result["opposite_candles"] = opposite
+
+    alignment_ratio = aligned / max(
+        1,
+        total_directional,
+    )
+
+    score = 0
+
+    # --------------------------------------------------------
+    # ALINEACIÓN DE VELAS MICRO
+    # --------------------------------------------------------
+
+    if alignment_ratio >= LIVE_MICRO_STRONG_RATIO:
+        score += 35
+
+    elif alignment_ratio >= 0.55:
+        score += 20
+
+    elif alignment_ratio >= 0.45:
+        score += 10
+
+    # --------------------------------------------------------
+    # MOMENTUM
+    # --------------------------------------------------------
+
+    first_close = float(
+        work.iloc[0]["close"]
+    )
+
+    last_close = float(
+        work.iloc[-1]["close"]
+    )
+
+    price_change = (
+        last_close - first_close
+    )
+
+    if direction == "BULLISH":
+        momentum = price_change
+
+    elif direction == "BEARISH":
+        momentum = -price_change
+
+    else:
+        momentum = 0.0
+
+    result["momentum"] = momentum
+
+    if momentum > 0:
+        score += 20
+
+    # --------------------------------------------------------
+    # ACELERACIÓN
+    # --------------------------------------------------------
+
+    half = max(
+        2,
+        len(work) // 2,
+    )
+
+    first_half = work.iloc[:half]
+    second_half = work.iloc[half:]
+
+    first_move = abs(
+        float(first_half.iloc[-1]["close"])
+        - float(first_half.iloc[0]["open"])
+    )
+
+    second_move = abs(
+        float(second_half.iloc[-1]["close"])
+        - float(second_half.iloc[0]["open"])
+    )
+
+    acceleration = (
+        second_move - first_move
+    )
+
+    result["acceleration"] = acceleration
+
+    if acceleration > 0:
+        score += 15
+
+    # --------------------------------------------------------
+    # RETROCESO RECIENTE
+    # --------------------------------------------------------
+
+    recent = work.tail(3)
+
+    recent_opposite = 0
+
+    for _, candle in recent.iterrows():
+
+        opening = float(
+            candle["open"]
+        )
+
+        closing = float(
+            candle["close"]
+        )
+
+        if (
+            direction == "BULLISH"
+            and closing < opening
+        ):
+            recent_opposite += 1
+
+        elif (
+            direction == "BEARISH"
+            and closing > opening
+        ):
+            recent_opposite += 1
+
+    if recent_opposite >= 2:
+
+        result["pullback"] = True
+        score -= 20
+
+    result["score"] = max(
+        0,
+        min(100, score),
+    )
+
+    result["valid"] = (
+        result["score"] >= 45
+        and not result["pullback"]
+    )
+
+    if result["pullback"]:
+
+        result["reason"] = (
+            "retroceso micro fuerte"
+        )
+
+    elif result["score"] >= 65:
+
+        result["reason"] = (
+            "microestructura fuerte"
+        )
+
+    elif result["score"] >= 45:
+
+        result["reason"] = (
+            "microestructura aceptable"
+        )
+
+    else:
+
+        result["reason"] = (
+            "microestructura débil"
+        )
+
+    return result
+
+
+# ============================================================
 # ANÁLISIS DE VELA EN VIVO
 # ============================================================
 
 def analyze_live_candle(
     candle_1m: pd.Series,
+    candles_5s: Optional[pd.DataFrame] = None,
+    previous_m1: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
 
     result = {
         "direction": "NEUTRAL",
         "state": "INDEFINITION",
         "score": 0,
+        "live_ready": False,
+
         "open": None,
         "close": None,
         "high": None,
         "low": None,
+
         "range": 0.0,
         "body": 0.0,
+
         "body_ratio": 0.0,
         "upper_wick": 0.0,
         "lower_wick": 0.0,
+
+        "upper_wick_ratio": 0.0,
+        "lower_wick_ratio": 0.0,
+
         "close_position": 0.5,
+
+        "range_atr": 0.0,
+        "body_atr": 0.0,
+
+        "pressure": "NEUTRAL",
+        "rejection": False,
+        "extended": False,
+
+        "microstructure": {},
+        "reason": "sin análisis",
     }
 
     data = get_candle_data(
@@ -851,56 +1133,350 @@ def analyze_live_candle(
     )
 
     if data is None:
+        result["reason"] = "vela inválida"
         return result
 
     result.update(data)
 
+    # ========================================================
+    # DIRECCIÓN ACTUAL
+    # ========================================================
+
     if data["close"] > data["open"]:
+
         direction = "BULLISH"
+
     elif data["close"] < data["open"]:
+
         direction = "BEARISH"
+
     else:
+
         direction = "NEUTRAL"
 
     result["direction"] = direction
 
+    if direction == "NEUTRAL":
+
+        result["state"] = "DOJI"
+        result["reason"] = (
+            "precio en apertura"
+        )
+
+        return result
+
+    # ========================================================
+    # ATR
+    # ========================================================
+
+    historical = safe_dataframe(
+        previous_m1
+    )
+
+    atr = 0.0
+
+    if len(historical) >= 2:
+        atr = calculate_atr(
+            historical
+        )
+
+    if atr > 0:
+
+        result["range_atr"] = (
+            data["range"] / atr
+        )
+
+        result["body_atr"] = (
+            data["body"] / atr
+        )
+
+    # ========================================================
+    # SCORE DE FUERZA DE LA M1
+    # ========================================================
+
     score = 0
+    reasons = []
+
+    # --------------------------------------------------------
+    # CUERPO
+    # --------------------------------------------------------
+
+    if data["body_ratio"] >= LIVE_FORCE_BODY_RATIO:
+
+        score += 25
+
+    elif data["body_ratio"] >= LIVE_STRONG_BODY_RATIO:
+
+        score += 20
+
+    elif data["body_ratio"] >= LIVE_MIN_BODY_RATIO:
+
+        score += 12
+
+    else:
+
+        score += 3
+
+    # --------------------------------------------------------
+    # POSICIÓN DEL PRECIO
+    # --------------------------------------------------------
 
     if direction == "BULLISH":
 
-        if data["body_ratio"] >= 0.40:
-            score += 5
+        if data["close_position"] >= 0.85:
 
-        if data["close_position"] >= 0.65:
-            score += 5
+            score += 20
+            result["pressure"] = (
+                "BUYING_STRONG"
+            )
 
-        if data["upper_wick_ratio"] <= 0.30:
-            score += 3
+        elif data["close_position"] >= 0.65:
+
+            score += 14
+            result["pressure"] = (
+                "BUYING"
+            )
+
+        else:
+
+            score += 5
+            result["pressure"] = (
+                "BUYING_WEAK"
+            )
 
     elif direction == "BEARISH":
 
-        if data["body_ratio"] >= 0.40:
+        if data["close_position"] <= 0.15:
+
+            score += 20
+            result["pressure"] = (
+                "SELLING_STRONG"
+            )
+
+        elif data["close_position"] <= 0.35:
+
+            score += 14
+            result["pressure"] = (
+                "SELLING"
+            )
+
+        else:
+
+            score += 5
+            result["pressure"] = (
+                "SELLING_WEAK"
+            )
+
+    # --------------------------------------------------------
+    # RECHAZO POR MECHA CONTRARIA
+    # --------------------------------------------------------
+
+    if direction == "BULLISH":
+
+        if data["upper_wick_ratio"] <= 0.15:
+
+            score += 15
+
+        elif data["upper_wick_ratio"] <= 0.30:
+
+            score += 8
+
+        elif data["upper_wick_ratio"] >= 0.45:
+
+            score -= 20
+
+            result["rejection"] = True
+
+            reasons.append(
+                "rechazo superior"
+            )
+
+    elif direction == "BEARISH":
+
+        if data["lower_wick_ratio"] <= 0.15:
+
+            score += 15
+
+        elif data["lower_wick_ratio"] <= 0.30:
+
+            score += 8
+
+        elif data["lower_wick_ratio"] >= 0.45:
+
+            score -= 20
+
+            result["rejection"] = True
+
+            reasons.append(
+                "rechazo inferior"
+            )
+
+    # --------------------------------------------------------
+    # MECHA A FAVOR
+    # --------------------------------------------------------
+
+    if direction == "BULLISH":
+
+        if (
+            data["lower_wick_ratio"] >= 0.10
+            and data["lower_wick_ratio"] <= 0.35
+        ):
+
             score += 5
 
-        if data["close_position"] <= 0.35:
+    elif direction == "BEARISH":
+
+        if (
+            data["upper_wick_ratio"] >= 0.10
+            and data["upper_wick_ratio"] <= 0.35
+        ):
+
             score += 5
 
-        if data["lower_wick_ratio"] <= 0.30:
-            score += 3
+    # ========================================================
+    # EXTENSIÓN EXCESIVA
+    # ========================================================
 
-    if data["body_ratio"] <= DOJI_BODY_RATIO:
-        result["state"] = "DOJI"
+    if result["range_atr"] > LIVE_MAX_RANGE_ATR:
 
-    elif data["body_ratio"] <= INDECISION_BODY_RATIO:
-        result["state"] = "INDECISION"
+        result["extended"] = True
+        score -= 15
 
-    elif score >= 10:
-        result["state"] = "LIVE_CONTINUITY"
+        reasons.append(
+            "rango demasiado extendido"
+        )
 
-    else:
-        result["state"] = "MOVEMENT"
+    if result["body_atr"] > LIVE_MAX_BODY_ATR:
+
+        result["extended"] = True
+        score -= 10
+
+        reasons.append(
+            "cuerpo demasiado extendido"
+        )
+
+    # ========================================================
+    # MICROESTRUCTURA DE 5 SEGUNDOS
+    # ========================================================
+
+    micro = analyze_live_microstructure(
+        candles_5s,
+        direction,
+    )
+
+    result["microstructure"] = micro
+
+    score += int(
+        micro["score"] * 0.25
+    )
+
+    if micro["pullback"]:
+
+        score -= 10
+
+        reasons.append(
+            "retroceso reciente"
+        )
+
+    # ========================================================
+    # SCORE FINAL
+    # ========================================================
+
+    score = max(
+        0,
+        min(100, score),
+    )
 
     result["score"] = score
+
+    # ========================================================
+    # CLASIFICACIÓN DE ESTADO
+    # ========================================================
+
+    if data["body_ratio"] <= DOJI_BODY_RATIO:
+
+        result["state"] = "DOJI"
+
+        result["reason"] = (
+            "vela sin dirección definida"
+        )
+
+        return result
+
+    if data["body_ratio"] <= INDECISION_BODY_RATIO:
+
+        result["state"] = "INDECISION"
+
+        result["reason"] = (
+            "cuerpo insuficiente"
+        )
+
+        return result
+
+    if result["rejection"]:
+
+        result["state"] = "REJECTION"
+
+        result["reason"] = (
+            ", ".join(reasons)
+        )
+
+        return result
+
+    if result["extended"]:
+
+        result["state"] = "EXTENDED"
+
+        result["reason"] = (
+            ", ".join(reasons)
+        )
+
+        return result
+
+    if (
+        score >= LIVE_READY_SCORE
+        and micro["valid"]
+    ):
+
+        result["state"] = "LIVE_READY"
+
+        result["live_ready"] = True
+
+        result["reason"] = (
+            f"estructura en vivo fuerte "
+            f"score={score}"
+        )
+
+        return result
+
+    if score >= LIVE_MIN_SCORE:
+
+        result["state"] = "LIVE_STRONG"
+
+        result["reason"] = (
+            f"movimiento fuerte "
+            f"score={score}"
+        )
+
+        return result
+
+    if score >= 45:
+
+        result["state"] = "LIVE_MOVEMENT"
+
+        result["reason"] = (
+            f"movimiento en formación "
+            f"score={score}"
+        )
+
+        return result
+
+    result["state"] = "LIVE_WEAK"
+
+    result["reason"] = (
+        f"movimiento débil "
+        f"score={score}"
+    )
 
     return result
 
@@ -922,9 +1498,15 @@ def analyze_market(
         "direction": "NEUTRAL",
         "state": "NO_SIGNAL",
         "reason": "sin análisis",
+
         "minute_timestamp": None,
         "minute_open": None,
         "minute_close": None,
+
+        "live_analysis": {},
+        "live_score": 0,
+        "live_ready": False,
+
         "structure": {},
         "continuity": {},
         "confirmation": {},
@@ -933,9 +1515,11 @@ def analyze_market(
     }
 
     if candle_1m is None:
+
         result["reason"] = (
             "vela M1 no disponible"
         )
+
         return result
 
     current = get_candle_data(
@@ -943,27 +1527,51 @@ def analyze_market(
     )
 
     if current is None:
+
         result["reason"] = (
             "OHLC inválido"
         )
+
         return result
 
     if "from" in candle_1m.index:
+
         try:
+
             result["minute_timestamp"] = int(
                 float(candle_1m["from"])
             )
+
         except Exception:
             pass
 
     result["minute_open"] = current["open"]
     result["minute_close"] = current["close"]
 
+    # ========================================================
+    # ANÁLISIS EN VIVO
+    # ========================================================
+
+    live_analysis = analyze_live_candle(
+        candle_1m=candle_1m,
+        candles_5s=candles_5s,
+        previous_m1=previous_m1,
+    )
+
+    result["live_analysis"] = live_analysis
+    result["live_score"] = live_analysis["score"]
+    result["live_ready"] = live_analysis["live_ready"]
+
+    # ========================================================
+    # HISTORIAL
+    # ========================================================
+
     historical = safe_dataframe(
         previous_m1
     )
 
     if len(historical) == 0:
+
         historical = pd.DataFrame(
             [dict(candle_1m)]
         )
@@ -1002,6 +1610,10 @@ def analyze_market(
 
         return result
 
+    # ========================================================
+    # ESTRUCTURA
+    # ========================================================
+
     structure = analyze_structure(
         historical.iloc[:-1]
     )
@@ -1021,20 +1633,36 @@ def analyze_market(
 
         return result
 
+    # ========================================================
+    # CONTINUIDAD
+    # ========================================================
+
     continuity = check_continuity(
         historical.iloc[:-1],
         direction,
     )
+
+    # ========================================================
+    # CONFIRMACIÓN
+    # ========================================================
 
     confirmation = confirmation_score(
         historical,
         direction,
     )
 
+    # ========================================================
+    # AGOTAMIENTO
+    # ========================================================
+
     exhaustion = detect_end_of_trend(
         historical,
         direction,
     )
+
+    # ========================================================
+    # SOPORTE / RESISTENCIA
+    # ========================================================
 
     support_resistance = check_support_resistance(
         historical,
@@ -1044,13 +1672,14 @@ def analyze_market(
     result["continuity"] = continuity
     result["confirmation"] = confirmation
     result["exhaustion"] = exhaustion
+
     result[
         "support_resistance"
     ] = support_resistance
 
-    # --------------------------------------------------------
+    # ========================================================
     # SCORE BASE
-    # --------------------------------------------------------
+    # ========================================================
 
     score = 0
 
@@ -1085,9 +1714,9 @@ def analyze_market(
 
     result["score"] = score
 
-    # --------------------------------------------------------
+    # ========================================================
     # BLOQUEOS
-    # --------------------------------------------------------
+    # ========================================================
 
     if not continuity["valid"]:
 
@@ -1141,19 +1770,22 @@ def analyze_market(
 
         return result
 
-    # --------------------------------------------------------
-    # SEÑAL FINAL
-    # --------------------------------------------------------
+    # ========================================================
+    # SEÑAL FINAL PARA BOT.PY
+    # ========================================================
 
     if direction == "BULLISH":
 
         result["signal"] = "call"
         result["valid"] = True
-        result["state"] = "BULLISH_CONTINUITY"
+        result["state"] = (
+            "BULLISH_CONTINUITY"
+        )
 
         result["reason"] = (
             f"CALL continuidad alcista "
-            f"score={score}"
+            f"score={score} "
+            f"live={result['live_score']}"
         )
 
         return result
@@ -1162,11 +1794,14 @@ def analyze_market(
 
         result["signal"] = "put"
         result["valid"] = True
-        result["state"] = "BEARISH_CONTINUITY"
+        result["state"] = (
+            "BEARISH_CONTINUITY"
+        )
 
         result["reason"] = (
             f"PUT continuidad bajista "
-            f"score={score}"
+            f"score={score} "
+            f"live={result['live_score']}"
         )
 
         return result
@@ -1282,4 +1917,7 @@ if __name__ == "__main__":
     print("strategy.py cargado correctamente.")
     print(
         "Estrategia: MULTI MARKET CONTINUITY"
+    )
+    print(
+        "Análisis en vivo: M1 + microestructura 5s"
     )
