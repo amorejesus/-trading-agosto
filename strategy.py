@@ -1,287 +1,394 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import logging
+import os
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
+import requests
+
+from iqoptionapi.stable_api import IQ_Option
+from strategy import (
+    analyze_live_candle,
+    analyze_market,
+)
 
 
 # ============================================================
-# UTILIDADES
+# CONFIGURACIÓN
 # ============================================================
 
-def _to_float(value: Any) -> Optional[float]:
+IQ_EMAIL = os.getenv("IQ_EMAIL")
+IQ_PASSWORD = os.getenv("IQ_PASSWORD")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+TIMEFRAME = 60
+CANDLE_COUNT = 62
+
+AMOUNT = 116
+EXPIRATION = 1
+
+POLL_INTERVAL = 0.05
+MAX_ENTRY_DELAY = 5
+
+MIN_MARKET_SCORE = 82
+TOP_MARKETS_TO_LOG = 5
+
+ASSET_REFRESH_INTERVAL = 60
+
+TELEGRAM_POLL_INTERVAL = 1.0
+TELEGRAM_HTTP_TIMEOUT = 3.0
+
+
+# ============================================================
+# ESTADO GLOBAL
+# ============================================================
+
+BOT_RUNNING = False
+IQ: Optional[IQ_Option] = None
+
+PENDING_ENTRY: Optional[Dict[str, Any]] = None
+AVAILABLE_OTC_PAIRS: List[str] = []
+
+LAST_PROCESSED_MINUTE: Optional[int] = None
+LAST_TRADE_CANDLE: Optional[int] = None
+
+STREAMS_STARTED_FOR: Dict[str, bool] = {}
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_send(msg: str):
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=TELEGRAM_HTTP_TIMEOUT,
+        )
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================
+# CONEXIÓN IQ
+# ============================================================
+
+def connect_iq():
+
+    global IQ
+
+    IQ = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
+    ok, reason = IQ.connect()
+
+    if not ok:
+        raise Exception(f"No conecta: {reason}")
+
+    logger.info("IQ conectado")
+
+
+def ensure_connection():
+
+    global IQ
+
+    try:
+        if IQ is None:
+            return connect_iq()
+
+        if IQ.check_connect():
+            return True
+
+        IQ.connect()
+        return True
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# DATA REALTIME
+# ============================================================
+
+def realtime_dataframe(pair: str):
+
+    try:
+        candles = IQ.get_realtime_candles(pair, TIMEFRAME)
+
+        rows = []
+
+        for ts, c in candles.items():
+            rows.append({
+                "from": int(float(ts)),
+                "open": float(c["open"]),
+                "close": float(c["close"]),
+                "high": float(c["max"]),
+                "low": float(c["min"]),
+            })
+
+        df = pd.DataFrame(rows)
+        df.sort_values("from", inplace=True)
+        df.drop_duplicates("from", inplace=True)
+
+        return df.tail(CANDLE_COUNT)
+
+    except Exception:
         return None
 
 
-def safe_dataframe(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+# ============================================================
+# STREAM
+# ============================================================
 
-    if df is None:
-        return pd.DataFrame()
+def ensure_pair_stream(pair: str):
 
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame()
+    if STREAMS_STARTED_FOR.get(pair):
+        return True
 
-    if len(df) == 0:
-        return pd.DataFrame()
+    try:
+        IQ.start_candles_stream(pair, TIMEFRAME, CANDLE_COUNT)
+        STREAMS_STARTED_FOR[pair] = True
+        return True
+    except:
+        return False
 
-    required = {"open", "close", "high", "low"}
 
-    if not required.issubset(df.columns):
-        return pd.DataFrame()
+# ============================================================
+# CIERRE DE VELA
+# ============================================================
 
-    result = df.copy()
+def get_closed_candle(df, server_ts):
 
-    for column in required:
-        result[column] = pd.to_numeric(
-            result[column],
-            errors="coerce",
+    current_minute = (server_ts // TIMEFRAME) * TIMEFRAME
+    closed = df[df["from"] < current_minute]
+
+    if len(closed) == 0:
+        return None
+
+    return closed.iloc[-1]
+
+
+# ============================================================
+# ANALIZAR PAR
+# ============================================================
+
+def analyze_pair(pair, df, candle):
+
+    history = df[df["from"] <= candle["from"]]
+
+    result = analyze_market(
+        candle,
+        previous_m1=history
+    )
+
+    result["pair"] = pair
+    result["minute_timestamp"] = candle["from"]
+
+    return result
+
+
+# ============================================================
+# ANALIZAR TODOS
+# ============================================================
+
+def analyze_all_markets(server_ts):
+
+    results = []
+
+    for pair in AVAILABLE_OTC_PAIRS:
+
+        if not BOT_RUNNING:
+            break
+
+        try:
+
+            ensure_pair_stream(pair)
+
+            df = realtime_dataframe(pair)
+            if df is None or len(df) < 10:
+                continue
+
+            closed = get_closed_candle(df, server_ts)
+            if closed is None:
+                continue
+
+            res = analyze_pair(pair, df, closed)
+
+            results.append(res)
+
+        except Exception:
+            continue
+
+    return results
+
+
+# ============================================================
+# SELECCIÓN
+# ============================================================
+
+def select_best_market(results):
+
+    valid = [
+        r for r in results
+        if r.get("valid") and r.get("score", 0) >= MIN_MARKET_SCORE
+    ]
+
+    if not valid:
+        return None
+
+    return sorted(valid, key=lambda x: x["score"], reverse=True)[0]
+
+
+# ============================================================
+# PENDING ENTRY
+# ============================================================
+
+def create_pending_entry(result):
+
+    global PENDING_ENTRY
+
+    pair = result["pair"]
+    signal = result["signal"]
+    minute_ts = result["minute_timestamp"]
+
+    PENDING_ENTRY = {
+        "pair": pair,
+        "signal": signal,
+        "minute_timestamp": minute_ts,
+        "next_timestamp": minute_ts + TIMEFRAME,
+        "score": result["score"],
+        "created_at": time.time(),
+        "entry_notified": False,
+    }
+
+    telegram_send(
+        f"🏆 MEJOR MERCADO\n{pair}\n{signal}\nScore {result['score']}\nN+1 activo"
+    )
+
+
+# ============================================================
+# EJECUCIÓN
+# ============================================================
+
+def execute_pending_entry():
+
+    global PENDING_ENTRY
+    global LAST_TRADE_CANDLE
+
+    if not PENDING_ENTRY:
+        return False
+
+    ts = int(time.time())
+
+    if ts < PENDING_ENTRY["next_timestamp"]:
+        return False
+
+    if LAST_TRADE_CANDLE == PENDING_ENTRY["next_timestamp"]:
+        PENDING_ENTRY = None
+        return True
+
+    pair = PENDING_ENTRY["pair"]
+    signal = PENDING_ENTRY["signal"]
+
+    try:
+        ok, order_id = IQ.buy(
+            AMOUNT,
+            pair,
+            signal,
+            EXPIRATION
         )
 
-    result.dropna(subset=list(required), inplace=True)
-    result.reset_index(drop=True, inplace=True)
+        if ok:
 
-    return result
+            LAST_TRADE_CANDLE = PENDING_ENTRY["next_timestamp"]
 
+            telegram_send(
+                f"✅ ENTRADA EJECUTADA\n{pair}\n{signal}\nID {order_id}"
+            )
 
-# ============================================================
-# ATR
-# ============================================================
+            PENDING_ENTRY = None
 
-def calculate_atr(df: pd.DataFrame) -> float:
+            return True
 
-    df = safe_dataframe(df)
+    except Exception:
+        pass
 
-    if len(df) < 2:
-        return 0.0
-
-    prev_close = df["close"].shift(1)
-
-    tr1 = df["high"] - df["low"]
-    tr2 = (df["high"] - prev_close).abs()
-    tr3 = (df["low"] - prev_close).abs()
-
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr = tr.rolling(14).mean().iloc[-1]
-
-    if pd.isna(atr):
-        return 0.0
-
-    return float(atr)
+    return False
 
 
 # ============================================================
-# DATOS DE VELA
+# CICLO
 # ============================================================
 
-def get_candle_data(candle: pd.Series):
+def process_cycle():
 
-    try:
-        o = float(candle["open"])
-        c = float(candle["close"])
-        h = float(candle["high"])
-        l = float(candle["low"])
-    except:
-        return None
+    server_ts = int(time.time())
 
-    rng = h - l
-    body = abs(c - o)
+    execute_pending_entry()
 
-    return {
-        "open": o,
-        "close": c,
-        "high": h,
-        "low": l,
-        "range": rng,
-        "body": body,
-        "body_ratio": body / rng if rng else 0,
-    }
+    results = analyze_all_markets(server_ts)
+
+    if not results:
+        return
+
+    best = select_best_market(results)
+
+    if best and not PENDING_ENTRY:
+        create_pending_entry(best)
 
 
 # ============================================================
-# ESTRUCTURA (SIN CAMBIOS)
+# MAIN
 # ============================================================
 
-def analyze_structure(df: pd.DataFrame) -> Dict[str, Any]:
+def main():
 
-    df = safe_dataframe(df)
+    global BOT_RUNNING
 
-    if len(df) < 10:
-        return {
-            "direction": "NEUTRAL",
-            "score": 0,
-        }
+    connect_iq()
 
-    closes = df["close"].tolist()
+    BOT_RUNNING = True
 
-    bullish = sum(closes[i] > closes[i-1] for i in range(1, len(closes)))
-    bearish = sum(closes[i] < closes[i-1] for i in range(1, len(closes)))
+    telegram_send("🤖 BOT SNIPER ACTIVO")
 
-    if bullish > bearish:
-        return {"direction": "BULLISH", "score": bullish}
+    while True:
 
-    if bearish > bullish:
-        return {"direction": "BEARISH", "score": bearish}
+        if not BOT_RUNNING:
+            time.sleep(0.2)
+            continue
 
-    return {"direction": "NEUTRAL", "score": 0}
+        if not ensure_connection():
+            time.sleep(1)
+            continue
 
+        process_cycle()
 
-# ============================================================
-# CONTINUIDAD (SIN CAMBIOS)
-# ============================================================
-
-def check_continuity(df: pd.DataFrame, direction: str):
-
-    df = safe_dataframe(df)
-
-    closes = df["close"].tolist()
-
-    score = 0
-
-    if direction == "BULLISH":
-        score = sum(closes[i] >= closes[i-1] for i in range(1, len(closes)))
-
-    if direction == "BEARISH":
-        score = sum(closes[i] <= closes[i-1] for i in range(1, len(closes)))
-
-    return {
-        "score": score,
-        "valid": score >= 3,
-    }
+        time.sleep(POLL_INTERVAL)
 
 
-# ============================================================
-# CONFIRMACIÓN (SIN CAMBIOS)
-# ============================================================
-
-def confirmation_score(df: pd.DataFrame, direction: str):
-
-    df = safe_dataframe(df)
-
-    last = df.iloc[-1]
-
-    body = abs(last["close"] - last["open"])
-
-    valid = body > 0
-
-    return {
-        "score": 10 if valid else 0,
-        "valid": valid,
-    }
-
-
-# ============================================================
-# 🧠 NUEVO: IMPULSO TEMPRANO SNIPER
-# ============================================================
-
-def detect_early_impulse(df: pd.DataFrame) -> Dict[str, Any]:
-
-    df = safe_dataframe(df)
-
-    result = {
-        "early": False,
-        "blocked": False,
-        "reason": ""
-    }
-
-    if len(df) < 6:
-        result["reason"] = "sin datos"
-        return result
-
-    # VELAS 1–2–3
-    first = df.tail(3)
-
-    opens = first["open"].tolist()
-    closes = first["close"].tolist()
-
-    bodies = [abs(c - o) for o, c in zip(opens, closes)]
-
-    strong_start = bodies[0] > bodies[1] and bodies[0] > 0
-    continuation = bodies[1] >= bodies[0] * 0.7
-
-    if not (strong_start and continuation):
-        result["reason"] = "sin impulso temprano"
-        return result
-
-    # 🚨 BLOQUEO: IMPULSO TARDÍO (VELA 4+)
-    if len(df) >= 6:
-
-        early = abs(df.iloc[-4]["close"] - df.iloc[-4]["open"])
-        late = abs(df.iloc[-1]["close"] - df.iloc[-1]["open"])
-
-        if late > early * 1.5:
-            result["blocked"] = True
-            result["reason"] = "impulso tardío (vela 4+)"
-            return result
-
-    result["early"] = True
-    result["reason"] = "impulso temprano válido"
-
-    return result
-
-
-# ============================================================
-# ANÁLISIS LIVE
-# ============================================================
-
-def analyze_live_candle(candle):
-
-    o = float(candle["open"])
-    c = float(candle["close"])
-
-    return {
-        "direction": "BULLISH" if c > o else "BEARISH",
-        "score": 10,
-        "state": "LIVE_CONTINUITY"
-    }
-
-
-# ============================================================
-# ANÁLISIS PRINCIPAL
-# ============================================================
-
-def analyze_market(
-    candle_1m,
-    candles_5s=None,
-    previous_m1=None
-):
-
-    df = safe_dataframe(previous_m1)
-
-    structure = analyze_structure(df)
-    continuity = check_continuity(df, structure["direction"])
-    confirmation = confirmation_score(df, structure["direction"])
-    early = detect_early_impulse(df)   # 🔥 NUEVO
-
-    score = (
-        structure["score"] +
-        continuity["score"] +
-        confirmation["score"]
-    )
-
-    valid = (
-        continuity["valid"]
-        and confirmation["valid"]
-        and not early["blocked"]   # 🚨 BLOQUEO SNIPER
-    )
-
-    return {
-        "signal": "call" if structure["direction"] == "BULLISH" else "put",
-        "valid": valid,
-        "score": score,
-        "direction": structure["direction"],
-        "structure": structure,
-        "continuity": continuity,
-        "confirmation": confirmation,
-        "early_impulse": early   # 🔥 NUEVO
-    }
-
-
-# ============================================================
-# COMPATIBILIDAD
-# ============================================================
-
-def get_signal(*args, **kwargs):
-    return analyze_market(*args, **kwargs).get("signal")
+if __name__ == "__main__":
+    main()
