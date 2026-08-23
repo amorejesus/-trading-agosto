@@ -93,7 +93,7 @@ MAX_ENTRY_DELAY = 0.0
 # ============================================================
 
 TELEGRAM_POLL_INTERVAL = 1.0
-TELEGRAM_HTTP_TIMEOUT = 0.5
+TELEGRAM_HTTP_TIMEOUT = 5.0
 
 
 # ============================================================
@@ -208,7 +208,7 @@ def telegram_worker() -> None:
             )
 
             params: Dict[str, Any] = {
-                "timeout": 0,
+                "timeout": 1,
             }
 
             if LAST_UPDATE_ID is not None:
@@ -1354,6 +1354,17 @@ def main() -> None:
 
         return
 
+    # Telegram debe arrancar ANTES de conectar a IQ Option.
+    # Así /start, /stop y /status siguen funcionando aunque IQ Option
+    # tarde en conectar, falle la conexión o falle el descubrimiento OTC.
+    telegram_thread = threading.Thread(
+        target=telegram_worker,
+        name="telegram-worker",
+        daemon=True,
+    )
+
+    telegram_thread.start()
+
     try:
 
         connect_iq()
@@ -1366,19 +1377,14 @@ def main() -> None:
 
         telegram_send(
             "❌ ERROR IQ OPTION\n\n"
-            f"{exc}"
+            f"{exc}\n\n"
+            "Telegram continúa activo: usa /status o /stop."
         )
 
-        return
+        # No detener el proceso: el worker de Telegram permanece vivo
+        # y permite controlar el estado mientras IQ Option se recupera.
 
-    telegram_thread = threading.Thread(
-        target=telegram_worker,
-        daemon=True,
-    )
-
-    telegram_thread.start()
-
-    # Telegram queda reservado para la operación realmente abierta.
+    # Telegram queda reservado para control y para la operación realmente abierta.
 
     while True:
 
