@@ -43,7 +43,6 @@ def _normalize_5s(df: pd.DataFrame) -> pd.DataFrame:
     out.dropna(subset=["open", "close", "from"], inplace=True)
     out.sort_values("from", inplace=True)
 
-    # FIX: elimina duplicados reales de tiempo (evita falsas 12 velas)
     out.drop_duplicates(subset=["from"], keep="last", inplace=True)
 
     out.reset_index(drop=True, inplace=True)
@@ -59,7 +58,6 @@ def _validate_5s_sequence(micro: pd.DataFrame) -> bool:
 
     timestamps = micro["from"].astype(int).tolist()
 
-    # FIX: asegura orden correcto y continuidad real
     for i in range(1, len(timestamps)):
         if timestamps[i] <= timestamps[i - 1]:
             return False
@@ -83,14 +81,12 @@ def _get_minute_micro_candles(candle_1m, candles_5s) -> pd.DataFrame:
     start_time = minute_timestamp
     end_time = minute_timestamp + 60
 
-    # FIX: asegura que solo use velas del minuto correcto
     micro = micro[(micro["from"] >= start_time) & (micro["from"] < end_time)]
 
     micro = micro.sort_values("from")
     micro.drop_duplicates(subset=["from"], keep="last", inplace=True)
     micro.reset_index(drop=True, inplace=True)
 
-    # FIX: evita señales con datos incompletos
     if len(micro) != MICRO_CANDLES_REQUIRED:
         return pd.DataFrame()
 
@@ -173,10 +169,6 @@ def analyze_market(candle_1m, candles_5s, previous_m1=None):
         result["reason"] = "M1 inválido"
         return result
 
-    # =========================
-    # ✔ LÓGICA ORIGINAL INTACTA
-    # =========================
-
     if dominance["dominant"] == "buyer" and m1_close > m1_open:
         result["signal"] = "call"
         result["valid"] = True
@@ -191,6 +183,18 @@ def analyze_market(candle_1m, candles_5s, previous_m1=None):
 
     result["reason"] = "no confirma dirección"
     return result
+
+
+# ============================================================
+# 🔥 FIX IMPORTANTE: COMPATIBILIDAD CON BOT.PY
+# ============================================================
+
+def analyze_live_candle(*args, **kwargs):
+    """
+    🔧 FIX: compatibilidad con bot.py antiguo
+    NO cambia lógica, solo alias.
+    """
+    return analyze_market(*args, **kwargs)
 
 
 def check_pattern(candles_5s):
