@@ -41,7 +41,7 @@ CANDLE_COUNT = 62
 # OPERACIÓN
 # ============================================================
 
-AMOUNT = 116
+AMOUNT = 100
 EXPIRATION = 1
 
 
