@@ -41,51 +41,32 @@ CANDLE_COUNT = 62
 # MODO
 # ============================================================
 #
-# Este archivo funciona como SCANNER / GENERADOR / EJECUTOR
-# DE SEÑALES.
+# Este archivo funciona como SCANNER / GENERADOR DE SEÑALES.
 #
-# La estrategia analiza cada mercado.
+# NO envía señales de análisis a Telegram.
 #
-# Cuando una vela N cierra:
+# Telegram queda reservado para:
 #
-#   N cierra
-#      ↓
-#   analizar todos los OTC
-#      ↓
-#   obtener señales válidas
-#      ↓
-#   esperar/estar en N+1
-#      ↓
-#   ejecutar TODAS las señales válidas
-#
-# La estrategia continúa estando en strategy.py.
+#   - /start
+#   - /stop
+#   - /status
+#   - ejecución real de una operación
 #
 # ============================================================
 
 EXPIRATION = 1
-
-# Importe de cada operación.
-AMOUNT = 35
 
 
 # ============================================================
 # SCANNER
 # ============================================================
 
-# Número de workers concurrentes.
-#
-# No conviene poner un número exageradamente alto porque
-# todos los workers utilizan la misma conexión IQ.
-#
 MAX_WORKERS = 8
 
-# Score mínimo para considerar candidato.
 MIN_MARKET_SCORE = 82
 
-# Número de mercados mostrados en ranking.
 TOP_MARKETS_TO_LOG = 10
 
-# Actualización de activos.
 ASSET_REFRESH_INTERVAL = 60
 
 
@@ -128,21 +109,6 @@ LIVE_M1_STATE: Dict[
 LAST_PROCESSED_MINUTE: Optional[int] = None
 
 LAST_SIGNAL: Optional[Dict[str, Any]] = None
-
-# ============================================================
-# CONTROL DE OPERACIONES
-# ============================================================
-#
-# Guarda la última vela N ejecutada por cada par.
-#
-# Esto evita que un mismo mercado ejecute dos veces
-# la misma señal si process_market_cycle() vuelve a entrar
-# durante el mismo minuto.
-#
-LAST_EXECUTED_SIGNAL: Dict[str, int] = {}
-
-# Evita ejecuciones simultáneas desde distintos hilos.
-TRADE_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -306,9 +272,10 @@ def telegram_worker() -> None:
                     telegram_send(
                         "🟢 SCANNER ACTIVADO\n\n"
                         "MODO MULTI-OTC\n"
-                        "Analizando todos los OTC disponibles.\n"
-                        "Todas las señales válidas serán ejecutadas "
-                        "en N+1."
+                        "Analizando mercados OTC "
+                        "disponibles.\n"
+                        "Buscando la mejor estructura.\n"
+                        "Operación solo en el mejor candidato."
                     )
 
                 elif text == "/stop":
@@ -317,8 +284,7 @@ def telegram_worker() -> None:
 
                     telegram_send(
                         "🔴 SCANNER DETENIDO\n\n"
-                        "No se generarán nuevas señales "
-                        "ni nuevas operaciones."
+                        "No se generarán nuevas operaciones."
                     )
 
                 elif text == "/status":
@@ -343,9 +309,7 @@ def telegram_worker() -> None:
                         f"{len(AVAILABLE_OTC_PAIRS)}\n"
                         f"Expiración: "
                         f"{EXPIRATION} minuto\n"
-                        f"Importe: "
-                        f"{AMOUNT}\n"
-                        f"Última señal: "
+                        f"Último candidato: "
                         f"{signal_text}"
                     )
 
@@ -748,14 +712,6 @@ def ensure_pair_stream(
 
 def initialize_all_streams() -> None:
 
-    """
-    Inicializa todos los streams antes de comenzar
-    el escaneo.
-
-    Esto evita intentar crear streams repetidamente
-    durante cada ciclo.
-    """
-
     if IQ is None:
         return
 
@@ -1032,13 +988,6 @@ def scan_single_pair(
     server_ts: int,
 ) -> Optional[Dict[str, Any]]:
 
-    """
-    Analiza un único mercado.
-
-    Esta función es independiente para poder ejecutarse
-    mediante ThreadPoolExecutor.
-    """
-
     try:
 
         if not ensure_pair_stream(
@@ -1056,14 +1005,12 @@ def scan_single_pair(
         if len(df) < 10:
             return None
 
-        # Analizar vela viva.
         monitor_live_market(
             pair,
             df,
             server_ts,
         )
 
-        # Buscar última vela cerrada.
         closed_candle = (
             get_closed_candle(
                 df,
@@ -1100,24 +1047,6 @@ def scan_single_pair(
 def analyze_all_markets(
     server_ts: int,
 ) -> List[Dict[str, Any]]:
-
-    """
-    Antes:
-        PAR 1 → PAR 2 → PAR 3 → PAR 4...
-
-    Ahora:
-        PAR 1 ─┐
-        PAR 2 ─┤
-        PAR 3 ─┤
-        PAR 4 ─┤
-        PAR 5 ─┤
-        ...    ┘
-                 ↓
-            análisis paralelo
-
-    La estrategia continúa siendo exactamente
-    strategy.analyze_market().
-    """
 
     if not AVAILABLE_OTC_PAIRS:
         return []
@@ -1377,18 +1306,6 @@ def create_signal(
             "structure",
             {},
         ),
-        "recent_structure": result.get(
-            "recent_structure",
-            {},
-        ),
-        "impulse": result.get(
-            "impulse",
-            {},
-        ),
-        "late_trend": result.get(
-            "late_trend",
-            {},
-        ),
         "continuity": result.get(
             "continuity",
             {},
@@ -1416,7 +1333,19 @@ def create_signal(
 
 
 # ============================================================
-# MOSTRAR MEJOR MERCADO
+# GUARDAR MEJOR MERCADO
+# ============================================================
+#
+# IMPORTANTE:
+#
+# Esta función YA NO envía mensajes de análisis a Telegram.
+#
+# Solo guarda el candidato en LAST_SIGNAL.
+#
+# Cuando exista la ejecución real mediante IQ.buy(),
+# el mensaje de Telegram debe enviarse desde el punto
+# exacto donde IQ.buy() confirme la operación.
+#
 # ============================================================
 
 def publish_best_market(
@@ -1439,26 +1368,6 @@ def publish_best_market(
         else "PUT 🔴"
     )
 
-    structure = signal[
-        "structure"
-    ]
-
-    continuity = signal[
-        "continuity"
-    ]
-
-    confirmation = signal[
-        "confirmation"
-    ]
-
-    exhaustion = signal[
-        "exhaustion"
-    ]
-
-    sr = signal[
-        "support_resistance"
-    ]
-
     logger.info(
         "🏆 MEJOR MERCADO | %s | %s | "
         "score=%s",
@@ -1466,346 +1375,6 @@ def publish_best_market(
         direction,
         signal["score"],
     )
-
-    telegram_send(
-        "🏆 MEJOR MERCADO\n\n"
-        f"Par: {pair}\n"
-        f"Dirección: {direction}\n"
-        f"Score: {signal['score']}/100\n\n"
-        "ESTRUCTURA\n"
-        f"{structure.get('reason')}\n"
-        f"Score: {structure.get('score')}\n\n"
-        "CONTINUIDAD\n"
-        f"{continuity.get('reason')}\n\n"
-        "CONFIRMACIÓN\n"
-        f"{confirmation.get('reason')}\n\n"
-        "AGOTAMIENTO\n"
-        f"{exhaustion.get('reason')}\n\n"
-        "SOPORTE / RESISTENCIA\n"
-        f"{sr.get('reason')}\n\n"
-        "🎯 SEÑAL N+1\n"
-        f"{signal['signal'].upper()}\n"
-        f"Timestamp N: "
-        f"{signal['minute_timestamp']}\n"
-        f"Expiración: "
-        f"{EXPIRATION} minuto"
-    )
-
-
-# ============================================================
-# EJECUTAR UNA OPERACIÓN
-# ============================================================
-
-def execute_signal(
-    signal: Dict[str, Any],
-    server_ts: int,
-) -> bool:
-
-    if IQ is None:
-        return False
-
-    pair = signal.get(
-        "pair"
-    )
-
-    action = signal.get(
-        "signal"
-    )
-
-    minute_timestamp = signal.get(
-        "minute_timestamp"
-    )
-
-    if not pair:
-        return False
-
-    if action not in (
-        "call",
-        "put",
-    ):
-        return False
-
-    if minute_timestamp is None:
-        return False
-
-    try:
-
-        minute_timestamp = int(
-            minute_timestamp
-        )
-
-    except Exception:
-
-        return False
-
-    current_minute = (
-        int(server_ts)
-        // TIMEFRAME
-    ) * TIMEFRAME
-
-    expected_entry_minute = (
-        minute_timestamp
-        + TIMEFRAME
-    )
-
-    # ========================================================
-    # LA SEÑAL DE N SE EJECUTA ÚNICAMENTE EN N+1
-    # ========================================================
-
-    if current_minute != expected_entry_minute:
-
-        logger.info(
-            "%s | señal descartada | "
-            "entrada fuera de N+1 | "
-            "N=%s | actual=%s | esperado=%s",
-            pair,
-            minute_timestamp,
-            current_minute,
-            expected_entry_minute,
-        )
-
-        return False
-
-    # ========================================================
-    # EVITAR DUPLICADOS
-    # ========================================================
-
-    with TRADE_LOCK:
-
-        last_executed = (
-            LAST_EXECUTED_SIGNAL.get(
-                pair
-            )
-        )
-
-        if last_executed == minute_timestamp:
-
-            logger.info(
-                "%s | señal N=%s ya ejecutada",
-                pair,
-                minute_timestamp,
-            )
-
-            return False
-
-        try:
-
-            logger.info(
-                "🎯 EJECUTANDO | %s | %s | "
-                "N=%s | entrada=N+1 | "
-                "amount=%s | expiration=%s",
-                pair,
-                action.upper(),
-                minute_timestamp,
-                AMOUNT,
-                EXPIRATION,
-            )
-
-            success, order_id = IQ.buy(
-                AMOUNT,
-                pair,
-                action,
-                EXPIRATION,
-            )
-
-            if not success:
-
-                logger.error(
-                    "%s | ERROR IQ.buy() | "
-                    "action=%s | order_id=%s",
-                    pair,
-                    action,
-                    order_id,
-                )
-
-                telegram_send(
-                    "❌ ERROR EJECUTANDO\n\n"
-                    f"Par: {pair}\n"
-                    f"Dirección: {action.upper()}\n"
-                    f"Importe: {AMOUNT}\n"
-                    f"N: {minute_timestamp}\n"
-                    f"Respuesta: {order_id}"
-                )
-
-                return False
-
-            # =================================================
-            # MARCAR COMO EJECUTADA SOLAMENTE SI IQ.buy()
-            # CONFIRMÓ LA OPERACIÓN.
-            # =================================================
-
-            LAST_EXECUTED_SIGNAL[
-                pair
-            ] = minute_timestamp
-
-            logger.info(
-                "✅ OPERACIÓN EJECUTADA | "
-                "%s | %s | "
-                "amount=%s | expiration=%s | "
-                "order_id=%s",
-                pair,
-                action.upper(),
-                AMOUNT,
-                EXPIRATION,
-                order_id,
-            )
-
-            telegram_send(
-                "🚀 OPERACIÓN EJECUTADA\n\n"
-                f"Par: {pair}\n"
-                f"Dirección: {action.upper()}\n"
-                f"Importe: {AMOUNT}\n"
-                f"Expiración: {EXPIRATION} minuto\n"
-                f"Timestamp N: {minute_timestamp}\n"
-                "Entrada: N+1\n"
-                f"Order ID: {order_id}"
-            )
-
-            return True
-
-        except Exception as exc:
-
-            logger.exception(
-                "%s | excepción ejecutando operación",
-                pair,
-            )
-
-            telegram_send(
-                "❌ EXCEPCIÓN EJECUTANDO\n\n"
-                f"Par: {pair}\n"
-                f"Dirección: {action.upper()}\n"
-                f"Error: {exc}"
-            )
-
-            return False
-
-
-# ============================================================
-# EJECUTAR TODAS LAS SEÑALES VÁLIDAS
-# ============================================================
-
-def execute_all_valid_signals(
-    results: List[Dict[str, Any]],
-    server_ts: int,
-) -> int:
-
-    executable = []
-
-    for result in results:
-
-        # ----------------------------------------------------
-        # LA ESTRATEGIA DEBE HABER VALIDADO LA OPERACIÓN
-        # ----------------------------------------------------
-
-        if not result.get(
-            "valid"
-        ):
-            continue
-
-        # ----------------------------------------------------
-        # SOLO CALL / PUT
-        # ----------------------------------------------------
-
-        if result.get(
-            "signal"
-        ) not in (
-            "call",
-            "put",
-        ):
-            continue
-
-        # ----------------------------------------------------
-        # SCORE MÍNIMO
-        # ----------------------------------------------------
-
-        score = int(
-            result.get(
-                "score",
-                0,
-            )
-        )
-
-        if score < MIN_MARKET_SCORE:
-            continue
-
-        executable.append(
-            result
-        )
-
-    if not executable:
-
-        logger.info(
-            "EXECUTION | no hay operaciones válidas."
-        )
-
-        return 0
-
-    # ========================================================
-    # ORDENAR POR SCORE
-    # ========================================================
-
-    executable.sort(
-        key=lambda item: int(
-            item.get(
-                "score",
-                0,
-            )
-        ),
-        reverse=True,
-    )
-
-    logger.info(
-        "🎯 OPERACIONES CANDIDATAS: %s",
-        len(executable),
-    )
-
-    for result in executable:
-
-        logger.info(
-            "📌 CANDIDATA | %s | %s | score=%s | "
-            "timestamp=%s",
-            result.get(
-                "pair"
-            ),
-            str(
-                result.get(
-                    "signal"
-                )
-            ).upper(),
-            result.get(
-                "score"
-            ),
-            result.get(
-                "minute_timestamp"
-            ),
-        )
-
-    # ========================================================
-    # EJECUTAR TODAS
-    # ========================================================
-
-    executed = 0
-
-    for result in executable:
-
-        signal = create_signal(
-            result
-        )
-
-        if execute_signal(
-            signal,
-            server_ts,
-        ):
-
-            executed += 1
-
-    logger.info(
-        "EXECUTION | %s/%s operaciones ejecutadas.",
-        executed,
-        len(executable),
-    )
-
-    return executed
 
 
 # ============================================================
@@ -1841,8 +1410,6 @@ def process_market_cycle() -> None:
 
     refresh_otc_assets()
 
-    # Si aparecen nuevos pares,
-    # se intenta iniciar su stream.
     initialize_all_streams()
 
     results = analyze_all_markets(
@@ -1860,46 +1427,20 @@ def process_market_cycle() -> None:
         results
     )
 
-    # ========================================================
-    # BUSCAR TODAS LAS SEÑALES VÁLIDAS
-    # ========================================================
-
-    valid_signals = []
-
-    for result in results:
-
-        if not result.get(
-            "valid"
-        ):
-            continue
-
-        if result.get(
-            "signal"
-        ) not in (
-            "call",
-            "put",
-        ):
-            continue
-
-        score = int(
-            result.get(
-                "score",
-                0,
-            )
+    best_market = (
+        select_best_market(
+            results
         )
-
-        if score < MIN_MARKET_SCORE:
-            continue
-
-        valid_signals.append(
-            result
-        )
+    )
 
     # ========================================================
-    # SIN SEÑALES
+    # SIN OPERACIÓN
     # ========================================================
-
-    if not valid_signals:
+    #
+    # IMPORTANTE:
+    # NO se envía absolutamente nada a Telegram.
+    #
+    if best_market is None:
 
         LAST_SIGNAL = None
 
@@ -1909,119 +1450,18 @@ def process_market_cycle() -> None:
             MIN_MARKET_SCORE,
         )
 
-        telegram_send(
-            "🔎 MULTI-OTC\n\n"
-            f"Mercados analizados: "
-            f"{len(results)}\n\n"
-            "🚫 SIN SEÑAL\n"
-            "Ningún mercado alcanzó "
-            f"{MIN_MARKET_SCORE}/100."
-        )
-
         return
 
     # ========================================================
-    # ORDENAR SEÑALES
+    # HAY CANDIDATO
     # ========================================================
-
-    valid_signals.sort(
-        key=lambda item: (
-            int(
-                item.get(
-                    "score",
-                    0,
-                )
-            ),
-            int(
-                item.get(
-                    "structure",
-                    {},
-                ).get(
-                    "score",
-                    0,
-                )
-            ),
-            int(
-                item.get(
-                    "continuity",
-                    {},
-                ).get(
-                    "score",
-                    0,
-                )
-            ),
-            int(
-                item.get(
-                    "confirmation",
-                    {},
-                ).get(
-                    "score",
-                    0,
-                )
-            ),
-        ),
-        reverse=True,
-    )
-
-    logger.info(
-        "🎯 SEÑALES VÁLIDAS: %s",
-        len(valid_signals),
-    )
-
-    # ========================================================
-    # MOSTRAR TODAS LAS SEÑALES
-    # ========================================================
-
-    for index, result in enumerate(
-        valid_signals,
-        start=1,
-    ):
-
-        logger.info(
-            "SIGNAL #%s | %s | %s | "
-            "score=%s | N=%s",
-            index,
-            result.get(
-                "pair"
-            ),
-            str(
-                result.get(
-                    "signal"
-                )
-            ).upper(),
-            result.get(
-                "score"
-            ),
-            result.get(
-                "minute_timestamp"
-            ),
-        )
-
-    # ========================================================
-    # GUARDAR LA MEJOR PARA /STATUS
-    # ========================================================
-
+    #
+    # Se guarda únicamente internamente.
+    #
+    # NO se manda Telegram.
+    #
     publish_best_market(
-        valid_signals[0]
-    )
-
-    # ========================================================
-    # EJECUTAR TODAS LAS OPERACIONES
-    # ========================================================
-
-    executed = execute_all_valid_signals(
-        valid_signals,
-        server_ts,
-    )
-
-    logger.info(
-        "🏁 CICLO COMPLETADO | "
-        "mercados=%s | "
-        "señales=%s | "
-        "ejecutadas=%s",
-        len(results),
-        len(valid_signals),
-        executed,
+        best_market
     )
 
 
@@ -2054,10 +1494,6 @@ def main() -> None:
     )
 
     logger.info(
-        "EJECUCIÓN: TODAS LAS SEÑALES VÁLIDAS"
-    )
-
-    logger.info(
         "WORKERS: %s",
         MAX_WORKERS,
     )
@@ -2067,18 +1503,12 @@ def main() -> None:
     )
 
     logger.info(
-        "AMOUNT: %s",
-        AMOUNT,
-    )
-
-    logger.info(
-        "EXPIRATION: %s MINUTO",
-        EXPIRATION,
-    )
-
-    logger.info(
         "MIN SCORE: %s",
         MIN_MARKET_SCORE,
+    )
+
+    logger.info(
+        "TELEGRAM: SOLO CONTROL Y EJECUCIÓN"
     )
 
     logger.info(
@@ -2147,14 +1577,9 @@ def main() -> None:
         "⚡ Analiza mercados en paralelo\n"
         "👁 Monitorea M1 en vivo\n"
         "📊 Analiza vela cerrada\n"
-        "🏆 Compara todos los mercados\n"
-        "🎯 Ejecuta TODAS las señales válidas\n\n"
-        "La decisión de entrada sigue "
-        "siendo producida por strategy.py.\n"
-        f"Score mínimo: {MIN_MARKET_SCORE}/100\n"
-        f"Importe: {AMOUNT}\n"
-        f"Expiración: {EXPIRATION} minuto\n"
-        "Entrada: N+1"
+        "🏆 Compara todos los mercados\n\n"
+        "Telegram queda reservado "
+        "para la ejecución real."
     )
 
     while True:
