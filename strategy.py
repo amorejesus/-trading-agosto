@@ -4,10 +4,11 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIG
 # ============================================================
 
 MIN_CONTINUITY_BODY_RATIO = 0.40
+MIN_SCORE_TO_TRADE = 70   # 🔥 puedes subir a 80 o 85 para ultra sniper
 
 # ============================================================
 # UTILIDADES
@@ -78,18 +79,18 @@ def get_candle_data(candle):
     }
 
 # ============================================================
-# 🔥 MICRO CONTINUIDAD (CLAVE DEL BOT)
+# 🔥 MICRO CONTINUIDAD (BASE)
 # ============================================================
 
 def analyze_micro_continuity(candles_5s, direction):
     if not candles_5s or len(candles_5s) < 6:
-        return {"valid": False, "score": 0, "reason": "pocas velas 5s"}
+        return {"valid": False, "reason": "pocas velas 5s"}
 
     data = [get_candle_data(c) for c in candles_5s[:6]]
     data = [d for d in data if d]
 
     if len(data) < 6:
-        return {"valid": False, "score": 0, "reason": "datos incompletos"}
+        return {"valid": False, "reason": "datos incompletos"}
 
     same_color = 0
     strong_body = 0
@@ -99,15 +100,12 @@ def analyze_micro_continuity(candles_5s, direction):
         c = data[i]
         is_bull = c["close"] > c["open"]
 
-        # color dominante
         if (direction == "BULLISH" and is_bull) or (direction == "BEARISH" and not is_bull):
             same_color += 1
 
-        # cuerpo fuerte
         if c["body_ratio"] > MIN_CONTINUITY_BODY_RATIO:
             strong_body += 1
 
-        # progresión real
         if i > 0:
             prev = data[i - 1]
             if direction == "BULLISH" and c["close"] > prev["close"]:
@@ -116,9 +114,56 @@ def analyze_micro_continuity(candles_5s, direction):
                 progression += 1
 
     if same_color >= 4 and strong_body >= 3 and progression >= 3:
-        return {"valid": True, "score": same_color + strong_body + progression, "reason": "continuidad fuerte"}
+        return {"valid": True, "reason": "continuidad fuerte"}
 
-    return {"valid": False, "score": 0, "reason": "sin continuidad limpia"}
+    return {"valid": False, "reason": "sin continuidad limpia"}
+
+# ============================================================
+# 🧠 SCORE IA (PROBABILIDAD REAL)
+# ============================================================
+
+def calculate_ai_score(candles_5s, direction):
+    data = [get_candle_data(c) for c in candles_5s[:6]]
+    data = [d for d in data if d]
+
+    if len(data) < 6:
+        return 0
+
+    same_color = 0
+    strong_body = 0
+    progression = 0
+    clean_wicks = 0
+
+    for i in range(len(data)):
+        c = data[i]
+        is_bull = c["close"] > c["open"]
+
+        if (direction == "BULLISH" and is_bull) or (direction == "BEARISH" and not is_bull):
+            same_color += 1
+
+        if c["body_ratio"] > 0.5:
+            strong_body += 1
+
+        if direction == "BULLISH" and c["lower_wick_ratio"] < 0.25:
+            clean_wicks += 1
+        if direction == "BEARISH" and c["upper_wick_ratio"] < 0.25:
+            clean_wicks += 1
+
+        if i > 0:
+            prev = data[i - 1]
+            if direction == "BULLISH" and c["close"] > prev["close"]:
+                progression += 1
+            if direction == "BEARISH" and c["close"] < prev["close"]:
+                progression += 1
+
+    score = (
+        same_color * 15 +
+        strong_body * 10 +
+        progression * 10 +
+        clean_wicks * 8
+    )
+
+    return min(int(score / 2.5), 100)
 
 # ============================================================
 # 🔴 FILTRO ANTIRETROCESO
@@ -158,43 +203,46 @@ def analyze_market(candle_1m, candles_5s=None, previous_m1=None):
     if len(hist) < 6:
         return result
 
-    # ========================================================
-    # DIRECCIÓN REAL (M1)
-    # ========================================================
-
+    # DIRECCIÓN M1
     direction = "BULLISH" if hist["close"].iloc[-1] > hist["close"].iloc[0] else "BEARISH"
     result["direction"] = direction
 
-    # ========================================================
-    # 🔥 MICRO CONTINUIDAD (LO MÁS IMPORTANTE)
-    # ========================================================
-
+    # MICRO CONTINUIDAD
     micro = analyze_micro_continuity(candles_5s, direction)
-
     if not micro["valid"]:
         result["state"] = "NO_CONTINUITY"
         result["reason"] = micro["reason"]
         return result
 
-    # ========================================================
-    # 🔴 FILTRO DE RETROCESO
-    # ========================================================
+    # SCORE IA
+    ai_score = calculate_ai_score(candles_5s, direction)
+    result["score"] = ai_score
 
+    if ai_score < MIN_SCORE_TO_TRADE:
+        result["state"] = "LOW_PROBABILITY"
+        result["reason"] = f"score bajo ({ai_score})"
+        return result
+
+    # FILTRO WICK
     valid_wick, reason = wick_filter(current, direction)
     if not valid_wick:
         result["state"] = "REJECT_WICK"
         result["reason"] = reason
         return result
 
-    # ========================================================
-    # ✅ SEÑAL FINAL
-    # ========================================================
+    # CLASIFICACIÓN
+    if ai_score >= 85:
+        quality = "ALTA PRECISION 🔥"
+    elif ai_score >= 75:
+        quality = "BUENA"
+    else:
+        quality = "MEDIA"
 
+    # SEÑAL FINAL
     result["signal"] = "call" if direction == "BULLISH" else "put"
     result["valid"] = True
-    result["state"] = "CONTINUITY_OK"
-    result["reason"] = "flujo fuerte confirmado"
-    result["score"] = micro["score"]
+    result["state"] = "SNIPER_ENTRY"
+    result["reason"] = f"{quality} | score={ai_score}"
 
     return result
 
@@ -219,4 +267,4 @@ def signal(*args, **kwargs):
 
 
 if __name__ == "__main__":
-    print("🚀 strategy SNIPER CONTINUIDAD OK")
+    print("🚀 SNIPER IA ACTIVADO")
