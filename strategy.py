@@ -3,37 +3,11 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 import pandas as pd
 
-
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
-TREND_LOOKBACK = 15
-STRUCTURE_LOOKBACK = 20
-CONTINUITY_LOOKBACK = 6
-EXHAUSTION_LOOKBACK = 8
-SR_LOOKBACK = 20
-ATR_PERIOD = 14
-
-DOJI_BODY_RATIO = 0.10
-INDECISION_BODY_RATIO = 0.25
 MIN_CONTINUITY_BODY_RATIO = 0.40
-
-MAX_COUNTER_WICK_RATIO = 0.45
-MAX_CONFIRMATION_RANGE_ATR = 1.60
-MAX_CONFIRMATION_BODY_ATR = 1.20
-
-SR_TOLERANCE_ATR = 0.35
-
-LIVE_MICRO_MIN_CANDLES = 4
-LIVE_MICRO_STRONG_RATIO = 0.65
-
-MIN_STRUCTURE_SCORE = 8
-MIN_CONTINUITY_SCORE = 5
-MIN_FINAL_SCORE = 82
-
-MAX_SCORE = 100
-
 
 # ============================================================
 # UTILIDADES
@@ -101,67 +75,69 @@ def get_candle_data(candle):
         "body_ratio": body / rng if rng else 0,
         "upper_wick_ratio": (h - max(o, c)) / rng if rng else 0,
         "lower_wick_ratio": (min(o, c) - l) / rng if rng else 0,
-        "close_position": (c - l) / rng if rng else 0.5,
     }
 
-
 # ============================================================
-# ATR
-# ============================================================
-
-def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
-    df = safe_dataframe(df)
-    if len(df) < 2:
-        return 0.0
-
-    prev = df["close"].shift(1)
-
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev).abs(),
-        (df["low"] - prev).abs()
-    ], axis=1).max(axis=1)
-
-    atr = tr.rolling(min(period, len(df)), min_periods=2).mean().iloc[-1]
-
-    return float(atr) if not pd.isna(atr) else 0.0
-
-
-# ============================================================
-# 🔴 FILTRO ZONA REVERSIÓN / AGOTAMIENTO
+# 🔥 MICRO CONTINUIDAD (CLAVE DEL BOT)
 # ============================================================
 
-def zone_filter(df: pd.DataFrame, direction: str) -> Dict[str, Any]:
-    df = safe_dataframe(df)
-    result = {"blocked": False, "reason": "", "penalty": 0}
+def analyze_micro_continuity(candles_5s, direction):
+    if not candles_5s or len(candles_5s) < 6:
+        return {"valid": False, "score": 0, "reason": "pocas velas 5s"}
 
-    if len(df) < 6:
-        return result
+    data = [get_candle_data(c) for c in candles_5s[:6]]
+    data = [d for d in data if d]
 
-    last = get_candle_data(df.iloc[-1])
-    atr = calculate_atr(df.tail(14))
+    if len(data) < 6:
+        return {"valid": False, "score": 0, "reason": "datos incompletos"}
 
-    if last is None or atr == 0:
-        return result
+    same_color = 0
+    strong_body = 0
+    progression = 0
 
-    # REVERSIÓN
-    if direction == "BULLISH":
-        if last["upper_wick_ratio"] > 0.55 and last["body_ratio"] < 0.35:
-            return {"blocked": True, "reason": "reversión superior", "penalty": 20}
+    for i in range(len(data)):
+        c = data[i]
+        is_bull = c["close"] > c["open"]
 
-    if direction == "BEARISH":
-        if last["lower_wick_ratio"] > 0.55 and last["body_ratio"] < 0.35:
-            return {"blocked": True, "reason": "reversión inferior", "penalty": 20}
+        # color dominante
+        if (direction == "BULLISH" and is_bull) or (direction == "BEARISH" and not is_bull):
+            same_color += 1
 
-    # AGOTAMIENTO
-    if last["body"] > atr * 1.4:
-        return {"blocked": True, "reason": "impulso agotado", "penalty": 25}
+        # cuerpo fuerte
+        if c["body_ratio"] > MIN_CONTINUITY_BODY_RATIO:
+            strong_body += 1
 
-    return result
+        # progresión real
+        if i > 0:
+            prev = data[i - 1]
+            if direction == "BULLISH" and c["close"] > prev["close"]:
+                progression += 1
+            if direction == "BEARISH" and c["close"] < prev["close"]:
+                progression += 1
 
+    if same_color >= 4 and strong_body >= 3 and progression >= 3:
+        return {"valid": True, "score": same_color + strong_body + progression, "reason": "continuidad fuerte"}
+
+    return {"valid": False, "score": 0, "reason": "sin continuidad limpia"}
 
 # ============================================================
-# ANALISIS PRINCIPAL
+# 🔴 FILTRO ANTIRETROCESO
+# ============================================================
+
+def wick_filter(candle_data, direction):
+    if candle_data is None:
+        return False, "sin datos"
+
+    if direction == "BULLISH" and candle_data["lower_wick_ratio"] > 0.4:
+        return False, "retroceso fuerte"
+
+    if direction == "BEARISH" and candle_data["upper_wick_ratio"] > 0.4:
+        return False, "retroceso fuerte"
+
+    return True, ""
+
+# ============================================================
+# 🧠 ANALISIS PRINCIPAL
 # ============================================================
 
 def analyze_market(candle_1m, candles_5s=None, previous_m1=None):
@@ -182,30 +158,48 @@ def analyze_market(candle_1m, candles_5s=None, previous_m1=None):
     if len(hist) < 6:
         return result
 
+    # ========================================================
+    # DIRECCIÓN REAL (M1)
+    # ========================================================
+
     direction = "BULLISH" if hist["close"].iloc[-1] > hist["close"].iloc[0] else "BEARISH"
     result["direction"] = direction
 
-    # 🔴 FILTRO NUEVO
-    zone = zone_filter(hist, direction)
-    if zone["blocked"]:
-        result["state"] = "ZONE_BLOCKED"
-        result["reason"] = zone["reason"]
+    # ========================================================
+    # 🔥 MICRO CONTINUIDAD (LO MÁS IMPORTANTE)
+    # ========================================================
+
+    micro = analyze_micro_continuity(candles_5s, direction)
+
+    if not micro["valid"]:
+        result["state"] = "NO_CONTINUITY"
+        result["reason"] = micro["reason"]
         return result
 
     # ========================================================
-    # SEÑAL FINAL (SIN CAMBIAR LÓGICA BASE)
+    # 🔴 FILTRO DE RETROCESO
+    # ========================================================
+
+    valid_wick, reason = wick_filter(current, direction)
+    if not valid_wick:
+        result["state"] = "REJECT_WICK"
+        result["reason"] = reason
+        return result
+
+    # ========================================================
+    # ✅ SEÑAL FINAL
     # ========================================================
 
     result["signal"] = "call" if direction == "BULLISH" else "put"
     result["valid"] = True
     result["state"] = "CONTINUITY_OK"
-    result["reason"] = "entrada permitida (zona limpia)"
+    result["reason"] = "flujo fuerte confirmado"
+    result["score"] = micro["score"]
 
     return result
 
-
 # ============================================================
-# 🔴 FIX IMPORT BOT.PY
+# FIX BOT
 # ============================================================
 
 def analyze_live_candle(candle_1m, candles_5s=None, previous_m1=None):
@@ -225,4 +219,4 @@ def signal(*args, **kwargs):
 
 
 if __name__ == "__main__":
-    print("strategy.py OK")
+    print("🚀 strategy SNIPER CONTINUIDAD OK")
